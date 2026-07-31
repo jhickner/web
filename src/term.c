@@ -274,6 +274,112 @@ int term_read(Term *t) {
     }
 }
 
+// Reads 1-4 hex digits and scales to 0-255, so rgb:f/f/f and rgb:ffff/../..
+// both work. Returns digits consumed.
+static int hex_component(const char *s, uint8_t *out) {
+    unsigned v = 0;
+    int n = 0;
+    while (n < 4) {
+        char c = s[n];
+        unsigned d;
+        if (c >= '0' && c <= '9') d = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = (unsigned)(c - 'A' + 10);
+        else break;
+        v = v * 16 + d;
+        n++;
+    }
+    if (n == 0) return 0;
+    unsigned max = (1u << (4 * n)) - 1u;
+    *out = (uint8_t)((v * 255 + max / 2) / max);
+    return n;
+}
+
+static bool parse_rgb(const char *s, uint8_t out[3]) {
+    if (strncmp(s, "rgb:", 4) != 0) return false;
+    s += 4;
+    for (int i = 0; i < 3; i++) {
+        int n = hex_component(s, &out[i]);
+        if (n == 0) return false;
+        s += n;
+        if (i < 2) {
+            if (*s != '/') return false;
+            s++;
+        }
+    }
+    return true;
+}
+
+// Ask the terminal what it is drawing with. tmux answers these itself, out of
+// its own idea of the palette rather than the terminal's, which is how a themed
+// background gets reported as black; wrapped, the query is opaque to tmux and
+// only the terminal replies. Anything else that arrives while the answer is on
+// its way is kept - those are keystrokes.
+int term_theme(Term *t, Theme *th) {
+    theme_fallback(th);
+
+    static const char q[] = "\x1b]10;?\x1b\\\x1b]11;?\x1b\\";
+    if (getenv("TMUX")) {
+        char w[64];
+        size_t o = 0;
+        memcpy(w, "\x1bPtmux;", 7);
+        o = 7;
+        for (size_t i = 0; i < sizeof q - 1; i++) {
+            if (q[i] == 0x1b) w[o++] = 0x1b;    // the payload's own ESCs double
+            w[o++] = q[i];
+        }
+        memcpy(w + o, "\x1b\\", 2);
+        o += 2;
+        writeall(t->fd, w, o);
+    } else {
+        writeall(t->fd, q, sizeof q - 1);
+    }
+
+    char buf[512];
+    size_t n = 0;
+    int seen = 0;
+    double deadline = now_sec() + 0.15;
+    while (n < sizeof buf - 1 && seen < 2) {
+        double left = deadline - now_sec();
+        if (left <= 0) break;
+        struct pollfd p = {t->fd, POLLIN, 0};
+        if (poll(&p, 1, (int)(left * 1000) + 1) <= 0) break;
+        ssize_t r = read(t->fd, buf + n, sizeof buf - 1 - n);
+        if (r <= 0) continue;
+        n += (size_t)r;
+        buf[n] = 0;
+        seen = 0;
+        for (const char *c = buf; (c = strstr(c, "rgb:")) != NULL; c++) seen++;
+    }
+    buf[n] = 0;
+
+    int found = 0;
+    size_t i = 0, keep = 0;
+    while (i < n) {
+        if (buf[i] != 0x1b || i + 1 >= n || buf[i + 1] != ']') { i++; continue; }
+        size_t e = i + 2;
+        while (e < n && buf[e] != 0x07 &&
+               !(buf[e] == 0x1b && e + 1 < n && buf[e + 1] == '\\')) e++;
+        if (e >= n) break;                      // still arriving; leave it alone
+        uint8_t rgb[3];
+        uint8_t *dst = NULL;
+        if (!strncmp(buf + i + 2, "10;", 3) && parse_rgb(buf + i + 5, rgb))
+            dst = th->fg;
+        else if (!strncmp(buf + i + 2, "11;", 3) && parse_rgb(buf + i + 5, rgb))
+            dst = th->bg;
+        if (!dst) { i = e + 1; continue; }
+        memcpy(dst, rgb, 3);
+        found++;
+        buf_add(&t->in, buf + keep, i - keep);
+        keep = i = buf[e] == 0x07 ? e + 1 : e + 2;
+    }
+    buf_add(&t->in, buf + keep, n - keep);
+
+    if (!found) return -1;
+    th->from_terminal = true;
+    return 0;
+}
+
 static int mods_from_param(int p) {
     if (p <= 1) return 0;
     int m = p - 1;

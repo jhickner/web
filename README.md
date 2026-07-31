@@ -36,6 +36,7 @@ set -g allow-passthrough all
 | `^G` | frame size, write time, and throughput |
 | `^S` | hide or show the status line |
 | `^Q` | quit |
+| `F8` | cycle recolor mode |
 | `alt+0` | reset zoom |
 | `alt+f` | fit-to-width on/off |
 | `cmd+c` | copy the page selection (needs one line of terminal config, below) |
@@ -144,6 +145,8 @@ trade every keyboard-driven browser has to make somewhere.
 --full      take over the whole terminal instead of drawing a window
 --show      also open a real Chrome window, for debugging
 --mute      start with the page's audio switched off
+--recolor M map the page onto your terminal's colours: off, hue, duotone, tint
+--recolor-strength F   how far towards it, 0..1 (default 1)
 --login     open a window to sign in with, on the same profile
 --keep      leave Chrome running on exit so the next start is instant
 ```
@@ -207,6 +210,38 @@ scroll sideways; `alt+0` resets to 100%.
 Set `WEB_CHROME` to use a different Chrome build, and `WEB_CELL=WxH` if the
 page aspect looks stretched — inside tmux the terminal reports no pixel
 geometry, so the cell size is a guess (8x17 by default).
+
+## Terminal colours
+
+`--recolor` maps the page onto the colours your terminal is already drawing
+with, so a page sits in the window like the rest of the session rather than
+glaring out of it. The terminal is asked for its foreground and background over
+OSC 10 and 11 the first time anything needs them, and colours are matched
+perceptually in Oklab.
+
+| Mode | Result |
+|---|---|
+| `hue` | Text and page furniture ride the terminal's ramp; anything actually coloured keeps its colour |
+| `duotone` | The whole page runs from the terminal's background to its foreground |
+| `tint` | Everything collapses to tones of the background colour, shading intact |
+
+`--recolor-strength` blends the result back towards the original, and `F8`
+cycles the modes while you read. Both are remembered in `~/.config/web/state`.
+
+The ramp runs from the background *up* to the foreground, so a light page comes
+out light — in your palette, but light. Any recolor mode therefore also asks
+pages for `prefers-color-scheme: dark` when the terminal is dark, which is what
+puts a page that has a dark theme of its own the right way up before the
+mapping runs.
+
+Chrome does the work: the mapping is an SVG filter injected into the page, so
+it costs one more step in a composite the browser was doing anyway. Recolouring
+the frames on the way out instead would mean decoding and re-encoding a PNG for
+every frame of a live screencast.
+
+`tint` borrows only the background's *hue*, not its saturation: terminal
+backgrounds are nearly neutral, and a literal reading of one would be
+invisible. A background with no hue at all can only give greyscale.
 
 ## How it works
 
