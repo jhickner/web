@@ -291,6 +291,10 @@ static void status_sync(App *a) {
     a->status_open = want;
     a->status_last.len = 0;
     kitty_clear(&a->kitty);          // the row it lived on changes hands
+    // Inline, the page itself is not resized by this, so the frame that comes
+    // back is the one already on screen - and a duplicate is normally dropped,
+    // which would leave the block empty for as long as the page sits still.
+    a->last_hash = 0;
     if (a->inline_mode)
         term_resize_inline(&a->term, a->box_rows + (want ? 1 : 0));
     else
