@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -61,6 +62,8 @@ typedef struct {
     bool    inline_mode;       // a block in the shell's flow, like rom
     int     want_rows;         // rows for that block, 0 = pick one
     int     status_row;
+    bool    hide_status;       // the status line is not wanted, ^S
+    bool    status_open;       // whether it is on screen right now
 
     bool    insert;            // a text field has focus: keys belong to the page
     bool    pending_g;         // first half of gg
@@ -85,6 +88,7 @@ typedef struct {
     char    ua[512];           // chrome's own user agent, headless marker gone
     bool    ua_patch_req;      // this browser predates the flag and needs fixing
     bool    mute;              // start chrome with its audio switched off
+    bool    clear_exit;        // erase the inline block on the way out
     bool    keep;              // leave chrome running so the next start adopts it
     Buf     status, status_last;
 } App;
@@ -197,10 +201,11 @@ static void relayout(App *a) {
     Term *t = &a->term;
     term_size(t);
 
+    int status = a->status_open ? 1 : 0;
     int rect_cols;
     if (a->inline_mode) {
         // The terminal may have shrunk under the box since it was last sized.
-        int max_rows = t->rows - 1;
+        int max_rows = t->rows - status;
         if (a->box_rows > max_rows) a->box_rows = max_rows;
         if (a->box_rows < 2) a->box_rows = 2;
         a->img_rows = a->box_rows;
@@ -209,13 +214,13 @@ static void relayout(App *a) {
         // whose last row falls past the bottom scrolls the terminal as it is
         // drawn, which lands half the picture at the top and half at the
         // bottom - and the halves never line back up.
-        if (t->inline_origin + a->img_rows > t->rows)
-            t->inline_origin = t->rows - a->img_rows;
+        if (t->inline_origin + a->img_rows + status - 1 > t->rows)
+            t->inline_origin = t->rows - a->img_rows - status + 1;
         if (t->inline_origin < 1) t->inline_origin = 1;
         kitty_set_rect(&a->kitty, 1, t->inline_origin, rect_cols, a->img_rows);
         a->status_row = t->inline_origin + a->img_rows;
     } else {
-        a->img_rows = t->rows - 1;
+        a->img_rows = t->rows - status;
         if (a->img_rows < 1) a->img_rows = 1;
         rect_cols = t->cols;
         kitty_set_rect(&a->kitty, 1, 1, rect_cols, a->img_rows);
@@ -279,10 +284,31 @@ static void relayout(App *a) {
 
 // ------------------------------------------------------------------ status
 
+// The address bar and the find prompt are drawn on the status line, so a line
+// that has been hidden comes back for as long as one of them is open.
+static void status_sync(App *a) {
+    bool want = !a->hide_status || a->editing;
+    if (want == a->status_open) return;
+    a->status_open = want;
+    a->status_last.len = 0;
+    kitty_clear(&a->kitty);          // the row it lived on changes hands
+    // Inline, the page itself is not resized by this, so the frame that comes
+    // back is the one already on screen - and a duplicate is normally dropped,
+    // which would leave the block empty for as long as the page sits still.
+    a->last_hash = 0;
+    if (a->inline_mode)
+        term_resize_inline(&a->term, a->box_rows + (want ? 1 : 0));
+    else
+        writeall(a->term.fd, "\x1b[2J", 4);
+    relayout(a);
+}
+
 // Called after every input batch and every frame, so it keeps its buffer and
 // stays quiet when the line has not changed: an unnecessary repaint here lands
 // in the middle of a stream of image data.
 static void draw_status(App *a) {
+    status_sync(a);
+    if (!a->status_open) return;
     Term *t = &a->term;
     Buf b = a->status;
     b.len = 0;
@@ -390,25 +416,64 @@ static bool special_key(App *a, int key, int mods) {
     }
 }
 
+// Something that names a file on disk becomes a file:// URL. A name is only
+// taken as a path if it resolves to something that exists, so a host that looks
+// like one - example.com, or a bare word - is left alone unless there really is
+// a file of that name here, in which case the file is what was meant.
+static bool file_url(const char *raw, char *out, size_t cap) {
+    if (!raw || !*raw) return false;
+    if (strstr(raw, "://") || !strncmp(raw, "about:", 6)) return false;
+
+    char path[PATH_MAX];
+    if (raw[0] == '~' && (raw[1] == '/' || raw[1] == 0)) {
+        const char *home = getenv("HOME");
+        if (!home || !*home) return false;
+        snprintf(path, sizeof path, "%s%s", home, raw + 1);
+    } else {
+        snprintf(path, sizeof path, "%s", raw);
+    }
+
+    // Also the existence test: there is nothing to resolve a path against
+    // unless every part of it is really there.
+    char real[PATH_MAX];
+    if (!realpath(path, real)) return false;
+
+    size_t o = 0;
+    o += (size_t)snprintf(out, cap, "file://");
+    for (const unsigned char *s = (const unsigned char *)real; *s; s++) {
+        if (o + 4 >= cap) return false;
+        if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+            (*s >= '0' && *s <= '9') || strchr("-_.~/", *s))
+            out[o++] = (char)*s;
+        else
+            o += (size_t)snprintf(out + o, cap - o, "%%%02X", *s);
+    }
+    out[o] = 0;
+    return true;
+}
+
 static void navigate(App *a, const char *raw) {
     char url[1100];
     if (strstr(raw, "://") || strncmp(raw, "about:", 6) == 0) {
         snprintf(url, sizeof url, "%s", raw);
-    } else if (strchr(raw, ' ') || !strchr(raw, '.')) {
-        char q[1024];
-        size_t o = 0;
-        for (const unsigned char *s = (const unsigned char *)raw; *s && o < sizeof q - 4; s++) {
-            if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
-                (*s >= '0' && *s <= '9') || strchr("-_.~", *s)) {
-                q[o++] = (char)*s;
-            } else {
-                o += (size_t)snprintf(q + o, sizeof q - o, "%%%02X", *s);
+    } else if (!file_url(raw, url, sizeof url)) {
+        if (strchr(raw, ' ') || !strchr(raw, '.')) {
+            char q[1024];
+            size_t o = 0;
+            for (const unsigned char *s = (const unsigned char *)raw;
+                 *s && o < sizeof q - 4; s++) {
+                if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+                    (*s >= '0' && *s <= '9') || strchr("-_.~", *s)) {
+                    q[o++] = (char)*s;
+                } else {
+                    o += (size_t)snprintf(q + o, sizeof q - o, "%%%02X", *s);
+                }
             }
+            q[o] = 0;
+            snprintf(url, sizeof url, "https://duckduckgo.com/?q=%s", q);
+        } else {
+            snprintf(url, sizeof url, "https://%s", raw);
         }
-        q[o] = 0;
-        snprintf(url, sizeof url, "https://duckduckgo.com/?q=%s", q);
-    } else {
-        snprintf(url, sizeof url, "https://%s", raw);
     }
 
     char esc[2200];
@@ -427,10 +492,11 @@ static void request_fit(App *a) {
         "document.body?document.body.scrollWidth:0)\",\"returnByValue\":true");
 }
 
-// What is worth outliving the process: the zoom, which belongs to the terminal
-// it is being read in rather than to any page, and the user agent, which has to
-// be known before Chrome starts and can only be learned from a Chrome already
-// running. Both are keyed to nothing - one browser, one terminal, one file.
+// What is worth outliving the process: the zoom and the height of the inline
+// window, which belong to the terminal they are being read in rather than to
+// any page, and the user agent, which has to be known before Chrome starts and
+// can only be learned from a Chrome already running. All of it is keyed to
+// nothing - one browser, one terminal, one file.
 static void state_path(char *out, size_t cap) {
     const char *cfg = getenv("XDG_CONFIG_HOME");
     const char *home = getenv("HOME");
@@ -450,6 +516,9 @@ static void load_state(App *a) {
         if (!strncmp(line, "zoom=", 5)) {
             double z = atof(line + 5);
             if (z >= 0.4 && z <= 4.0) a->zoom = z;
+        } else if (!strncmp(line, "rows=", 5)) {
+            int r = atoi(line + 5);
+            if (r >= 2 && r <= 500) a->want_rows = r;
         } else if (!strncmp(line, "ua=", 3) && line[3]) {
             snprintf(a->ua, sizeof a->ua, "%s", line + 3);
         }
@@ -465,6 +534,10 @@ static void save_state(App *a) {
     FILE *f = fopen(path, "w");
     if (!f) return;
     fprintf(f, "zoom=%.4f\n", a->zoom);
+    // --full has no window of its own, so it carries whatever was stored for
+    // the inline one through rather than dropping it.
+    int rows = a->box_rows > 0 ? a->box_rows : a->want_rows;
+    if (rows > 0) fprintf(f, "rows=%d\n", rows);
     if (a->ua[0]) fprintf(f, "ua=%s\n", a->ua);
     fclose(f);
 }
@@ -503,16 +576,18 @@ static void cycle_width(App *a, int step) {
 // would be told about a dragged window corner: the box sets the cell rect, the
 // cell rect sets the viewport, and the layout follows from there.
 static void resize_box(App *a, int delta) {
+    int status = a->status_open ? 1 : 0;
     int want = a->box_rows + delta;
     if (want < 2) want = 2;
-    if (want > a->term.rows - 1) want = a->term.rows - 1;
+    if (want > a->term.rows - status) want = a->term.rows - status;
     if (want == a->box_rows) return;
 
     a->box_rows = want;
     kitty_clear(&a->kitty);            // the rows underneath are about to move
-    term_resize_inline(&a->term, want + 1);   // the status line lives below it
+    term_resize_inline(&a->term, want + status);   // the status line sits below
     a->status_last.len = 0;
     relayout(a);
+    save_state(a);
 
     char m[64];
     snprintf(m, sizeof m, "window %dx%d", a->css_w, a->css_h);
@@ -739,6 +814,9 @@ static void handle_key(App *a, Event *ev) {
             return;
         case 'g':
             a->show_stats = !a->show_stats;
+            return;
+        case 's':
+            a->hide_status = !a->hide_status;
             return;
         case 'y': copy_selection(a); return;
         case 'r':
@@ -1010,6 +1088,8 @@ static void usage(void) {
         "  --zoom F    page magnification (default 1.0)\n"
         "  --full      take over the whole terminal instead of drawing a window\n"
         "  --rows N    how many cell rows the window gets\n"
+        "  --no-status start with the status line hidden (^S toggles it)\n"
+        "  --clear     erase the window on exit instead of leaving it behind\n"
         "  --mute      start with the page's audio switched off\n"
         "  --login     open a window to sign in with, on the same profile\n"
         "  --keep      leave chrome running on exit so the next start is instant\n");
@@ -1020,7 +1100,7 @@ static void usage(void) {
 static void first_size(App *a, int *w, int *h) {
     int rows = a->inline_mode
         ? (a->want_rows > 0 ? a->want_rows : a->term.rows / 2)
-        : a->term.rows - 1;
+        : a->term.rows - (a->status_open ? 1 : 0);
     if (rows < 1) rows = 1;
     double z = a->zoom > 0 ? a->zoom : 1.0;
     *w = (int)(a->term.cols * a->term.cell_w / z);
@@ -1055,6 +1135,10 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--rows") && i + 1 < argc) {
             a.want_rows = atoi(argv[++i]);
             a.inline_mode = true;
+        } else if (!strcmp(argv[i], "--clear")) {
+            a.clear_exit = true;
+        } else if (!strcmp(argv[i], "--no-status")) {
+            a.hide_status = true;
         } else if (!strcmp(argv[i], "--show")) {
             show = true;
         } else if (!strcmp(argv[i], "--keep")) {
@@ -1070,11 +1154,12 @@ int main(int argc, char **argv) {
             start = argv[i];
         }
     }
+    a.status_open = !a.hide_status;
 
     char first[1200];
     if (strstr(start, "://") || !strncmp(start, "about:", 6))
         snprintf(first, sizeof first, "%s", start);
-    else
+    else if (!file_url(start, first, sizeof first))
         snprintf(first, sizeof first, "https://%s", start);
     snprintf(a.url, sizeof a.url, "%s", first);
 
@@ -1152,11 +1237,15 @@ int main(int argc, char **argv) {
 
     term_enter(&a.term, a.inline_mode);
     if (a.inline_mode) {
-        int rows = a.want_rows > 0 ? a.want_rows + 1 : a.term.rows / 2;
-        if (rows > a.term.rows) rows = a.term.rows;
+        int status = a.status_open ? 1 : 0;   // the row below the box, if shown
+        int rows = a.want_rows > 0 ? a.want_rows + status : a.term.rows / 2;
+        // A height remembered from a taller terminal, or asked for on the
+        // command line, comes back down to what this one has - and never takes
+        // the last row, which the shell gets its prompt back on.
+        if (rows > a.term.rows - 1) rows = a.term.rows - 1;
         if (rows < 4) rows = 4;
         term_reserve_inline(&a.term, rows);
-        a.box_rows = rows - 1;         // the row below the box is the status line
+        a.box_rows = rows - status;
     }
     g_app = &a;
     g_input_pump = pump_input;
@@ -1281,9 +1370,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!a.inline_mode) kitty_clear(&a.kitty);   // inline leaves the page behind
+    // Inline leaves the page behind unless it was asked not to.
+    if (!a.inline_mode || a.clear_exit) kitty_clear(&a.kitty);
     kitty_free(&a.kitty);
-    term_restore(&a.term);
+    term_restore(&a.term, a.clear_exit);
     buf_free(&a.status);
     buf_free(&a.status_last);
     // Most of a cold start is Chrome coming up. Left running, it holds the

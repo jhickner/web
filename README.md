@@ -34,6 +34,7 @@ set -g allow-passthrough all
 | `^R` | reload |
 | `^Y` | copy the page selection, or the address if nothing is selected |
 | `^G` | frame size, write time, and throughput |
+| `^S` | hide or show the status line |
 | `^Q` | quit |
 | `alt+0` | reset zoom |
 | `alt+f` | fit-to-width on/off |
@@ -61,8 +62,19 @@ While reading:
 Page up and down and tab always go to the page, as do all four arrows once the
 page has the keyboard.
 
-Zoom is remembered between runs, in `~/.config/web/state`. `--zoom` overrides it
-for one run without disturbing it.
+Local files open the same way, on the command line or in the address bar:
+`./web TODO.md`, `./web ~/notes/plan.html`. A name is only read as a path if it
+resolves to something that is really there, so `example.com` is still a site —
+unless there is a file called that next to you, which is then what you meant.
+
+Zoom and the height of the inline window are remembered between runs, in
+`~/.config/web/state`. `--zoom` and `--rows` override them for one run without
+disturbing them.
+
+`^S` hides the status line, and `--no-status` starts without it. The row is not
+left blank: `--full` gives it to the page, and the inline window simply becomes
+one row shorter. The address bar and the find prompt are drawn there, so opening
+either brings the line back until it is done with.
 
 ## Not headless, whatever the string says
 
@@ -127,6 +139,8 @@ trade every keyboard-driven browser has to make somewhere.
 --scale N   device pixel ratio (default 1; 2 is sharper but 4x the data)
 --zoom F    page magnification (default 1.0)
 --rows N    how many cell rows the window gets
+--no-status start with the status line hidden (^S toggles it)
+--clear     erase the window on exit instead of leaving it behind
 --full      take over the whole terminal instead of drawing a window
 --show      also open a real Chrome window, for debugging
 --mute      start with the page's audio switched off
@@ -147,7 +161,9 @@ command you ran — and draws there, leaving the shell's screen and scrollback
 intact. Whether that takes any scrolling depends on how far down the screen you
 were, which only the terminal knows, so it is asked rather than assumed.
 Quitting leaves the page behind: the placeholder cells are ordinary text, so the
-picture scrolls up with everything else and stays in your history.
+picture scrolls up with everything else and stays in your history. `--clear`
+takes it away instead — the block is erased and the prompt comes back on the row
+the command was run from, as though nothing had been drawn.
 
 ```sh
 ./web --rows 20 news.ycombinator.com
@@ -159,7 +175,8 @@ corner: the box sets the cell rect, the cell rect sets the viewport, and the
 layout follows. It keeps a 16:10 shape, struck in pixels rather than cells,
 which are not square. Growing scrolls the extra rows into view; shrinking keeps
 the top edge where it is and simply owns fewer rows, so the history above never
-moves. `alt+=` and `alt+-` still zoom either way.
+moves. The height you settle on is kept for the next run, and comes back down if
+that one is in a shorter terminal. `alt+=` and `alt+-` still zoom either way.
 
 `--full` gives up the window and takes the whole terminal on the alternate
 screen instead, restoring it on the way out. There is no box to resize there, so
