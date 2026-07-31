@@ -379,7 +379,9 @@ int term_next(Term *t, Event *ev) {
             ev->my = y;
             ev->motion = (code & 32) != 0;
             if (code & 64) {
-                ev->button = (code & 3) == 0 ? 3 : 4;   // wheel up / down
+                // Buttons 4 to 7 are the wheel, and the last two of them are
+                // its horizontal pair rather than more of the vertical one.
+                ev->button = 3 + (code & 3);
             } else {
                 ev->button = code & 3;
             }
