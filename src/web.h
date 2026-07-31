@@ -61,6 +61,7 @@ typedef struct {
     pid_t pid;
     int   port;
     bool  adopted;      // took over a browser left behind by an earlier run
+    bool  foreign;      // attached to one we never started: leave it running
     char  profile[512];
     WS    ws;
     int   next_id;
@@ -68,10 +69,14 @@ typedef struct {
 
 // debug=false leaves out the remote-debugging port entirely: a browser that
 // can be driven over CDP can also have its credentials read that way, and
-// Google refuses to sign anyone in to one.
+// Google refuses to sign anyone in to one. port 0 lets Chrome pick a free one.
 int  chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
-                   bool mute, const char *user_agent, bool debug);
+                   bool mute, const char *user_agent, bool debug, int port);
 int  chrome_attach(Chrome *c);
+
+// 0 when a devtools endpoint answers there, so a port can be checked before
+// anything is given up for it.
+int  chrome_probe(int port);
 int  chrome_user_agent(Chrome *c, char *out, size_t cap);
 void chrome_kill(Chrome *c);
 
@@ -93,6 +98,7 @@ void kitty_init(Kitty *k, int ttyfd, bool tmux);
 void kitty_set_rect(Kitty *k, int x, int y, int cols, int rows);
 int  kitty_draw_png(Kitty *k, const char *b64, size_t len);
 void kitty_clear(Kitty *k);
+void kitty_abort(Kitty *k);    // close an escape a dropped frame left open
 void kitty_free(Kitty *k);
 
 // ---------------------------------------------------------------- recolor
@@ -127,7 +133,7 @@ enum {
 
 enum { MOD_SHIFT = 1, MOD_ALT = 2, MOD_CTRL = 4, MOD_SUPER = 8 };
 
-typedef enum { EV_NONE, EV_KEY, EV_MOUSE, EV_PASTE, EV_EOF } EvType;
+typedef enum { EV_NONE, EV_KEY, EV_MOUSE, EV_PASTE, EV_FOCUS, EV_EOF } EvType;
 
 typedef struct {
     EvType type;
@@ -170,6 +176,10 @@ int  term_next(Term *t, Event *ev);       // 1 = event decoded
 extern volatile sig_atomic_t g_resized;
 extern volatile sig_atomic_t g_quit;
 
+// Set once the shutdown is writing rather than drawing: from then on a write
+// waits for a terminal that is not draining instead of giving up on it.
+extern volatile sig_atomic_t g_write_force;
+
 // Called from inside long tty writes so a keypress is still noticed while a
 // frame is being pushed out. A full frame can occupy the terminal for a while,
 // and a quit that waits for it to finish reads as a hang.
@@ -193,7 +203,8 @@ typedef struct {
 // What an outstanding CDP call was for. Replies carry only the id they were
 // issued with, so the kind has to be remembered alongside it.
 enum {
-    RQ_NONE, RQ_TITLE, RQ_COPY, RQ_FIT, RQ_RECOLOR, RQ_SCRIPT, RQ_SELECTOR
+    RQ_NONE, RQ_TITLE, RQ_URL, RQ_COPY, RQ_FIT, RQ_RECOLOR, RQ_SCRIPT,
+    RQ_SELECTOR, RQ_RECORD
 };
 
 #define REQ_MAX 8
@@ -227,6 +238,7 @@ typedef struct {
     int      px, py;        // where it said to click, in CSS pixels
 
     int      state;
+    bool     acting;        // a line is being dispatched right now
     double   deadline;      // give up on the whole command here
     double   next_at;       // re-probe, or the settle expires
     unsigned nav_seq;       // load_seq when a navigation verb started
@@ -279,6 +291,11 @@ typedef struct {
     bool    hide_status;       // the status line is not wanted, ^S
     bool    status_open;       // whether it is on screen right now
 
+    bool    pause_on_blur;     // stop drawing while the terminal is not focused
+    bool    pause_cfg;         // what the config file said, which is what it keeps
+    bool    paused;            // and whether that has happened
+    int     blur_cpu_rate;     // how hard the renderer is throttled while it is
+
     bool    insert;            // a text field has focus: keys belong to the page
     bool    mouse_down;        // a button went down on the page and is still held
     bool    pending_g;         // first half of gg
@@ -324,6 +341,18 @@ typedef struct {
     bool    repl_open;         // drawn below the page
     bool    repl_focus;        // and holding the keyboard
     bool    selector_pick;     // clicks report selectors instead of reaching the page
+
+    // Codegen: what is being done to the page, written out as the commands
+    // that would do it again.
+    bool    recording;
+    int     record_fd;             // --record=FILE, or -1 for stdout and the pane
+    char    record_script_id[32];  // the document-start recorder now installed
+    int     record_scroll;         // notches waiting to go out as one step
+    double  record_scroll_at;      // when the last of them arrived
+    double  record_scroll_from;    // and when the burst started
+    double  record_last_at;        // when the last line was written down
+    double  record_load_at;        // when the page that is up now finished
+    bool    record_navigated;      // and whether that was since the last line
     int     repl_rows;         // how many rows it occupies
     int     repl_row;          // 1-based row it starts on
     Buf     repl_buf, repl_last;
@@ -338,6 +367,17 @@ int  app_req_take(App *a, int id);
 int  app_cdp(App *a, const char *method, const char *fmt, ...);
 
 void notify(App *a, const char *s);
+
+// Move the session onto a browser listening on `port`, whoever started it, and
+// write what happened into msg. 0 = attached.
+int  app_attach(App *a, int port, char *msg, size_t cap);
+
+// Recording. mode: 1 on, 0 off, -1 toggle. record_line writes one command out
+// the way script values go out; record_tick lets a held-back scroll expire.
+void record_set(App *a, int mode);
+void record_line(App *a, const char *fmt, ...);
+void record_tick(App *a);
+
 void navigate(App *a, const char *raw);
 void run_js(App *a, const char *js);
 void relayout(App *a);
@@ -383,6 +423,7 @@ bool repl_pane_key(App *a, Event *ev);  // true when the pane consumed it
 bool repl_pane_mouse(App *a, Event *ev);// transcript wheel/click handling
 void repl_pane_paint(App *a);
 void repl_pane_log(App *a, const char *line);
+void repl_pane_history_add(App *a, const char *line);
 void repl_pane_help(App *a);
 
 #endif

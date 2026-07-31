@@ -33,7 +33,7 @@ set -g allow-passthrough all
 | `^O` / `^P` | back / forward |
 | `^R` | reload |
 | `^Y` | copy the page selection, or the address if nothing is selected |
-| `^G` | frame size, write time, and throughput |
+| `^G` | devtools port, frame size, write time, and throughput |
 | `^S` | hide or show the status line |
 | `^Q` | quit |
 | `F8` | cycle recolor mode |
@@ -41,7 +41,7 @@ set -g allow-passthrough all
 | `alt+f` | fit-to-width on/off |
 | `cmd+c` | copy the page selection (needs one line of terminal config, below) |
 | `cmd+v` | paste into the page, or into the address bar when it is open |
-| `^X` | open the command pane |
+| `^X` | open or close the command pane |
 | mouse | click, drag to select, wheel to scroll |
 
 While reading:
@@ -73,6 +73,36 @@ unless there is a file called that next to you, which is then what you meant.
 Zoom and the height of the inline window are remembered between runs, in
 `~/.config/web/state`. `--zoom` and `--rows` override them for one run without
 disturbing them.
+
+## When nobody is looking
+
+Every frame costs a PNG out of Chrome and a base64 write across the terminal,
+and both are wasted on a pane that is not on screen. So `web` asks the terminal
+to report focus, and stops the screencast when it goes away — the picture comes
+straight back, redrawn, when the focus does.
+
+Not drawing is only half of it. The page goes on animating into a screencast
+nobody is reading, and on anything with a `requestAnimationFrame` loop behind it
+that is the whole cost — with no real GPU under `--headless`, the rasterising is
+software, and it lands on the CPU. So the renderer is throttled at the same
+time, twentyfold by default, which slows what it asks for and takes the raster
+behind it with it.
+
+The page is not frozen, though. Timers and sockets keep going, audio is decoded
+off the throttled thread, and a video you switched away from to keep listening
+to keeps playing. If a heavy player does stutter, `blur_cpu_rate=1` in
+`~/.config/web/state` keeps the picture pause and drops the throttle; higher
+numbers throttle harder.
+
+It needs the terminal to report focus, and inside tmux that means one line:
+
+```sh
+set -g focus-events on
+```
+
+Without it nothing is reported, and `web` simply draws all the time, as before.
+`pause_on_blur=0` in `~/.config/web/state` turns it off for good; `--no-pause`
+turns it off for one run, and leaves the file alone.
 
 `^S` hides the status line, and `--no-status` starts without it. The row is not
 left blank: `--full` gives it to the page, and the inline window simply becomes
@@ -156,7 +186,14 @@ trade every keyboard-driven browser has to make somewhere.
 --recolor-strength F   how far towards it, 0..1 (default 1)
 --login     open a window to sign in with, on the same profile
 --keep      leave Chrome running on exit so the next start is instant
+--port N    fix Chrome's devtools port instead of letting it pick one
+--no-pause  keep drawing while the terminal is not focused
+--record[=F] write what you do to the page out as commands
+--replay F  run a recording back; `-` reads stdin
 ```
+
+With no address `web` starts blank, so a session can begin from nothing —
+which is where a recording usually wants to start.
 
 Most of a start is Chrome coming up: about half a second, against thirty
 milliseconds for everything else. `--keep` leaves the browser holding the
@@ -206,6 +243,8 @@ and the process exits non-zero, so a script fails like any other program.
 | `echo TEXT` | a literal line |
 | `help` | list every command in the command pane |
 | `pick` | toggle click-to-copy selectors |
+| `record on` \| `off` | echo what you do as commands |
+| `attach N` | drive the Chrome on devtools port N instead |
 | `stop` | throw away whatever is queued |
 
 `--delay MS` slows the run down to watch it, and `--step` waits for a key
@@ -241,9 +280,11 @@ click leaves - and those are what make the run visible in the picture.
 
 ### The command pane
 
-`:` while reading, or `^X` at any time, opens a line editor under the page.
-It has history, `^R` search, emacs kill bindings and a completion dropdown:
-type `/` to see every verb with its help. `esc` hands the keyboard back.
+`:` while reading, or `^X` at any time, opens a line editor under the page —
+and either one puts it away again. It has history, `^R` search, emacs kill
+bindings and a completion dropdown: type `/` to see every verb with its help.
+`esc` is the narrower move, handing the keyboard back with the pane still up —
+as does clicking the page, so a click into a form field can be typed into.
 
 Lines typed there join the same queue a script uses, so one can be dropped in
 behind a run already in progress and it simply happens in turn. `stop` clears
@@ -254,6 +295,121 @@ off: while it is on, clicking the page writes a readable `role=...` selector
 (or a unique CSS selector) to the pane instead of activating the element.
 Use Shift+Enter for another input line, Page Up/Page Down or the mouse wheel to
 scroll the transcript, and Enter to run the whole multiline command.
+
+### Recording what you do
+
+The command language read backwards: browse by hand and `web` writes down the
+commands that would do it again. `--record` starts a session recording, and
+`record on` / `record off` turns it on and off from the pane at any point.
+
+```sh
+./web --record=flow.web            # starts blank; browse, then ^Q
+./web --record=flow.web example.com
+./web --replay flow.web            # and watch it happen again
+```
+
+The file comes attached to the flag rather than after it, so `web --record
+example.com` stays a recording *of* example.com. Without one, recorded lines go
+where script values go — to stdout when that is not the terminal the page is on,
+and into the pane when it is — so `./web --record > flow.web` works too.
+
+`--replay` runs one back — `--script` under the name that pairs with `--record`;
+`--delay MS` and `--step` slow it to a watchable pace.
+
+A script does not exit the moment its last command returns. The last thing a
+recording does is usually the thing worth seeing, and leaving on the load event
+means leaving before the frame carrying it has been drawn. So the exit waits for
+the page to settle: nothing loading, and no frame that differs from the one on
+screen for half a second. That is capped at three, because a page with something
+animating on it never goes quiet at all. Nothing is timed against the clock, so
+a slow page gets what it needs and a quick one is not held up.
+
+To *assert* an outcome rather than wait for one, say what it should be —
+`wait-for "Bad login"` fails the replay if that text never turns up, and it is
+the line to add by hand when a recording is meant to be a test. Recorded lines also
+land in the pane's transcript and history even while it is closed, so `^X` after
+a session shows what was written down, and the up arrow brings a line back to
+edit and run again.
+
+```
+goto file:///tmp/signin.html
+wait-for "role=link[name=Sign in]"
+click "role=link[name=Sign in]"
+wait-for "#q"
+fill "#q" hello
+press Enter
+wait 4400
+scroll 183
+```
+
+What gets written down:
+
+- **clicks**, as the selector the picker would have given you. A click into a
+  text field is not one: `fill` focuses the field itself, so recording both
+  would click it twice.
+- **edits**, as one `fill` at the end of the edit rather than a `type` per
+  keystroke. The pending edit goes out before any `press`, because the Enter
+  that submits a form arrives before the form has gone anywhere.
+- **keys** that are not typing — `press Enter`, `press Tab`, `press ctrl+a`.
+- **addresses you asked for**, from the address bar or `goto`, plus `back`,
+  `forward` and `reload`. A page the site moves to on its own is not recorded:
+  it is already the consequence of the click above it, and writing it down
+  would make the replay jump straight there without ever doing the click.
+- **scrolls**, added up per burst — a wheel is a stream of notches, and a line
+  per notch is not a recording of anything.
+- **pauses**, as `wait MS`. A gap long enough to have been a decision — a
+  second or more — is part of what happened, and a replay that skips it is not
+  the same run. Rounded to a tenth of a second and capped at ten, so walking
+  away does not become a `wait 400000`.
+- **page loads**, as `wait-for` on the selector the next action is about to
+  use. That is the deterministic version of a wait: the replay holds until the
+  element is really there, however long the load takes *this* time, instead of
+  waiting out a guess made on the day it was recorded. It stands in for the
+  pause, so no blind `wait` goes out beside it. When the next thing is not an
+  element — a scroll, a key — the measured pause is kept instead, however short.
+
+A `<select>` comes out as a `#` comment: nothing in the command language sets a
+dropdown, so the line says what happened without pretending to replay it.
+Anything the script runner is doing is left out — it came from a script
+already — so `record` and a running script do not talk over each other, and
+recording a replay gives you an empty file rather than a copy.
+
+### Sharing the browser with Playwright
+
+A browser is a devtools port at both ends, so this works in either direction.
+
+`--port` pins the port instead of letting Chrome pick a free one, which gives
+Playwright somewhere to connect:
+
+```sh
+./web --port 9222 news.ycombinator.com
+```
+
+```js
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+```
+
+Playwright then drives the page you are watching, in the terminal, live — which
+is the thing its own headed mode does badly over ssh. `^G` shows the port on the
+status line, so the one Chrome picked for itself is there when you did not name
+one.
+
+The other direction is the `attach` command. Start the browser from Playwright:
+
+```js
+const browser = await chromium.launch({args: ['--remote-debugging-port=9222']});
+```
+
+and take a look at it with `attach 9222`, typed in the command pane or run from
+a script. Three things follow from it:
+
+- the browser `web` started is shut down, unless `--keep` said otherwise, and
+  the one it attached to is never shut down — quitting leaves it running.
+- the picture needs the frames to match the cells they are drawn into, so the
+  device metrics override goes on their page too. Playwright sees that viewport.
+- `--port N` with a browser already answering there takes it over rather than
+  starting a second one, which is also what makes `--keep --port` work. Given no
+  address on the command line it leaves that browser on whatever page it is on.
 
 ## The window
 

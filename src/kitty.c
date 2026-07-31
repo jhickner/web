@@ -1,3 +1,4 @@
+#include <poll.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -88,6 +89,30 @@ static void esc_body(Kitty *k, const char *seq, size_t n) {
 static void esc_raw(Kitty *k, const char *seq, size_t n) {
     buf_add(&k->out, seq, n);
 }
+
+// A frame given up on halfway leaves the terminal inside an unterminated
+// graphics escape, and everything written after it - the delete on the way out,
+// the mode resets, the shell's own prompt - is eaten as more of that escape.
+// That is what a quit during a busy page looks like: a shell that has lost its
+// terminal. Closing the escape costs a few bytes. Written straight rather than
+// through writeall, because the reason for being here may be that the terminal
+// is not taking anything; a couple of tries, then leave it.
+static void esc_abort(Kitty *k) {
+    // Under tmux the payload sits inside a passthrough DCS with its own ESCs
+    // doubled, so the inner terminator goes in escaped and the DCS is closed
+    // after it.
+    const char *seq = k->tmux ? "\x1b\x1b\\\x1b\\" : "\x1b\\";
+    size_t n = k->tmux ? 4 : 2;
+    for (int try = 0; try < 3 && n; try++) {
+        ssize_t w = write(k->ttyfd, seq, n);
+        if (w == (ssize_t)n) return;
+        if (w > 0) { seq += w; n -= (size_t)w; }
+        struct pollfd pf = {k->ttyfd, POLLOUT, 0};
+        poll(&pf, 1, 50);
+    }
+}
+
+void kitty_abort(Kitty *k) { esc_abort(k); }
 
 static void emit_esc(Kitty *k, const char *seq, size_t n) {
     esc_open(k);
@@ -189,9 +214,9 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
     for (size_t off = 0; off < k->out.len; off += SLICE) {
         size_t n = k->out.len - off;
         if (n > SLICE) n = SLICE;
-        if (writeall(k->ttyfd, k->out.p + off, n) < 0) return -1;
+        if (writeall(k->ttyfd, k->out.p + off, n) < 0) { esc_abort(k); return -1; }
         if (g_input_pump) g_input_pump();
-        if (g_quit) return -1;
+        if (g_quit) { esc_abort(k); return -1; }
     }
     return 0;
 }

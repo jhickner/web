@@ -1,7 +1,11 @@
 // Test harness: run a terminal program on a pty, capture everything it draws,
 // optionally feed it keystrokes, then close it down.
 //
-//   ptycap out.raw <cols> <rows> <seconds> [-k <hex-keys> <delay>] -- cmd args...
+//   ptycap out.raw <cols> <rows> <seconds> [-k <hex-keys> <delay>]... -- cmd args...
+//
+// -k may be repeated: each burst goes in at its own delay, in seconds.
+
+#define MAXK 16
 
 #include <errno.h>
 #include <fcntl.h>
@@ -42,13 +46,18 @@ int main(int argc, char **argv) {
     int cols = atoi(argv[2]), rows = atoi(argv[3]);
     double secs = atof(argv[4]);
 
-    char keys[512];
-    size_t nkeys = 0;
-    double keydelay = 0;
+    // Several -k pairs, so input can arrive with real gaps between the bursts:
+    // anything timing-sensitive at the far end - a page load, a pause a
+    // recorder is meant to notice - needs more than one moment to happen at.
+    char keys[MAXK][512];
+    size_t nkeys[MAXK] = {0};
+    double keydelay[MAXK] = {0};
+    int sent[MAXK] = {0}, nk = 0;
     int i = 5;
-    if (!strcmp(argv[i], "-k")) {
-        nkeys = unhex(argv[i + 1], keys, sizeof keys);
-        keydelay = atof(argv[i + 2]);
+    while (nk < MAXK && i + 2 < argc && !strcmp(argv[i], "-k")) {
+        nkeys[nk] = unhex(argv[i + 1], keys[nk], sizeof keys[nk]);
+        keydelay[nk] = atof(argv[i + 2]);
+        nk++;
         i += 3;
     }
     if (strcmp(argv[i], "--") != 0) {
@@ -72,7 +81,7 @@ int main(int argc, char **argv) {
     FILE *out = fopen(outpath, "wb");
     if (!out) { perror("fopen"); return 1; }
 
-    double start = now(), sent = 0;
+    double start = now();
     char buf[65536];
     int  signalled = 0;
     for (;;) {
@@ -85,10 +94,11 @@ int main(int argc, char **argv) {
         }
         if (signalled && el > secs + 3) break;
         if (signalled && waitpid(pid, NULL, WNOHANG) == pid) { pid = 0; break; }
-        if (nkeys && !sent && el > keydelay) {
-            (void)!write(master, keys, nkeys);
-            sent = 1;
-        }
+        for (int k = 0; k < nk; k++)
+            if (nkeys[k] && !sent[k] && el > keydelay[k]) {
+                (void)!write(master, keys[k], nkeys[k]);
+                sent[k] = 1;
+            }
         struct pollfd p = {master, POLLIN, 0};
         if (poll(&p, 1, 50) > 0 && (p.revents & POLLIN)) {
             ssize_t r = read(master, buf, sizeof buf);

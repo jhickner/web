@@ -18,8 +18,12 @@ static bool g_have_saved = false;
 // Bracketed paste is what makes the terminal's own paste key usable: without
 // it a paste arrives as bare keystrokes, indistinguishable from typing, and a
 // newline in the middle of it would submit whatever it landed in.
-#define MOUSE_ON  "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h"
-#define MOUSE_OFF "\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l"
+// 1004 is focus reporting: the terminal says when it gains and loses the
+// keyboard, which is the only way this side can know nobody is looking. Inside
+// tmux it needs `set -g focus-events on`, and a terminal that does not know the
+// mode simply never sends either sequence.
+#define MOUSE_ON  "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h"
+#define MOUSE_OFF "\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l"
 
 // Ask for kitty's disambiguated key reporting, which is the only way a cmd
 // chord can reach us at all: the legacy encoding has no bit for super. A
@@ -221,9 +225,16 @@ void term_restore(Term *t, bool clear_inline) {
         int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[?25h", t->inline_origin);
         writeall(t->fd, buf, (size_t)n);
     } else if (t->inline_mode) {
-        // Park the cursor under the block and leave the picture on screen.
-        char buf[32];
-        int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\r\n\x1b[?25h", t->rows);
+        // Park the cursor on the row under the block and leave the picture on
+        // screen: that row is where the shell's next prompt lands, and the
+        // window it belongs under is the whole point of inline mode. Only a
+        // block sitting on the last row has nowhere below it to go, and there
+        // the newline scrolls one up to make the room.
+        char buf[48];
+        int below = t->inline_origin + t->inline_rows;
+        int n = below > t->rows
+            ? snprintf(buf, sizeof buf, "\x1b[%d;1H\r\n\x1b[?25h", t->rows)
+            : snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[?25h", below);
         writeall(t->fd, buf, (size_t)n);
     } else {
         writeall(t->fd, LEAVE_UI, strlen(LEAVE_UI));
@@ -571,6 +582,15 @@ int term_next(Term *t, Event *ev) {
         ev->mods = m;
         buf_consume(&t->in, seqlen);
         return ev->key != KEY_NONE;
+    }
+
+    // Focus in and out. Two of the few CSIs with no parameters at all, so they
+    // have to be taken before the key table below reads one that is not there.
+    if (seqlen == 3 && (final == 'I' || final == 'O')) {
+        ev->type = EV_FOCUS;
+        ev->press = final == 'I';
+        buf_consume(&t->in, seqlen);
+        return 1;
     }
 
     ev->type = EV_KEY;

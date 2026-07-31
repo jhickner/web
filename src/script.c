@@ -39,6 +39,8 @@ enum { A_NONE, A_ONE, A_TWO, A_REST, A_NUM };
     X("echo",     VB_ECHO,    A_REST, "print a literal line")                  \
     X("help",     VB_HELP,    A_NONE, "show every command")                    \
     X("pick",     VB_PICK,    A_NONE, "toggle click-to-copy selectors")        \
+    X("record",   VB_RECORD,  A_ONE,  "echo what you do as commands: on|off")  \
+    X("attach",   VB_ATTACH,  A_NUM,  "drive the chrome on devtools port N")   \
     X("stop",     VB_STOP,    A_NONE, "clear the queue")
 
 #define X_ENUM(n, id, ar, h) id,
@@ -113,8 +115,12 @@ void script_free(App *a) {
     buf_free(&a->script.queue);
 }
 
+// `acting` covers the moment in between: the line has left the queue and the
+// state it will park in has not been set yet, which is exactly when a verb
+// dispatches the input the recorder must not write down again.
 bool script_busy(const App *a) {
-    return a->script.state != SC_IDLE || a->script.queue.len > 0;
+    return a->script.acting || a->script.state != SC_IDLE ||
+           a->script.queue.len > 0;
 }
 
 void script_push(App *a, const char *line) {
@@ -452,6 +458,29 @@ static void start(App *a) {
         done(a);
         return;
     case VB_ECHO:  out_line(a, s->sel); done(a); return;
+
+    // A comment rather than a bare line: recorded output is a script, and a
+    // redirected one should still run with this in the middle of it.
+    case VB_RECORD: {
+        int mode = -1;
+        if (!strcasecmp(s->sel, "on"))       mode = 1;
+        else if (!strcasecmp(s->sel, "off")) mode = 0;
+        else if (s->sel[0]) { fail(a, "want on, off, or nothing"); return; }
+        record_set(a, mode);
+        out_line(a, a->recording ? "# recording on - what you do comes back here"
+                                 : "# recording off");
+        done(a);
+        return;
+    }
+
+    case VB_ATTACH: {
+        char m[160];
+        if (app_attach(a, (int)s->num, m, sizeof m) < 0) { fail(a, m); return; }
+        out_line(a, m);
+        done(a);
+        return;
+    }
+
     // Both read from the page rather than from what we last cached: the cache
     // is filled by events that do not keep step with the one a navigation verb
     // finishes on, and a fragment or a route change never updates it at all.
@@ -675,7 +704,9 @@ void script_step(App *a) {
             memcpy(work, s->line, sizeof work);
             if (!parse(a, work)) { fail(a, "unknown command"); return; }
         }
+        s->acting = true;
         start(a);
+        s->acting = false;
         return;
 
     case SC_PROBE:
@@ -711,14 +742,29 @@ void script_step(App *a) {
     case SC_NAV:
         if (a->load_seq != s->nav_seq) { done(a); return; }
         if (t > s->deadline) {
-            // back and forward set a short deadline and mean it as success.
-            if (VTAB[s->verb].id == VB_BACK || VTAB[s->verb].id == VB_FWD) done(a);
-            else fail(a, "the page did not load");
+            // goto and reload asked for a page, and not getting one is a
+            // failure. Everything else only followed a load that started on its
+            // own - a click on a link, an Enter that submitted a form - and a
+            // page that never arrives there is not a failed command.
+            int id = VTAB[s->verb].id;
+            if (id == VB_GOTO || id == VB_RELOAD) fail(a, "the page did not load");
+            else done(a);
         }
         return;
 
     case SC_SETTLE:
-        if (t >= s->next_at) done(a);
+        if (t < s->next_at) return;
+        // Input that set a page going: the command is not over until that page
+        // has arrived. Without this the next command is sent to a document on
+        // its way out, and a script whose last line submits a form exits before
+        // the form has gone anywhere.
+        if (a->loading) {
+            s->nav_seq = a->load_seq;
+            s->deadline = now_sec() + s->timeout;
+            s->state = SC_NAV;
+            return;
+        }
+        done(a);
         return;
     }
 }

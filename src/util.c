@@ -55,6 +55,7 @@ void buf_free(Buf *b) {
 }
 
 void (*g_input_pump)(void) = NULL;
+volatile sig_atomic_t g_write_force = 0;
 
 double now_sec(void) {
     struct timeval tv;
@@ -79,13 +80,23 @@ void mkdirs(const char *path) {
 }
 
 int writeall(int fd, const char *p, size_t n) {
+    double deadline = 0;
     while (n) {
         ssize_t w = write(fd, p, n);
         if (w < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 if (g_input_pump) g_input_pump();
-                if (g_quit) return -1;   // never wedge a shutdown on a full tty
+                // A shutdown must not wedge on a full tty - but the mode resets
+                // are the shutdown, and dropping those hands the shell back a
+                // terminal with the mouse still reporting, the cursor still
+                // hidden and the keyboard still in kitty's encoding. Those wait,
+                // for as long as it takes and no longer.
+                if (g_quit && !g_write_force) return -1;
+                if (g_write_force) {
+                    if (deadline == 0) deadline = now_sec() + 2.0;
+                    else if (now_sec() > deadline) return -1;
+                }
                 struct pollfd pf = {fd, POLLOUT, 0};
                 poll(&pf, 1, 200);
                 continue;

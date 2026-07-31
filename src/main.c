@@ -1,3 +1,5 @@
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <locale.h>
 #include <poll.h>
@@ -135,6 +137,97 @@ void notify(App *a, const char *s) {
     a->msg_until = now_sec() + 2.0;
 }
 
+// ------------------------------------------------------------------ record
+
+// A recorded line goes where a script value goes: to fd 1 when that is not the
+// terminal the page is drawn on, which makes `web --record url > flow.web` the
+// whole of the workflow, and into the pane - or across the status line - when
+// it is.
+static void record_emit(App *a, const char *line) {
+    // A file named on the command line is where it goes; otherwise it follows
+    // script values out to fd 1, when fd 1 is not the terminal the page is on.
+    int fd = a->record_fd >= 0 ? a->record_fd : (a->stdout_tty ? -1 : STDOUT_FILENO);
+    if (fd >= 0) {
+        writeall(fd, line, strlen(line));
+        writeall(fd, "\n", 1);
+    }
+    // Into the pane whether or not it is open: a recording is worth reading
+    // back afterwards, and worth recalling with the up arrow to run again.
+    repl_pane_log(a, line);
+    repl_pane_history_add(a, line);
+    if (!a->repl_open) notify(a, line);
+    a->record_last_at = now_sec();
+}
+
+// The gap in front of an action, when it is worth keeping. A pause long enough
+// to have been a decision is part of what happened; a shorter one is just how
+// fast someone types. Any pause counts when a page arrived during it: there the
+// wait is the load, and a replay that skips it does the next thing to the page
+// that was on its way out.
+static void record_pace_at(App *a, double when) {
+    bool loaded = a->record_navigated;
+    a->record_navigated = false;
+    // Measured from the moment the page arrived rather than from the last
+    // thing done to the previous one, so what is kept is the time spent
+    // looking at it - not the load, which the replay waits out for itself.
+    double from = loaded && a->record_load_at > 0 ? a->record_load_at
+                                                  : a->record_last_at;
+    if (from <= 0) return;                     // nothing to measure from yet
+    double gap = when - from;
+    if (gap < (loaded ? 0.2 : 1.0)) return;
+    int ms = (int)((gap * 1000 + 50) / 100) * 100;
+    if (ms > 10000) ms = 10000;                // someone walked away
+    char line[32];
+    snprintf(line, sizeof line, "wait %d", ms);
+    record_emit(a, line);
+}
+
+static void record_pace(App *a) { record_pace_at(a, now_sec()); }
+
+// A wheel arrives as a burst of notches, and a line per notch is not a
+// recording of anything. They add up until the burst stops, or until something
+// else has to be written down after them.
+static void record_scroll_flush(App *a) {
+    if (!a->record_scroll) return;
+    int dy = a->record_scroll;
+    double last = a->record_scroll_at;
+    a->record_scroll = 0;
+    a->record_scroll_at = 0;
+    // Timed from the first notch, not from the moment the burst was declared
+    // over: the quiet at the end of a scroll is this waiting, not the reader.
+    record_pace_at(a, a->record_scroll_from);
+    char line[64];
+    snprintf(line, sizeof line, "scroll %d", dy);
+    record_emit(a, line);
+    a->record_last_at = last;
+}
+
+static void record_scrolled(App *a, int dy) {
+    if (!a->recording || script_busy(a)) return;
+    if (!a->record_scroll) a->record_scroll_from = now_sec();
+    a->record_scroll += dy;
+    a->record_scroll_at = now_sec();
+}
+
+void record_tick(App *a) {
+    if (a->record_scroll && now_sec() - a->record_scroll_at > 0.4)
+        record_scroll_flush(a);
+}
+
+// Anything the script runner is doing is already written down somewhere - it
+// came from a script - so only what a person does is recorded.
+void record_line(App *a, const char *fmt, ...) {
+    if (!a->recording || script_busy(a)) return;
+    record_scroll_flush(a);
+    record_pace(a);
+    char line[4200];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    record_emit(a, line);
+}
+
 // ------------------------------------------------------------------ layout
 
 // Inline mode is a window sitting in the shell's flow, so it has a shape of its
@@ -153,7 +246,10 @@ static int box_cols_for(App *a, int rows) {
 // Asking again is what makes Chrome hand over a fresh frame, so this is how
 // anything wanting a redraw gets one.
 static void screencast_start(App *a) {
-    if (!a->has_tty || a->cast_w < 1 || a->cast_h < 1) return;
+    // The single gate: a resize, a zoom and the no-frame watchdog all come
+    // through here, and any of them would otherwise start the picture up again
+    // behind a terminal nobody is looking at.
+    if (!a->has_tty || a->paused || a->cast_w < 1 || a->cast_h < 1) return;
     app_cdp(a, "Page.startScreencast",
              "\"format\":\"png\",\"maxWidth\":%d,\"maxHeight\":%d,\"everyNthFrame\":1",
              a->cast_w, a->cast_h);
@@ -305,10 +401,14 @@ static void draw_status(App *a) {
         static const char KEYS_S[] = "^L url  ^Y copy  ^Q quit";
 
         const char *left = a->title[0] ? a->title : a->url;
-        char stats[64];
+        char stats[96];
         const char *hint;
         if (a->show_stats) {
-            snprintf(stats, sizeof stats, "%zuKB %.0fms %.1ffps  %dx%d@%dx z%.0f%%",
+            // The port leads: it is the one number here that something outside
+            // this process needs, and it is how playwright finds the browser.
+            snprintf(stats, sizeof stats,
+                     "cdp:%d  %zuKB %.0fms %.1ffps  %dx%d@%dx z%.0f%%",
+                     a->chrome.port,
                      a->last_bytes / 1024, a->last_write_ms, a->fps,
                      a->css_w, a->css_h, a->scale,
                      100.0 * (sw * a->term.cell_w) / (a->css_w ? a->css_w : 1));
@@ -462,6 +562,11 @@ void navigate(App *a, const char *raw) {
     json_escape(esc, sizeof esc, url);
     app_cdp(a, "Page.navigate", "\"url\":\"%s\"", esc);
     a->loading = true;
+    // Only an address that was asked for. A page the site itself moves to is
+    // already the consequence of the click above it, and recording it would
+    // make the script jump straight there without ever doing the click. Blank
+    // is where a session with no address starts, which is not somewhere to go.
+    if (strcmp(url, "about:blank")) record_line(a, "goto %s", url);
 }
 
 // Ask the page whether it actually fits the viewport it was just given.
@@ -510,6 +615,11 @@ static void load_state(App *a) {
         } else if (!strncmp(line, "recolor_strength=", 17)) {
             double s = atof(line + 17);
             if (s >= 0.0 && s <= 1.0) a->recolor_strength = s;
+        } else if (!strncmp(line, "pause_on_blur=", 14)) {
+            a->pause_cfg = a->pause_on_blur = atoi(line + 14) != 0;
+        } else if (!strncmp(line, "blur_cpu_rate=", 14)) {
+            int r = atoi(line + 14);
+            if (r >= 1 && r <= 100) a->blur_cpu_rate = r;
         }
     }
     fclose(f);
@@ -529,6 +639,10 @@ static void save_state(App *a) {
     if (rows > 0) fprintf(f, "rows=%d\n", rows);
     fprintf(f, "recolor=%s\n", recolor_mode_name(a->recolor));
     fprintf(f, "recolor_strength=%.2f\n", a->recolor_strength);
+    // What the file said, not what this run is doing: --no-pause is for one
+    // session, and a flag that quietly rewrote the setting would outlive it.
+    fprintf(f, "pause_on_blur=%d\n", a->pause_cfg ? 1 : 0);
+    fprintf(f, "blur_cpu_rate=%d\n", a->blur_cpu_rate);
     if (a->ua[0]) fprintf(f, "ua=%s\n", a->ua);
     fclose(f);
 }
@@ -720,6 +834,7 @@ void scroll_at(App *a, int x, int y, int dy) {
              "})(%d,%d,%d)",
              x, y, dy);
     run_js(a, js);
+    record_scrolled(a, dy);
 }
 
 void scroll_by(App *a, int dy) {
@@ -729,6 +844,7 @@ void scroll_by(App *a, int dy) {
 // gg and G mean the page, not whatever pane happens to sit under the middle of
 // the view: "top" is somewhere you can name, and a step is not.
 void scroll_page_end(App *a, bool bottom) {
+    record_line(a, bottom ? "scroll bottom" : "scroll top");
     run_js(a, bottom
         ? "(function(t){t.scrollTo({top:t.scrollHeight,behavior:'instant'});})"
           "(document.scrollingElement||document.documentElement)"
@@ -738,6 +854,7 @@ void scroll_page_end(App *a, bool bottom) {
 
 void nav_history(App *a, int delta) {
     run_js(a, delta < 0 ? "history.back()" : "history.forward()");
+    record_line(a, delta < 0 ? "back" : "forward");
 }
 
 static void find_next(App *a, bool backwards) {
@@ -761,6 +878,151 @@ static const char FOCUS_WATCHER[] =
     "document.addEventListener('focusout',function(){setTimeout(rep,0);},true);"
     "rep();})()";
 
+// One element to the shortest thing the command language can find it by again:
+// a role and its accessible name where there is one, then an id, then a CSS
+// path shortened to the first ancestor that is already unique. Defined as ws()
+// inside whatever scope pastes it in - the picker asks it about a point, the
+// recorder about whatever was just used.
+#define SELECTOR_FN \
+    "function n(s){return(s||'').replace(/\\s+/g,' ').trim()}" \
+    "function nm(q){var l=q.getAttribute('aria-label');if(l)return n(l);" \
+    "var b=q.getAttribute('aria-labelledby'),t='';if(b)b.split(/\\s+/).forEach(" \
+    "function(i){var z=document.getElementById(i);if(z)t+=' '+z.textContent});" \
+    "if(n(t))return n(t);if(q.labels&&q.labels[0])return n(q.labels[0].textContent);" \
+    "return n(q.innerText||q.getAttribute('alt')||q.getAttribute('title'))}" \
+    "function ws(e){if(!e||e.nodeType!==1)return '';" \
+    "var im={A:'link',BUTTON:'button',SELECT:'combobox',TEXTAREA:'textbox'," \
+    "SUMMARY:'button',H1:'heading',H2:'heading',H3:'heading',H4:'heading'," \
+    "H5:'heading',H6:'heading',IMG:'img'};" \
+    "var r=e.getAttribute('role')||im[e.tagName]||'';" \
+    "if(e.tagName==='INPUT')r=e.type==='checkbox'?'checkbox':e.type==='radio'?'radio':" \
+    "(e.type==='submit'||e.type==='button')?'button':'textbox';var a=nm(e);" \
+    "if(r&&a&&a.indexOf(String.fromCharCode(34))<0&&a.indexOf(']')<0&&" \
+    "a.indexOf(String.fromCharCode(10))<0)return 'role='+r+'[name=\"'+a+'\"]';" \
+    "if(e.id)return '#'+CSS.escape(e.id);var p=[];" \
+    "while(e&&e.nodeType===1&&e!==document.body){" \
+    "var s=e.tagName.toLowerCase(),i=1,q=e;while((q=q.previousElementSibling))" \
+    "if(q.tagName===e.tagName)i++;if(i>1)s+=':nth-of-type('+i+')';p.unshift(s);" \
+    "var z=p.join(' > ');try{if(document.querySelectorAll(z).length===1)return z}catch(_){}" \
+    "e=e.parentElement}return p.join(' > ')}"
+
+// The page reports what was done to it, as the verb that would do it again.
+// Values are read at the end of an edit rather than a keystroke at a time: one
+// `fill` is what a script wants, and thirty `type` lines are not.
+//
+// Everything is reported through the binding as tab separated fields, which is
+// one unescaping on our side and no parser at all. The listeners test a global
+// on every event, so the same script covers recording being turned back off
+// and on again without ever being installed twice.
+static const char RECORDER_JS[] =
+    "(function(){"
+    SELECTOR_FN
+    "if(window.__webrecOn!==undefined){window.__webrecOn=1;return}"
+    "var pend=null,psel='';"
+    "function send(s){try{__webrec(s)}catch(e){}}"
+    "function val(e){return e.isContentEditable?(e.innerText||''):(e.value||'')}"
+    "function ed(e){if(!e||e.nodeType!==1)return false;if(e.isContentEditable)return true;"
+    "var t=e.tagName;if(t==='TEXTAREA')return true;if(t!=='INPUT')return false;"
+    "var y=(e.type||'text').toLowerCase();"
+    "return ['text','search','email','url','tel','password','number','date'].indexOf(y)>=0}"
+    "function clean(s){return(s||'').replace(/[\\t\\r\\n]+/g,' ')}"
+    "function flush(){if(!pend)return;var e=pend;pend=null;"
+    "var v=val(e);if(v===e.__webrec0)return;"
+    "send('fill\\t'+clean(psel)+'\\t'+clean(v))}"
+    "document.addEventListener('focusin',function(v){var e=v.target;"
+    "if(!window.__webrecOn||!ed(e))return;flush();pend=e;psel=ws(e);e.__webrec0=val(e)},true);"
+    "document.addEventListener('focusout',function(v){"
+    "if(window.__webrecOn&&v.target===pend)flush()},true);"
+    // A click into a field is the start of a fill, and fill focuses the field
+    // itself: recording both would click, then click again from inside fill.
+    "document.addEventListener('click',function(v){var e=v.target;"
+    "if(!window.__webrecOn||ed(e))return;flush();send('click\\t'+clean(ws(e)))},true);"
+    "document.addEventListener('change',function(v){var e=v.target;"
+    "if(!window.__webrecOn)return;"
+    "if(e.tagName==='SELECT'){flush();send('select\\t'+clean(ws(e))+'\\t'+clean(e.value));return}"
+    "if(ed(e)&&e===pend)flush()},true);"
+    // Printable keys are the fill above; what is left is the keys a script
+    // would have to press. The pending edit goes out first, because the Enter
+    // that submits a form is reported before the form has gone anywhere.
+    "document.addEventListener('keydown',function(v){var k=v.key;"
+    "if(!window.__webrecOn||!k)return;"
+    "if(k.length===1&&!v.ctrlKey&&!v.metaKey&&!v.altKey)return;"
+    "if(k==='Shift'||k==='Control'||k==='Alt'||k==='Meta')return;flush();"
+    "var m=(v.ctrlKey?'ctrl+':'')+(v.altKey?'alt+':'')+"
+    "(v.shiftKey&&k.length>1?'shift+':'');send('press\\t'+m+k)},true);"
+    "window.__webrecOn=1;})()";
+
+// Installed for every future document and run against the one on screen, the
+// same way the recolour filter is: between them the recorder is watching a new
+// page before its first click, and this one from now.
+void record_set(App *a, int mode) {
+    bool on = mode < 0 ? !a->recording : mode > 0;
+    a->recording = on;
+
+    char esc[8192];
+    if (on) {
+        json_escape(esc, sizeof esc, RECORDER_JS);
+        app_req_note(a, app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
+                                "\"source\":\"%s\"", esc), RQ_RECORD);
+        app_cdp(a, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
+        return;
+    }
+
+    record_scroll_flush(a);       // whatever the wheel was still holding
+    // And the pause at the end of it: a recording that stops the instant the
+    // last thing was done replays as a flash of the page it finished on.
+    record_pace(a);
+    if (a->record_script_id[0]) {
+        app_cdp(a, "Page.removeScriptToEvaluateOnNewDocument",
+                 "\"identifier\":\"%s\"", a->record_script_id);
+        a->record_script_id[0] = 0;
+    }
+    app_cdp(a, "Runtime.evaluate", "\"expression\":\"window.__webrecOn=0\"");
+}
+
+// The picker writes the accessible name in quotes, and a quoted argument ends
+// at the first quote inside it, so the line goes out with the whole selector
+// quoted and those dropped: `click "role=link[name=Sign in]"` reads back.
+static void record_selector(char *dst, size_t cap, const char *sel) {
+    size_t o = 0;
+    for (const char *p = sel; *p && o + 1 < cap; p++)
+        if (*p != '"') dst[o++] = *p;
+    dst[o] = 0;
+}
+
+// The terminal has said whether anyone is looking. Every frame costs a PNG out
+// of Chrome and a base64 write across the terminal, and both are wasted on a
+// pane that is not on screen - so the screencast stops with the focus and comes
+// back with it. The page itself is left running: timers, sockets and audio
+// carry on, which is the difference between not drawing something and freezing
+// it, and the reason this stops at the picture.
+static void handle_focus(App *a, bool focused) {
+    if (!a->pause_on_blur || focused == !a->paused) return;
+    if (!focused) {
+        a->paused = true;
+        a->expect_frame = 0;        // no frame is coming, and none is owed
+        app_cdp(a, "Page.stopScreencast", "");
+        // Not drawing is only half of it: the page goes on animating into a
+        // screencast nobody is reading, and on a WebGL demo that is the whole
+        // cost. Throttling the renderer slows what it asks for, so the raster
+        // behind it falls away too. Audio is decoded off this thread, so
+        // something you switched away from to keep listening to keeps playing.
+        if (a->blur_cpu_rate > 1)
+            app_cdp(a, "Emulation.setCPUThrottlingRate", "\"rate\":%d",
+                    a->blur_cpu_rate);
+        return;
+    }
+    a->paused = false;
+    if (a->blur_cpu_rate > 1)
+        app_cdp(a, "Emulation.setCPUThrottlingRate", "\"rate\":1");
+    // The page may not have changed while it was away, and an unchanged frame
+    // is hash-skipped - which would leave the block empty until something on
+    // the page moved. Ask for it as though it were new.
+    a->last_hash = 0;
+    a->kitty.grid_dirty = true;
+    screencast_start(a);
+}
+
 static void handle_mouse(App *a, Event *ev) {
     if (repl_pane_mouse(a, ev)) return;
     Kitty *k = &a->kitty;
@@ -773,6 +1035,13 @@ static void handle_mouse(App *a, Event *ev) {
     // and every later click extends that abandoned selection instead of
     // starting a new one.
     if (!inside && !a->mouse_down) return;
+
+    // Pointing at the page is asking for the page. The pane holds the keyboard
+    // from the moment it is opened until something else is clicked, which is
+    // what lets a click into a form field be followed by typing into it. A
+    // wheel is not a claim on anything: scrolling what you are reading should
+    // not take the keyboard away from a half typed command.
+    if (ev->press && !ev->motion && ev->button < 3) a->repl_focus = false;
 
     // Aim at the middle of the cell: the terminal only tells us which cell was
     // clicked, so the center is the least wrong point inside it. A drag that
@@ -793,28 +1062,13 @@ static void handle_mouse(App *a, Event *ev) {
     // useful for inspecting several controls in a row; `pick` toggles it off.
     if (a->selector_pick && ev->button == 0 && !ev->motion) {
         if (ev->press) {
-            int id = app_cdp(a, "Runtime.evaluate",
-                "\"expression\":\"(function(x,y){var e=document.elementFromPoint(x,y);"
-                "if(!e)return '';function n(s){return(s||'').replace(/\\\\s+/g,' ').trim()}"
-                "function nm(q){var a=q.getAttribute('aria-label');if(a)return n(a);"
-                "var b=q.getAttribute('aria-labelledby'),t='';if(b)b.split(/\\\\s+/).forEach("
-                "function(i){var z=document.getElementById(i);if(z)t+=' '+z.textContent});"
-                "if(n(t))return n(t);if(q.labels&&q.labels[0])return n(q.labels[0].textContent);"
-                "return n(q.innerText||q.getAttribute('alt')||q.getAttribute('title'))}"
-                "var im={A:'link',BUTTON:'button',SELECT:'combobox',TEXTAREA:'textbox',"
-                "SUMMARY:'button',H1:'heading',H2:'heading',H3:'heading',H4:'heading',"
-                "H5:'heading',H6:'heading',IMG:'img'};var r=e.getAttribute('role')||im[e.tagName]||'';"
-                "if(e.tagName==='INPUT')r=e.type==='checkbox'?'checkbox':e.type==='radio'?'radio':"
-                "(e.type==='submit'||e.type==='button')?'button':'textbox';var a=nm(e);"
-                "if(r&&a&&a.indexOf(String.fromCharCode(34))<0&&a.indexOf(']')<0&&"
-                "a.indexOf(String.fromCharCode(10))<0)return 'role='+r+'[name=\\\"'+a+'\\\"]';"
-                "if(e.id)return '#'+CSS.escape(e.id);var p=[];while(e&&e.nodeType===1&&e!==document.body){"
-                "var s=e.tagName.toLowerCase(),i=1,q=e;while((q=q.previousElementSibling))"
-                "if(q.tagName===e.tagName)i++;if(i>1)s+=':nth-of-type('+i+')';p.unshift(s);"
-                "var z=p.join(' > ');try{if(document.querySelectorAll(z).length===1)return z}catch(_){}"
-                "e=e.parentElement}return p.join(' > ')})(%d,%d)\",\"returnByValue\":true",
-                x, y);
-            app_req_note(a, id, RQ_SELECTOR);
+            char js[2600], esc[5400];
+            snprintf(js, sizeof js,
+                     "(function(x,y){" SELECTOR_FN
+                     "return ws(document.elementFromPoint(x,y))})(%d,%d)", x, y);
+            json_escape(esc, sizeof esc, js);
+            app_req_note(a, app_cdp(a, "Runtime.evaluate",
+                "\"expression\":\"%s\",\"returnByValue\":true", esc), RQ_SELECTOR);
         }
         return;
     }
@@ -889,6 +1143,9 @@ static void handle_key(App *a, Event *ev) {
     // the one key that still means what it always did.
     if (a->repl_focus) {
         if (ev->mods == MOD_CTRL && ev->key == 'q') { g_quit = 1; return; }
+        // And ^X, or the key that opens the pane cannot put it away from
+        // inside it: the editor swallows every control key it does not use.
+        if (ev->mods == MOD_CTRL && ev->key == 'x') { repl_pane_toggle(a); return; }
         if (repl_pane_key(a, ev)) return;
     }
     if (a->editing) {
@@ -956,6 +1213,7 @@ static void handle_key(App *a, Event *ev) {
             app_cdp(a, "Page.reload", "\"ignoreCache\":false");
             a->loading = true;
             notify(a, "reloading");
+            record_line(a, "reload");
             return;
         case 'o': nav_history(a, -1); return;
         case 'p': nav_history(a, +1); return;
@@ -1138,6 +1396,59 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         return;
     }
 
+    // verb, then what it needs, tab separated. The page has already decided
+    // what a thing was; all that is left is to write it as a command.
+    if (strstr(msg, "Runtime.bindingCalled") && strstr(msg, "__webrec")) {
+        if (!a->recording || script_busy(a)) return;
+        size_t n;
+        const char *p = json_str(msg, "payload", &n);
+        if (!p || !n) return;
+        char buf[4200];
+        json_unescape(buf, sizeof buf, p, n);
+
+        char *verb = buf, *sel = strchr(buf, '\t'), *val = NULL;
+        if (sel) {
+            *sel++ = 0;
+            val = strchr(sel, '\t');
+            if (val) *val++ = 0;
+        }
+        if (!sel || !*sel) return;
+
+        if (!strcmp(verb, "press")) {
+            record_line(a, "press %s", sel);
+            return;
+        }
+        char q[2100];
+        record_selector(q, sizeof q, sel);
+
+        // The first thing done to a page that has just arrived says what it was
+        // waiting for, which beats waiting out a guess: the replay holds until
+        // that element is really there, however long the load takes this time.
+        // The pause still goes out after it - that one is not the load, it is
+        // however long the page was looked at, and a replay without it never
+        // shows the page at all.
+        if (a->record_navigated && *q &&
+            (!strcmp(verb, "click") || !strcmp(verb, "fill"))) {
+            double loaded_at = a->record_load_at;
+            a->record_navigated = false;
+            record_scroll_flush(a);
+            char w[2200];
+            snprintf(w, sizeof w, "wait-for \"%s\"", q);
+            record_emit(a, w);
+            a->record_last_at = loaded_at;    // the pause is timed from here
+        }
+
+        if (!strcmp(verb, "click"))       record_line(a, "click \"%s\"", q);
+        else if (!strcmp(verb, "fill"))   record_line(a, "fill \"%s\" %s", q,
+                                                      val ? val : "");
+        // Nothing in the command language sets a dropdown, so this one is a
+        // note rather than a step: a recorded script still runs, and still says
+        // what was left out.
+        else if (!strcmp(verb, "select")) record_line(a, "# select \"%s\" = %s",
+                                                      q, val ? val : "");
+        return;
+    }
+
     if (strstr(msg, "Runtime.bindingCalled") && strstr(msg, "__webmode")) {
         size_t n;
         const char *p = json_str(msg, "payload", &n);
@@ -1156,6 +1467,8 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         if (!a->loading) return;
         a->loading = false;
         a->load_seq++;
+        a->record_navigated = true;   // the next thing recorded waits for it
+        a->record_load_at = now_sec();
         a->last_hash = 0;          // the new page may hash to the old frame
         a->kitty.grid_dirty = true;
         screencast_start(a);
@@ -1197,6 +1510,16 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         }
         // No re-measure here: the reply above already reflects the widened
         // viewport, so one round is always enough and cannot loop.
+        return;
+    }
+
+    case RQ_RECORD: {
+        size_t n;
+        const char *v = json_str(msg, "identifier", &n);
+        if (v && n && n < sizeof a->record_script_id) {
+            memcpy(a->record_script_id, v, n);
+            a->record_script_id[n] = 0;
+        }
         return;
     }
 
@@ -1253,6 +1576,18 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         return;
     }
 
+    // Only asked for after an attach: every other way of arriving at a page
+    // goes past Page.frameNavigated, which carries the address with it.
+    case RQ_URL: {
+        size_t n;
+        const char *v = json_eval_str(msg, &n);
+        if (v && n && n < sizeof a->url) {
+            memcpy(a->url, v, n);
+            a->url[n] = 0;
+        }
+        return;
+    }
+
     case RQ_SCRIPT: script_reply(a, msg); return;
     }
 }
@@ -1279,7 +1614,124 @@ static void usage(void) {
         "              off | hue | duotone | tint\n"
         "  --recolor-strength F   how far towards it, 0..1 (default 1)\n"
         "  --login     open a window to sign in with, on the same profile\n"
-        "  --keep      leave chrome running on exit so the next start is instant\n");
+        "  --keep      leave chrome running on exit so the next start is instant\n"
+        "  --port N    fix chrome's devtools port so playwright can find it\n"
+        "  --no-pause  keep drawing while the terminal is not focused\n"
+        "  --record[=F] write what you do to the page out as commands\n"
+        "  --replay F  run a recording back; - reads stdin\n");
+}
+
+// Everything a fresh CDP session needs before it is worth drawing: the domains
+// the events come from, the overrides the picture depends on, and the watcher
+// the page reports focus through. None of it survives a change of browser, so
+// it lives here rather than inline in main.
+static void session_init(App *a) {
+    app_cdp(a, "Page.enable", "");
+    app_cdp(a, "Runtime.enable", "");
+
+    // A browser we adopted, or the first run against a new Chrome, was started
+    // before its own user agent could be read, so it is still saying headless.
+    // Overriding it here costs navigator.userAgentData, which the launch flag
+    // would have kept - the lesser of the two tells, and only until this
+    // browser is replaced by one started the right way.
+    if (a->ua_patch_req && a->ua[0]) {
+        char esc[1100];
+        json_escape(esc, sizeof esc, a->ua);
+        app_cdp(a, "Emulation.setUserAgentOverride", "\"userAgent\":\"%s\"", esc);
+    }
+    // The overlay scrollbar appears on a scroll, waits half a second, then
+    // fades out over a dozen compositor frames - and every one of those is a
+    // full-page PNG across the terminal. It costs more than everything else
+    // scrolling does, and there is nothing to see: the terminal has no pointer
+    // to grab it with.
+    app_cdp(a, "Emulation.setScrollbarsHidden", "\"hidden\":true");
+    {
+        char esc[2048];
+        json_escape(esc, sizeof esc, FOCUS_WATCHER);
+        app_cdp(a, "Runtime.addBinding", "\"name\":\"__webmode\"");
+        app_cdp(a, "Runtime.addBinding", "\"name\":\"__webrec\"");
+        app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
+                 "\"source\":\"%s\"", esc);
+        app_cdp(a, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
+    }
+    if (a->recolor != RECOLOR_OFF) apply_recolor(a);
+    // Recording outlives the browser it was started on: the script it installs
+    // did not, and the identifier it was known by belonged to that session.
+    if (a->recording) {
+        a->record_script_id[0] = 0;
+        record_set(a, 1);
+    }
+}
+
+// Where a browser we did not navigate already is. Nothing loaded, so no event
+// is going to say, and the status line has nothing to show until it is asked.
+static void ask_where(App *a) {
+    app_req_note(a, app_cdp(a, "Runtime.evaluate",
+        "\"expression\":\"location.href\",\"returnByValue\":true"), RQ_URL);
+    app_req_note(a, app_cdp(a, "Runtime.evaluate",
+        "\"expression\":\"document.title\",\"returnByValue\":true"), RQ_TITLE);
+}
+
+// Move onto a browser something else is driving - Playwright's, say - and carry
+// on drawing it. The new one is checked before the old one is let go, so a port
+// with nothing on it costs nothing but the message.
+int app_attach(App *a, int port, char *msg, size_t cap) {
+    Chrome *c = &a->chrome;
+    if (port < 1 || port > 65535) {
+        snprintf(msg, cap, "%d is not a port", port);
+        return -1;
+    }
+    if (port == c->port && c->ws.fd > 0 && !c->ws.closed) {
+        snprintf(msg, cap, "already on port %d", port);
+        return 0;
+    }
+    if (chrome_probe(port) != 0) {
+        snprintf(msg, cap, "no browser answering on port %d", port);
+        return -1;
+    }
+
+    // The browser being left behind is ours to shut down, unless it was someone
+    // else's to begin with or --keep asked for it to outlive us. Left running
+    // and undrivable it would hold the profile and its memory for nothing.
+    if (c->foreign || a->keep) {
+        if (c->ws.fd > 0) ws_close(&c->ws);
+    } else {
+        chrome_kill(c);
+    }
+
+    c->pid = 0;
+    c->adopted = false;
+    c->foreign = true;         // never shut down a browser we did not start
+    c->port = port;
+    c->ws = (WS){0};
+    c->next_id = 1;
+    if (chrome_attach(c) < 0) {
+        snprintf(msg, cap, "port %d stopped answering; nothing left to draw", port);
+        g_quit = 1;
+        return -1;
+    }
+
+    // Everything below belonged to the browser that just went away: ids start
+    // again from one, so a stale request would be claimed by an unrelated reply.
+    memset(a->reqs, 0, sizeof a->reqs);
+    a->recolor_script_id[0] = 0;
+    a->pend.kind = PEND_NONE;
+    a->title[0] = 0;
+    a->loading = false;
+    a->insert = false;
+    a->mouse_down = false;
+    a->fit_w = 0;
+    a->last_hash = 0;
+    a->kitty.grid_dirty = true;
+
+    session_init(a);
+    ask_where(a);
+    // The viewport override goes on their page too: the frames have to match
+    // the cells they are drawn into, whoever is driving.
+    relayout(a);
+
+    snprintf(msg, cap, "attached to port %d", port);
+    return 0;
 }
 
 // The size Chrome should open at, close enough that the page lays out once.
@@ -1302,13 +1754,22 @@ int main(int argc, char **argv) {
     a.want_scale = 1;
     a.zoom = 1.0;
     a.recolor_strength = 1.0;
+    a.pause_on_blur = a.pause_cfg = true;
+    a.blur_cpu_rate = 20;
     theme_fallback(&a.theme);
     load_state(&a);                   // --zoom below still wins over it
     a.fit_width = true;
     a.inline_mode = true;             // a window in the shell, unless --full
-    bool show = false, login = false, url_given = false;
+    bool show = false, login = false, url_given = false, record = false;
+    double drain_at = 0;              // when the queue first ran out
+    const char *record_path = NULL;
+    int port = 0;                     // 0 = let chrome pick a free one
+    a.record_fd = -1;
     const char *script_src = NULL;
-    const char *start = "https://duckduckgo.com";
+    // Nowhere, until told. A homepage nobody asked for is a page load, a set of
+    // cookies and a network round trip spent before the first key is pressed -
+    // and with --record it is the first line of the recording.
+    const char *start = "about:blank";
     script_init(&a);
 
     for (int i = 1; i < argc; i++) {
@@ -1360,24 +1821,57 @@ int main(int argc, char **argv) {
             a.script.step = true;
         } else if (!strcmp(argv[i], "--json")) {
             a.script.json = true;
+        } else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
+            port = atoi(argv[++i]);
+            if (port < 1 || port > 65535) {
+                fprintf(stderr, "web: --port wants a number from 1 to 65535\n");
+                return 1;
+            }
+        } else if (!strcmp(argv[i], "--no-pause")) {
+            a.pause_on_blur = false;      // this run only; the file keeps its own
+        } else if (!strcmp(argv[i], "--record")) {
+            record = true;
+        // The file comes attached to the flag rather than after it: `web
+        // --record example.com` has to stay a recording of example.com, not a
+        // recording written to a file called example.com.
+        } else if (!strncmp(argv[i], "--record=", 9)) {
+            record = true;
+            record_path = argv[i] + 9;
+        } else if (!strcmp(argv[i], "--replay") && i + 1 < argc) {
+            script_src = argv[++i];
         } else if (!strcmp(argv[i], "--login")) {
             login = true;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage();
             return 0;
+        // An option that got this far is either not one or is missing what it
+        // needs. Left to the branch below it would quietly become the address,
+        // and `web --replay` would open a browser on a page called --replay.
+        } else if (argv[i][0] == '-' && argv[i][1]) {
+            fprintf(stderr, "web: unknown or incomplete option '%s'\n", argv[i]);
+            usage();
+            return 1;
         } else {
             start = argv[i];
             url_given = true;
         }
     }
-    // A script says where it is going. Loading a search engine first would cost
-    // a page load nobody asked for, and would sit in the history behind it.
-    if (!url_given && (script_src || !isatty(STDIN_FILENO))) start = "about:blank";
+    // Opened before Chrome is, so a path that cannot be written costs nothing
+    // but the message.
+    if (record_path) {
+        a.record_fd = open(record_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (a.record_fd < 0) {
+            fprintf(stderr, "web: %s: %s\n", record_path, strerror(errno));
+            return 1;
+        }
+    }
     a.status_open = !a.hide_status;
 
     // Before anything else opens a descriptor or asks the terminal a question:
     // a script arriving on stdin is gone the moment something else reads it.
-    if (script_src) script_load(&a, script_src);
+    // A script that cannot be read is not a browsing session with a note
+    // attached: it is the whole of what was asked for, and it did not happen.
+    if (script_src) { if (script_load(&a, script_src) < 0) return 1; }
     else if (!isatty(STDIN_FILENO)) script_load(&a, "-");
 
     char first[1200];
@@ -1410,7 +1904,7 @@ int main(int argc, char **argv) {
     // cookies with a key chosen by the keychain options, so a sign-in done in
     // an ordinary browser leaves a session this one cannot unseal.
     if (login) {
-        if (chrome_launch(&a.chrome, first, 1200, 900, true, a.mute, a.ua, false) < 0)
+        if (chrome_launch(&a.chrome, first, 1200, 900, true, a.mute, a.ua, false, 0) < 0)
             return 1;
         // Closing the window is not the same as quitting on macOS - the browser
         // stays running with nothing on screen - so waiting for it to exit on
@@ -1446,7 +1940,8 @@ int main(int argc, char **argv) {
 
     // Started on a blank page rather than straight at the address, so the first
     // request to anywhere real is made after everything below is set up.
-    if (chrome_launch(&a.chrome, "about:blank", fw, fh, show, a.mute, a.ua, true) < 0)
+    if (chrome_launch(&a.chrome, "about:blank", fw, fh, show, a.mute, a.ua, true,
+                      port) < 0)
         return 1;
     if (chrome_attach(&a.chrome) < 0) { chrome_kill(&a.chrome); return 1; }
 
@@ -1481,35 +1976,14 @@ int main(int argc, char **argv) {
     bool tmux = getenv("TMUX") != NULL;
     if (a.has_tty) kitty_init(&a.kitty, a.term.fd, tmux);
 
-    app_cdp(&a, "Page.enable", "");
-    app_cdp(&a, "Runtime.enable", "");
-
-    // A browser we adopted, or the first run against a new Chrome, was started
-    // before its own user agent could be read, so it is still saying headless.
-    // Overriding it here costs navigator.userAgentData, which the launch flag
-    // would have kept - the lesser of the two tells, and only until this
-    // browser is replaced by one started the right way.
-    if (a.ua_patch_req && a.ua[0]) {
-        char esc[1100];
-        json_escape(esc, sizeof esc, a.ua);
-        app_cdp(&a, "Emulation.setUserAgentOverride", "\"userAgent\":\"%s\"", esc);
-    }
-    // The overlay scrollbar appears on a scroll, waits half a second, then
-    // fades out over a dozen compositor frames - and every one of those is a
-    // full-page PNG across the terminal. It costs more than everything else
-    // scrolling does, and there is nothing to see: the terminal has no pointer
-    // to grab it with.
-    app_cdp(&a, "Emulation.setScrollbarsHidden", "\"hidden\":true");
-    {
-        char esc[2048];
-        json_escape(esc, sizeof esc, FOCUS_WATCHER);
-        app_cdp(&a, "Runtime.addBinding", "\"name\":\"__webmode\"");
-        app_cdp(&a, "Page.addScriptToEvaluateOnNewDocument",
-                 "\"source\":\"%s\"", esc);
-        app_cdp(&a, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
-    }
-    if (a.recolor != RECOLOR_OFF) apply_recolor(&a);
-    navigate(&a, first);       // the blank page above is not where we are going
+    a.recording = record;      // session_init arms the page side of it
+    session_init(&a);
+    // The blank page above is not where we are going - unless the browser was
+    // already running on the port we were pointed at and no address was asked
+    // for, in which case it is somewhere of its own and loading a first page
+    // would take it off whatever that is.
+    if (a.chrome.foreign && !url_given) ask_where(&a);
+    else navigate(&a, first);
     relayout(&a);
     draw_panes(&a);
 
@@ -1542,8 +2016,11 @@ int main(int argc, char **argv) {
 
         // Nothing here is on a timer except an undecided ESC and an expiring
         // notice, so the loop sleeps until something actually happens.
+        // Waiting for the picture to go quiet is waiting for nothing to happen,
+        // which is the one thing poll cannot be woken by.
+        bool draining = a.script.drain_exit && !script_busy(&a);
         int wait = (a.term.in.len || a.msg_until > now_sec() ||
-                    a.expect_frame > 0) ? 20 : -1;
+                    a.expect_frame > 0 || a.record_scroll || draining) ? 20 : -1;
         int sw = script_wait_ms(&a);
         if (sw >= 0 && (wait < 0 || sw < wait)) wait = sw;
         int rc = poll(fds, 2, wait);
@@ -1557,6 +2034,7 @@ int main(int argc, char **argv) {
                          ev.type, ev.key, ev.mods, ev.text[0] ? ev.text : "");
                 if (ev.type == EV_KEY) handle_key(&a, &ev);
                 else if (ev.type == EV_MOUSE) handle_mouse(&a, &ev);
+                else if (ev.type == EV_FOCUS) handle_focus(&a, ev.press);
                 else if (ev.type == EV_PASTE) {
                     if (!repl_pane_key(&a, &ev))
                         handle_paste(&a, a.term.paste.p, a.term.paste.len);
@@ -1576,7 +2054,7 @@ int main(int argc, char **argv) {
         // the rest of the session carries on: the address bar still moves, the
         // title still changes, and nothing is drawn again. Restarting the
         // screencast is the one thing that always brings a frame back.
-        if (a.expect_frame > 0 && now_sec() > a.expect_frame &&
+        if (a.expect_frame > 0 && !a.paused && now_sec() > a.expect_frame &&
             now_sec() - a.last_unwedge > 3.0) {
             a.last_unwedge = now_sec();
             a.expect_frame = 0;
@@ -1597,17 +2075,34 @@ int main(int argc, char **argv) {
         }
         if (a.chrome.ws.closed) break;
 
+        record_tick(&a);
         script_step(&a);
         draw_panes(&a);
         // A script that was the only reason to be here is also the only thing
         // keeping us here.
-        if (a.script.drain_exit && !script_busy(&a) && !a.repl_open) g_quit = 1;
+        // Not while a page is still on its way in, and not before the pause
+        // that follows the last command: --delay is what a replay is watched
+        // at, and it applies to the end of one as much as the middle.
+        // The queue has run out, but the last command may still be arriving.
+        // Leaving on the load event is leaving before the frame that carries
+        // the result has been drawn, and a fixed delay is either too short for
+        // a slow page or wasted on a quick one. What actually says "it got
+        // there" is the picture: nothing loading, and no frame that differs
+        // from the one on screen for half a second. Capped, because a page with
+        // something animating on it never goes quiet at all.
+        if (a.script.drain_exit && !script_busy(&a) && !a.repl_open &&
+            now_sec() >= a.script.next_at) {
+            if (drain_at == 0) drain_at = now_sec();
+            bool settled = !a.loading && now_sec() - a.last_draw > 0.5;
+            if (settled || now_sec() - drain_at > 3.0) g_quit = 1;
+        }
 
         // A lone ESC only resolves on a later pass, once the wait has expired.
         Event ev;
         if (a.has_tty && a.term.in.len && term_next(&a.term, &ev)) {
             if (ev.type == EV_KEY) handle_key(&a, &ev);
             else if (ev.type == EV_MOUSE) handle_mouse(&a, &ev);
+            else if (ev.type == EV_FOCUS) handle_focus(&a, ev.press);
             else if (ev.type == EV_PASTE)
                 handle_paste(&a, a.term.paste.p, a.term.paste.len);
             flush_pending(&a);
@@ -1617,16 +2112,25 @@ int main(int argc, char **argv) {
 
     // Inline leaves the page behind unless it was asked not to.
     if (a.has_tty) {
+        // From here everything written is the handover itself, so it waits for
+        // the terminal rather than giving up on it - and the first thing out is
+        // the terminator for whatever escape a dropped frame left open, because
+        // until that lands the resets after it are read as more of the frame.
+        g_write_force = 1;
+        kitty_abort(&a.kitty);
         if (!a.inline_mode || a.clear_exit) kitty_clear(&a.kitty);
         kitty_free(&a.kitty);
         term_restore(&a.term, a.clear_exit);
     }
     buf_free(&a.status);
     buf_free(&a.status_last);
+    if (a.recording) record_set(&a, 0);      // the last pause, and the tail
+    if (a.record_fd >= 0) close(a.record_fd);
     repl_pane_free(&a);
     // Most of a cold start is Chrome coming up. Left running, it holds the
-    // profile and the next run adopts it instead of paying for that again.
-    if (a.keep) ws_close(&a.chrome.ws);
+    // profile and the next run adopts it instead of paying for that again. A
+    // browser we only attached to is not ours to close at all.
+    if (a.keep || a.chrome.foreign) ws_close(&a.chrome.ws);
     else chrome_kill(&a.chrome);
     // Into the debug log rather than the terminal: quitting should hand the
     // shell back the way it found it.

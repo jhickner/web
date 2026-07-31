@@ -61,6 +61,30 @@ static int read_devtools_port(const char *profile, double timeout) {
     return -1;
 }
 
+// Anything at all listening there. A pinned port that belongs to some other
+// process leaves Chrome with no debug endpoint, and the only sign of it would
+// be the fifteen second wait for a port file that never arrives.
+static bool port_taken(int port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    struct sockaddr_in sa = {0};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((uint16_t)port);
+    inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr);
+    bool up = connect(fd, (struct sockaddr *)&sa, sizeof sa) == 0;
+    close(fd);
+    return up;
+}
+
+int chrome_probe(int port) {
+    if (port < 1 || port > 65535) return -1;
+    Buf resp = {0};
+    bool ok = http_get(port, "/json/version", &resp) == 0 && resp.len &&
+              strstr(resp.p, "Browser") != NULL;
+    buf_free(&resp);
+    return ok ? 0 : -1;
+}
+
 // A previous run that died without cleaning up leaves a live Chrome holding
 // the profile lock, which would make every later launch abort. If that browser
 // still answers on its recorded port, take it over instead.
@@ -74,13 +98,7 @@ static int adopt_running(Chrome *c) {
     fclose(f);
     if (ok != 1 || port <= 0) return -1;
 
-    Buf resp = {0};
-    int alive = 0;
-    if (http_get(port, "/json/version", &resp) == 0 && resp.len &&
-        strstr(resp.p, "Browser"))
-        alive = 1;
-    buf_free(&resp);
-    if (!alive) return -1;
+    if (chrome_probe(port) != 0) return -1;
 
     // Chrome records "<hostname>-<pid>" in the lock symlink, which is the only
     // place the pid of a browser we did not spawn is written down.
@@ -100,7 +118,7 @@ static int adopt_running(Chrome *c) {
 }
 
 int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
-                  bool mute, const char *user_agent, bool debug) {
+                  bool mute, const char *user_agent, bool debug, int port) {
     const char *bin = find_chrome();
     if (!bin) {
         fprintf(stderr, "web: no Chrome found. Set WEB_CHROME=/path/to/chrome\n");
@@ -121,7 +139,33 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     // Only worth adopting a browser we could actually drive. A login window is
     // wanted for itself, and a headless browser already holding the profile
     // would swallow the request and show nothing.
-    if (debug && adopt_running(c) == 0) return 0;   // caller navigates it to `url`
+    // A named port is a place, and a browser already answering there is the one
+    // that was asked for - the same thing the attach command does, and what
+    // makes --keep --port work: nothing writes that browser's port down
+    // anywhere, so the profile check below cannot find it.
+    if (debug && port > 0 && port_taken(port)) {
+        if (chrome_probe(port) == 0) {
+            c->port = port;
+            c->adopted = c->foreign = true;    // not ours to shut down
+            TRACE("took over the browser already on port %d", port);
+            return 0;
+        }
+        fprintf(stderr, "web: something that is not a browser is already on "
+                        "port %d\n", port);
+        return -1;
+    }
+
+    if (debug && adopt_running(c) == 0) {
+        // A pinned port is a promise to whatever is going to connect to it, and
+        // the browser already holding this profile is listening somewhere else.
+        if (port > 0 && c->port != port) {
+            fprintf(stderr, "web: chrome from an earlier run is on port %d, not %d.\n"
+                            "     quit it, or start with --port %d\n",
+                    c->port, port, c->port);
+            return -1;
+        }
+        return 0;                                   // caller navigates it to `url`
+    }
 
     // A stale port file would be read as this run's port, and a lock left by a
     // killed run makes Chrome abort before it ever opens the port.
@@ -135,14 +179,16 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     snprintf(scratch, sizeof scratch, "%s/SingletonCookie", c->profile);
     unlink(scratch);
 
-    char winsize[64], profarg[600];
+    char winsize[64], profarg[600], portarg[48];
     snprintf(winsize, sizeof winsize, "--window-size=%d,%d", w, h);
     snprintf(profarg, sizeof profarg, "--user-data-dir=%s", c->profile);
+    snprintf(portarg, sizeof portarg, "--remote-debugging-port=%d",
+             port > 0 ? port : 0);
 
     const char *argv[48];
     int a = 0;
     argv[a++] = bin;
-    if (debug) argv[a++] = "--remote-debugging-port=0";
+    if (debug) argv[a++] = portarg;
     argv[a++] = profarg;
     argv[a++] = winsize;
     argv[a++] = "--no-first-run";
@@ -210,7 +256,19 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     if (!debug) return 0;      // nothing to attach to, and no port to wait for
 
     TRACE("spawned chrome pid %d, waiting for port", (int)pid);
-    c->port = read_devtools_port(c->profile, 15.0);
+    if (port > 0) {
+        // Handed a port, Chrome does not write the port file at all, so the
+        // endpoint answering is both the wait and the confirmation.
+        c->port = -1;
+        double deadline = now_sec() + 15.0;
+        while (now_sec() < deadline) {
+            if (chrome_probe(port) == 0) { c->port = port; break; }
+            struct timespec ts = {0, 20 * 1000000};
+            nanosleep(&ts, NULL);
+        }
+    } else {
+        c->port = read_devtools_port(c->profile, 15.0);
+    }
     if (c->port < 0) {
         fprintf(stderr, "web: chrome did not open a debug port\n");
         chrome_kill(c);
@@ -363,6 +421,9 @@ void chrome_kill(Chrome *c) {
     // the session that was just established, which reads as being signed out
     // again on the next run.
     if (c->pid > 0 && c->ws.fd > 0 && !c->ws.closed) {
+        // Nothing is going to draw these, and a page still being screencast is
+        // work the browser has to finish before it can attend to shutting down.
+        cdp_call(c, "Page.stopScreencast", "");
         cdp_call(c, "Browser.close", "");
         for (int i = 0; i < 120; i++) {          // up to three seconds
             if (!chrome_alive(c)) { c->pid = 0; break; }

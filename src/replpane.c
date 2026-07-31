@@ -82,9 +82,13 @@ int repl_pane_rows(App *a) {
     return rows;
 }
 
+// Open and focused, or gone: the key that opens the pane is the key that puts
+// it away, whether or not it currently holds the keyboard. `esc` is the
+// narrower move, handing the keyboard back with the transcript still up.
 void repl_pane_toggle(App *a) {
     repl_pane_init(a);
-    if (a->repl_focus) {
+    if (a->repl_open) {
+        a->repl_open = false;
         a->repl_focus = false;
     } else {
         a->repl_open = true;
@@ -93,6 +97,15 @@ void repl_pane_toggle(App *a) {
 }
 
 // ---------------------------------------------------------------- transcript
+
+// A line the pane did not run, but that belongs in what it can recall: a
+// recorded command is one you often want back to edit or run again, and it has
+// to be there whether or not the pane was ever opened while it was written.
+void repl_pane_history_add(App *a, const char *line) {
+    if (!line || !*line) return;
+    repl_pane_init(a);
+    repl_history_add(&g_repl, line);
+}
 
 void repl_pane_log(App *a, const char *line) {
     const char *p = line ? line : "";
