@@ -63,6 +63,7 @@ typedef struct {
     int     status_row;
 
     bool    insert;            // a text field has focus: keys belong to the page
+    bool    mouse_down;        // a button went down on the page and is still held
     bool    pending_g;         // first half of gg
     int     prompt;            // 0 none, 1 address, 2 find
     char    find[256];         // last search, for n and N
@@ -304,15 +305,24 @@ static void draw_status(App *a) {
         // Park the cursor after the text being typed.
         buf_addf(&b, "\x1b[%d;%dH", row, sx + (int)a->edit_len + 5);
     } else {
+        // Two lengths of the same list. Copy earns its place in both: the page
+        // is an image, so the terminal's own copy has nothing to take, and a
+        // key nobody can guess is a key nobody uses.
+        static const char KEYS[]   = "^L url  ^O back  ^R reload  ^Y copy  ^Q quit";
+        static const char KEYS_S[] = "^L url  ^Y copy  ^Q quit";
+
         const char *left = a->title[0] ? a->title : a->url;
-        char hint[64];
-        if (a->show_stats)
-            snprintf(hint, sizeof hint, "%zuKB %.0fms %.1ffps  %dx%d@%dx z%.0f%%",
+        char stats[64];
+        const char *hint;
+        if (a->show_stats) {
+            snprintf(stats, sizeof stats, "%zuKB %.0fms %.1ffps  %dx%d@%dx z%.0f%%",
                      a->last_bytes / 1024, a->last_write_ms, a->fps,
                      a->css_w, a->css_h, a->scale,
                      100.0 * (sw * a->term.cell_w) / (a->css_w ? a->css_w : 1));
-        else
-            snprintf(hint, sizeof hint, "^L url  ^O back  ^R reload  ^Q quit");
+            hint = stats;
+        } else {
+            hint = sw > (int)sizeof KEYS + 3 ? KEYS : KEYS_S;
+        }
         int hintlen = (int)strlen(hint);
         // A narrow window drops the hint rather than shrinking the address to
         // nothing; when it goes, its room goes to the address.
@@ -627,12 +637,28 @@ static const char FOCUS_WATCHER[] =
 
 static void handle_mouse(App *a, Event *ev) {
     Kitty *k = &a->kitty;
-    if (ev->my < k->y || ev->my >= k->y + k->rows) return;
+    bool inside = ev->mx >= k->x && ev->mx < k->x + k->cols &&
+                  ev->my >= k->y && ev->my < k->y + k->rows;
+    // Anywhere else on the screen belongs to the shell - until a button is
+    // down. From then until it comes back up the pointer is the page's wherever
+    // it goes, because the release has to arrive: dropped for landing a row
+    // below the picture, it leaves the page holding a button nobody let go of,
+    // and every later click extends that abandoned selection instead of
+    // starting a new one.
+    if (!inside && !a->mouse_down) return;
 
     // Aim at the middle of the cell: the terminal only tells us which cell was
-    // clicked, so the center is the least wrong point inside it.
-    double fx = (ev->mx - k->x + 0.5) / (double)k->cols;
-    double fy = (ev->my - k->y + 0.5) / (double)k->rows;
+    // clicked, so the center is the least wrong point inside it. A drag that
+    // has wandered off the picture is answered by the nearest edge cell, which
+    // is what a window does with a pointer dragged past its frame.
+    int cx = ev->mx, cy = ev->my;
+    if (cx < k->x)               cx = k->x;
+    if (cx > k->x + k->cols - 1) cx = k->x + k->cols - 1;
+    if (cy < k->y)               cy = k->y;
+    if (cy > k->y + k->rows - 1) cy = k->y + k->rows - 1;
+
+    double fx = (cx - k->x + 0.5) / (double)k->cols;
+    double fy = (cy - k->y + 0.5) / (double)k->rows;
     int x = (int)(fx * a->css_w);
     int y = (int)(fy * a->css_h);
 
@@ -653,6 +679,7 @@ static void handle_mouse(App *a, Event *ev) {
         queue_move(a, x, y, btn, ev->press ? 1 : 0, cdp_mods);
         return;
     }
+    a->mouse_down = ev->press;
     app_cdp(a, "Input.dispatchMouseEvent",
              "\"type\":\"%s\",\"x\":%d,\"y\":%d,\"button\":\"%s\","
              "\"buttons\":%d,\"clickCount\":1,\"modifiers\":%d",
@@ -680,11 +707,17 @@ static void handle_paste(App *a, const char *text, size_t len) {
 }
 
 // Ask the page for its selection; the reply decides whether we copy the
-// selected text or fall back to the address.
+// selected text or fall back to the address. A text field keeps its selection
+// to itself - window.getSelection() reads empty while an input has focus - so
+// the focused element is asked first, and answers nothing unless it is one.
 static void copy_selection(App *a) {
     a->copy_req = app_cdp(a, "Runtime.evaluate",
-                           "\"expression\":\"window.getSelection().toString()\","
-                           "\"returnByValue\":true");
+        "\"expression\":\"(function(){try{var e=document.activeElement;"
+        "if(e&&(e.tagName==='INPUT'||e.tagName==='TEXTAREA')&&"
+        "e.selectionStart!==e.selectionEnd)"
+        "return e.value.substring(e.selectionStart,e.selectionEnd);}catch(x){}"
+        "return window.getSelection().toString();})()\","
+        "\"returnByValue\":true");
 }
 
 static void handle_key(App *a, Event *ev) {
