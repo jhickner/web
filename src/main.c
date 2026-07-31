@@ -132,6 +132,43 @@ static void clipboard_put(const char *text) {
     }
 }
 
+// The address, handed to whatever the desktop opens links with. exec rather
+// than a shell: a url is made of the characters a shell would act on. The
+// double fork orphans it, so the browser is nobody's child to reap here and
+// outlives us either way.
+static void open_external(App *a) {
+    if (!a->url[0] || !strncmp(a->url, "about:", 6)) {
+        notify(a, "nowhere to open");
+        return;
+    }
+#ifdef __APPLE__
+    const char *opener = "open";
+#else
+    const char *opener = "xdg-open";
+#endif
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) {
+            setsid();
+            // Whatever it has to say goes nowhere: this terminal is a picture.
+            int devnull = open("/dev/null", O_RDWR);
+            if (devnull >= 0) {
+                dup2(devnull, STDIN_FILENO);
+                dup2(devnull, STDOUT_FILENO);
+                dup2(devnull, STDERR_FILENO);
+                if (devnull > 2) close(devnull);
+            }
+            execlp(opener, opener, a->url, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0) {
+        waitpid(pid, NULL, 0);
+        notify(a, "opened in the default browser");
+    }
+}
+
 void notify(App *a, const char *s) {
     snprintf(a->msg, sizeof a->msg, "%s", s);
     a->msg_until = now_sec() + 2.0;
@@ -1217,6 +1254,7 @@ static void handle_key(App *a, Event *ev) {
             return;
         case 'o': nav_history(a, -1); return;
         case 'p': nav_history(a, +1); return;
+        case 'e': open_external(a); return;
         }
     }
 

@@ -33,6 +33,7 @@ set -g allow-passthrough all
 | `^O` / `^P` | back / forward |
 | `^R` | reload |
 | `^Y` | copy the page selection, or the address if nothing is selected |
+| `^E` | open this page in the desktop's own browser |
 | `^G` | devtools port, frame size, write time, and throughput |
 | `^S` | hide or show the status line |
 | `^Q` | quit |
