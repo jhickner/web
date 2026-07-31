@@ -51,6 +51,8 @@ typedef struct {
     unsigned frames, skipped;
     double  last_draw;
     double  last_metrics_fix;  // when the viewport override was last restored
+    double  expect_frame;      // something was done that should redraw; deadline
+    double  last_unwedge;      // when the screencast was last restarted for it
 
     bool    show_stats;        // ^G
     double  zoom;              // page magnification, alt+= / alt+-
@@ -853,6 +855,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         size_t dlen = end ? (size_t)(end - data) : 0;
 
         double sid = json_num(msg, "sessionId", 0);
+        a->expect_frame = 0;      // the page is still answering
 
         if (dlen) {
             uint64_t h = fnv1a(data, dlen);
@@ -905,6 +908,11 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
     }
 
     if (strstr(msg, "Page.frameNavigated") && !strstr(msg, "\"parentId\"")) {
+        // A new document should always paint something, and the placeholder
+        // cells are worth writing again: anything that scrolled or overwrote
+        // them leaves the picture stranded where it was.
+        a->expect_frame = now_sec() + 2.0;
+        a->kitty.grid_dirty = true;
         size_t n;
         const char *u = json_str(msg, "url", &n);
         if (u && n < sizeof a->url) {
@@ -1210,7 +1218,8 @@ int main(int argc, char **argv) {
 
         // Nothing here is on a timer except an undecided ESC and an expiring
         // notice, so the loop sleeps until something actually happens.
-        int wait = (a.term.in.len || a.msg_until > now_sec()) ? 20 : -1;
+        int wait = (a.term.in.len || a.msg_until > now_sec() ||
+                    a.expect_frame > 0) ? 20 : -1;
         int rc = poll(fds, 2, wait);
         if (rc < 0 && !g_resized) continue;
 
@@ -1229,6 +1238,23 @@ int main(int argc, char **argv) {
             // A move held back during the batch goes out now.
             flush_pending(&a);
             draw_status(&a);
+            // Whatever that was, the page should have something to say about
+            // it. If it does not, the watchdog below finds out.
+            if (a.expect_frame == 0) a.expect_frame = now_sec() + 2.0;
+        }
+
+        // Chrome sends the next frame only once the last one is acknowledged,
+        // so anything that breaks that chain stops the picture for good while
+        // the rest of the session carries on: the address bar still moves, the
+        // title still changes, and nothing is drawn again. Restarting the
+        // screencast is the one thing that always brings a frame back.
+        if (a.expect_frame > 0 && now_sec() > a.expect_frame &&
+            now_sec() - a.last_unwedge > 3.0) {
+            a.last_unwedge = now_sec();
+            a.expect_frame = 0;
+            term_log("no frame after acting on input; restarting screencast");
+            a.kitty.grid_dirty = true;
+            relayout(&a);
         }
 
         if (fds[1].revents & (POLLIN | POLLHUP)) {
