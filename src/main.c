@@ -62,6 +62,10 @@ typedef struct {
     int     prompt;            // 0 none, 1 address, 2 find
     char    find[256];         // last search, for n and N
 
+    int     box_rows;          // inline: cell rows the window occupies
+    int     width_idx;         // cursor into WIDTHS, 0 = derived from the cells
+    bool    scale_locked;      // the render scale was chosen by hand
+
     bool    fit_width;         // widen the viewport so no page is cut off
     int     fit_req;
     int     fit_w;             // width the page says it needs
@@ -73,6 +77,7 @@ typedef struct {
     char    msg[256];
     double  msg_until;
 
+    bool    mute;              // start chrome with its audio switched off
     bool    keep;              // leave chrome running so the next start adopts it
     Buf     status, status_last;
 } App;
@@ -168,19 +173,45 @@ static void notify(App *a, const char *s) {
 
 // ------------------------------------------------------------------ layout
 
+// Inline mode is a window sitting in the shell's flow, so it has a shape of its
+// own rather than the terminal's. Cells are taller than they are wide, so the
+// proportion has to be struck in pixels or the box comes out square.
+#define BOX_ASPECT (16.0 / 10.0)
+
+static int box_cols_for(App *a, int rows) {
+    Term *t = &a->term;
+    int want = (int)((double)(rows * t->cell_h) * BOX_ASPECT / t->cell_w + 0.5);
+    if (want > t->cols) want = t->cols;
+    if (want < 10) want = 10;
+    return want;
+}
+
 static void relayout(App *a) {
     Term *t = &a->term;
     term_size(t);
 
+    int rect_cols;
     if (a->inline_mode) {
-        a->img_rows = t->inline_rows - 1;
-        if (a->img_rows < 1) a->img_rows = 1;
-        kitty_set_rect(&a->kitty, 1, t->inline_origin, t->cols, a->img_rows);
+        // The terminal may have shrunk under the box since it was last sized.
+        int max_rows = t->rows - 1;
+        if (a->box_rows > max_rows) a->box_rows = max_rows;
+        if (a->box_rows < 2) a->box_rows = 2;
+        a->img_rows = a->box_rows;
+        rect_cols = box_cols_for(a, a->img_rows);
+        // Keep the whole block, status line included, on the screen. A block
+        // whose last row falls past the bottom scrolls the terminal as it is
+        // drawn, which lands half the picture at the top and half at the
+        // bottom - and the halves never line back up.
+        if (t->inline_origin + a->img_rows > t->rows)
+            t->inline_origin = t->rows - a->img_rows;
+        if (t->inline_origin < 1) t->inline_origin = 1;
+        kitty_set_rect(&a->kitty, 1, t->inline_origin, rect_cols, a->img_rows);
         a->status_row = t->inline_origin + a->img_rows;
     } else {
         a->img_rows = t->rows - 1;
         if (a->img_rows < 1) a->img_rows = 1;
-        kitty_set_rect(&a->kitty, 1, 1, t->cols, a->img_rows);
+        rect_cols = t->cols;
+        kitty_set_rect(&a->kitty, 1, 1, rect_cols, a->img_rows);
         a->status_row = t->rows;
     }
 
@@ -188,7 +219,7 @@ static void relayout(App *a) {
     // from these: whatever the terminal is handed gets resampled to this size,
     // and a resample by any fraction is what shaves the bottom off a line of
     // text, so the goal is to be handed exactly this and never resample at all.
-    int rect_w = t->cols * t->cell_w;
+    int rect_w = rect_cols * t->cell_w;
     int rect_h = a->img_rows * t->cell_h;
     if (rect_w < 1) rect_w = 1;
     if (rect_h < 1) rect_h = 1;
@@ -200,17 +231,24 @@ static void relayout(App *a) {
     // Widening the viewport to what it asks for keeps all of it in view; the
     // text ends up smaller, which is the honest trade.
     if (a->fit_width && a->fit_w > w) w = a->fit_w;
-    if (w < 200) w = 200;
+    // Low enough that an inline window has to be truly tiny before the number
+    // it reports stops tracking its actual size, which is the one thing
+    // resizing the box is for.
+    if (w < 120) w = 120;
 
     a->css_w = w;
+    // Derived from the width and never clamped on its own: a floor applied to
+    // one axis alone changes the viewport's shape, and the whole point of the
+    // size below is that the shape already matches the cells it lands on.
     a->css_h = (int)((double)w * rect_h / rect_w + 0.5);
-    if (a->css_h < 200) a->css_h = 200;
+    if (a->css_h < 1) a->css_h = 1;
 
     // Every frame crosses the terminal as base64, so the pixel count sets the
     // cost of everything: Chrome's encode, the write, and how long a keypress
     // waits behind it. A 2x ratio quadruples that, so cap it on wide panes.
     a->scale = a->want_scale;
-    while (a->scale > 1 && (long)rect_w * a->scale > 1920) a->scale--;
+    if (!a->scale_locked)
+        while (a->scale > 1 && (long)rect_w * a->scale > 1920) a->scale--;
 
     // The ratio that turns the viewport into those pixels. Zoom and fit-width
     // both make it fractional, and it is Chrome's job rather than the
@@ -243,25 +281,36 @@ static void draw_status(App *a) {
     b.len = 0;
     int row = a->status_row > 0 ? a->status_row : t->rows;
 
-    buf_addf(&b, "\x1b[%d;1H\x1b[2K", row);
+    // The line belongs to the window above it, not to the terminal: inline, the
+    // box is narrower than the screen, and a status bar running past its edge
+    // reads as part of the shell rather than part of the page.
+    int sx = a->kitty.x > 0 ? a->kitty.x : 1;
+    int sw = a->kitty.cols > 0 ? a->kitty.cols : t->cols;
+    if (sx + sw - 1 > t->cols) sw = t->cols - sx + 1;
+    if (sw < 8) sw = 8;
+
+    buf_addf(&b, "\x1b[%d;1H\x1b[2K\x1b[%d;%dH", row, row, sx);
 
     if (a->editing) {
         buf_addf(&b, "\x1b[7m %s \x1b[0m %.*s\x1b[?25h",
                  a->prompt == 2 ? "find" : "go", (int)a->edit_len, a->edit);
         // Park the cursor after the text being typed.
-        buf_addf(&b, "\x1b[%d;%dH", row, (int)a->edit_len + 6);
+        buf_addf(&b, "\x1b[%d;%dH", row, sx + (int)a->edit_len + 5);
     } else {
         const char *left = a->title[0] ? a->title : a->url;
         char hint[64];
         if (a->show_stats)
-            snprintf(hint, sizeof hint, "%zuKB %.0fms %.1ffps  %dx%d z%.0f%%",
+            snprintf(hint, sizeof hint, "%zuKB %.0fms %.1ffps  %dx%d@%dx z%.0f%%",
                      a->last_bytes / 1024, a->last_write_ms, a->fps,
-                     a->css_w, a->css_h,
-                     100.0 * (a->term.cols * a->term.cell_w) / (a->css_w ? a->css_w : 1));
+                     a->css_w, a->css_h, a->scale,
+                     100.0 * (sw * a->term.cell_w) / (a->css_w ? a->css_w : 1));
         else
             snprintf(hint, sizeof hint, "^L url  ^O back  ^R reload  ^Q quit");
         int hintlen = (int)strlen(hint);
-        int avail = t->cols - hintlen - 3;
+        // A narrow window drops the hint rather than shrinking the address to
+        // nothing; when it goes, its room goes to the address.
+        bool show_hint = sw > hintlen + 4;
+        int avail = show_hint ? sw - hintlen - 3 : sw - 2;
         if (avail < 8) avail = 8;
 
         if (a->insert)
@@ -272,9 +321,9 @@ static void draw_status(App *a) {
             buf_addf(&b, " %s%.*s\x1b[0m", a->loading ? "\x1b[33m" : "\x1b[2m",
                      avail, left);
 
-        if (t->cols > hintlen + 4)
+        if (show_hint)
             buf_addf(&b, "\x1b[%d;%dH\x1b[2m%s\x1b[0m", row,
-                     t->cols - hintlen, hint);
+                     sx + sw - hintlen - 1, hint);
         buf_add(&b, "\x1b[?25l", 6);
     }
 
@@ -401,6 +450,70 @@ static void save_zoom(double z) {
     if (!f) return;
     fprintf(f, "zoom=%.4f\n", z);
     fclose(f);
+}
+
+// The width the page is told it has. It is the same knob as zoom seen from the
+// other end - the viewport is the cell rect divided by the zoom - but a page
+// that breaks at 1024 is easier to ask for by name than by percentage.
+static const int WIDTHS[] = {800, 1024, 1280, 1440, 1600, 1920};
+
+static void cycle_width(App *a, int step) {
+    int n = (int)(sizeof WIDTHS / sizeof *WIDTHS);
+    a->width_idx += step;
+    if (a->width_idx < 0) a->width_idx = n;
+    if (a->width_idx > n) a->width_idx = 0;
+
+    char m[80];
+    if (a->width_idx == 0) {
+        a->zoom = 1.0;              // back to whatever the cell rect gives
+        snprintf(m, sizeof m, "width auto");
+    } else {
+        int want = WIDTHS[a->width_idx - 1];
+        int rect_w = a->term.cols * a->term.cell_w;
+        a->zoom = (double)rect_w / want;
+        if (a->zoom < 0.4) a->zoom = 0.4;
+        if (a->zoom > 4.0) a->zoom = 4.0;
+        snprintf(m, sizeof m, "width %dpx (zoom %.0f%%)", want, a->zoom * 100);
+    }
+    a->fit_w = 0;
+    relayout(a);
+    save_zoom(a->zoom);
+    notify(a, m);
+    request_fit(a);
+}
+
+// Resize the inline window. The page is told about the new size the same way it
+// would be told about a dragged window corner: the box sets the cell rect, the
+// cell rect sets the viewport, and the layout follows from there.
+static void resize_box(App *a, int delta) {
+    int want = a->box_rows + delta;
+    if (want < 2) want = 2;
+    if (want > a->term.rows - 1) want = a->term.rows - 1;
+    if (want == a->box_rows) return;
+
+    a->box_rows = want;
+    kitty_clear(&a->kitty);            // the rows underneath are about to move
+    term_resize_inline(&a->term, want + 1);   // the status line lives below it
+    a->status_last.len = 0;
+    relayout(a);
+
+    char m[64];
+    snprintf(m, sizeof m, "window %dx%d", a->css_w, a->css_h);
+    notify(a, m);
+    request_fit(a);
+}
+
+// How many pixels Chrome renders per pixel the terminal will show. Above 1 it
+// is supersampling: the page is drawn larger and comes down to the cell rect,
+// which is the only way to get detail past what the cells can hold. It costs
+// the square of itself in bytes across the terminal, so it is a choice.
+static void cycle_scale(App *a) {
+    a->want_scale = a->want_scale >= 3 ? 1 : a->want_scale + 1;
+    a->scale_locked = true;         // an explicit ask outranks the width cap
+    relayout(a);
+    char m[48];
+    snprintf(m, sizeof m, "render %dx", a->want_scale);
+    notify(a, m);
 }
 
 // Zoom is a request, not a command: the viewport narrows to magnify, and a page
@@ -653,8 +766,18 @@ static void handle_key(App *a, Event *ev) {
         case 'G':
             scroll_page_end(a, true);
             return;
-        case '[': zoom_by(a, 1.0 / 1.25); return;
-        case ']': zoom_by(a, 1.25);        return;
+        // Inline draws a window, so the brackets resize it; taking the whole
+        // screen there is no window to resize and they zoom instead. alt+= and
+        // alt+- zoom either way.
+        case '[':
+            if (a->inline_mode) resize_box(a, -1); else zoom_by(a, 1.0 / 1.25);
+            return;
+        case ']':
+            if (a->inline_mode) resize_box(a, +1); else zoom_by(a, 1.25);
+            return;
+        case 'w': cycle_width(a, +1); return;
+        case 'W': cycle_width(a, -1); return;
+        case 's': cycle_scale(a);     return;
         case 'n': find_next(a, false); return;
         case 'N': find_next(a, true);  return;
         case '/':
@@ -849,6 +972,7 @@ static void usage(void) {
         "  --zoom F    page magnification (default 1.0)\n"
         "  --inline    draw a block in the shell's flow instead of taking over\n"
         "  --rows N    rows for that block (implies --inline)\n"
+        "  --mute      start with the page's audio switched off\n"
         "  --keep      leave chrome running on exit so the next start is instant\n");
 }
 
@@ -893,6 +1017,8 @@ int main(int argc, char **argv) {
             show = true;
         } else if (!strcmp(argv[i], "--keep")) {
             a.keep = true;
+        } else if (!strcmp(argv[i], "--mute")) {
+            a.mute = true;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage();
             return 0;
@@ -921,8 +1047,7 @@ int main(int argc, char **argv) {
     int fw, fh;
     first_size(&a, &fw, &fh);
 
-    fprintf(stderr, "web: starting chrome...\n");
-    if (chrome_launch(&a.chrome, first, fw, fh, show) < 0) return 1;
+    if (chrome_launch(&a.chrome, first, fw, fh, show, a.mute) < 0) return 1;
     if (chrome_attach(&a.chrome) < 0) { chrome_kill(&a.chrome); return 1; }
 
     term_enter(&a.term, a.inline_mode);
@@ -931,6 +1056,7 @@ int main(int argc, char **argv) {
         if (rows > a.term.rows) rows = a.term.rows;
         if (rows < 4) rows = 4;
         term_reserve_inline(&a.term, rows);
+        a.box_rows = rows - 1;         // the row below the box is the status line
     }
     g_app = &a;
     g_input_pump = pump_input;
@@ -1035,6 +1161,8 @@ int main(int argc, char **argv) {
     // profile and the next run adopts it instead of paying for that again.
     if (a.keep) ws_close(&a.chrome.ws);
     else chrome_kill(&a.chrome);
-    printf("web: %u frames drawn, %u duplicates skipped\n", a.frames, a.skipped);
+    // Into the debug log rather than the terminal: quitting should hand the
+    // shell back the way it found it.
+    term_log("%u frames drawn, %u duplicates skipped", a.frames, a.skipped);
     return 0;
 }

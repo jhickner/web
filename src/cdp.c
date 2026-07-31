@@ -99,7 +99,8 @@ static int adopt_running(Chrome *c) {
     return 0;
 }
 
-int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window) {
+int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
+                  bool mute) {
     const char *bin = find_chrome();
     if (!bin) {
         fprintf(stderr, "web: no Chrome found. Set WEB_CHROME=/path/to/chrome\n");
@@ -146,7 +147,7 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window) {
     argv[a++] = "--disable-background-networking";
     argv[a++] = "--disable-component-update";
     argv[a++] = "--disable-sync";
-    argv[a++] = "--mute-audio";
+    if (mute) argv[a++] = "--mute-audio";
     argv[a++] = "--noerrdialogs";
     argv[a++] = "--disable-features=Translate,MediaRouter";
 

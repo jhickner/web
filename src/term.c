@@ -110,15 +110,98 @@ void term_enter(Term *t, bool inline_mode) {
 // Scroll a block of rows into view and take the bottom of the screen for it.
 // The origin comes from the terminal height rather than a cursor-position
 // query, which tmux answers unreliably and which can swallow keystrokes.
+// Where the cursor is, asked of the terminal rather than assumed. Whatever else
+// arrives while the answer is on its way is kept: those are keystrokes, and the
+// block is being set up at exactly the moment someone is most likely to type.
+static int query_cursor_row(Term *t) {
+    writeall(t->fd, "\x1b[6n", 4);
+
+    char buf[256];
+    size_t n = 0;
+    double deadline = now_sec() + 0.25;
+    while (now_sec() < deadline && n < sizeof buf - 1) {
+        struct pollfd p = {t->fd, POLLIN, 0};
+        if (poll(&p, 1, 20) <= 0) continue;
+        ssize_t r = read(t->fd, buf + n, sizeof buf - 1 - n);
+        if (r <= 0) continue;
+        n += (size_t)r;
+
+        // Look for CSI row ; col R anywhere in what has arrived so far.
+        for (size_t i = 0; i + 2 < n; i++) {
+            if (buf[i] != 0x1b || buf[i + 1] != '[') continue;
+            size_t e = i + 2;
+            while (e < n && ((buf[e] >= '0' && buf[e] <= '9') || buf[e] == ';')) e++;
+            if (e >= n) break;                  // still arriving
+            if (buf[e] != 'R') continue;
+            int row = 0, col = 0;
+            if (sscanf(buf + i + 2, "%d;%d", &row, &col) != 2) continue;
+            buf_add(&t->in, buf, i);            // keep what came before it
+            buf_add(&t->in, buf + e + 1, n - e - 1);   // and after
+            return row;
+        }
+    }
+    buf_add(&t->in, buf, n);       // no answer: none of it was for us to eat
+    return 0;
+}
+
 void term_reserve_inline(Term *t, int rows) {
     if (rows > t->rows) rows = t->rows;
     if (rows < 2) rows = 2;
     Buf b = {0};
-    for (int i = 0; i < rows; i++) buf_add(&b, "\n", 1);
+    for (int i = 0; i < rows; i++) buf_add(&b, "\r\n", 2);
     writeall(t->fd, b.p, b.len);
     buf_free(&b);
+
+    // Climb back to the block's first row and ask where that turned out to be.
+    // Those newlines only scroll the screen if the cursor was already near the
+    // bottom of it; anywhere else they just walk down, and the block belongs
+    // where the cursor started - under the command that was just run - rather
+    // than pinned to the bottom edge.
+    char up[32];
+    int n = snprintf(up, sizeof up, "\x1b[%dA", rows);
+    writeall(t->fd, up, (size_t)n);
+
+    int row = query_cursor_row(t);
+    t->inline_origin = row > 0 ? row : t->rows - rows + 1;
+    if (t->inline_origin < 1) t->inline_origin = 1;
     t->inline_rows = rows;
-    t->inline_origin = t->rows - rows + 1;
+}
+
+// Regrow or shrink the reserved block in place. The caller drops the image
+// first: the rows it lives on are about to mean something else, and a picture
+// left addressed to them survives as a smear the terminal will not clean up.
+void term_resize_inline(Term *t, int rows) {
+    if (rows < 2) rows = 2;
+    if (rows > t->rows) rows = t->rows;
+    if (t->inline_rows < 1) { term_reserve_inline(t, rows); return; }
+    if (rows == t->inline_rows) return;
+
+    char buf[32];
+    for (int i = 0; i < t->inline_rows; i++) {
+        int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[2K", t->inline_origin + i);
+        writeall(t->fd, buf, (size_t)n);
+    }
+
+    // Shrinking keeps the origin and simply owns fewer rows. Scrolling the
+    // difference away instead would drag the shell's history up with it.
+    if (rows < t->inline_rows) {
+        t->inline_rows = rows;
+        return;
+    }
+
+    int bottom = t->inline_origin + t->inline_rows - 1;
+    int n = snprintf(buf, sizeof buf, "\x1b[%d;1H", bottom);
+    writeall(t->fd, buf, (size_t)n);
+    int extra = rows - t->inline_rows;
+    for (int i = 0; i < extra; i++) writeall(t->fd, "\r\n", 2);
+
+    // Where the block ended up, worked out from how far past the last row we
+    // asked the terminal to go. Asking it directly means a cursor report, and
+    // that read would race the keystrokes still arriving.
+    int overflow = bottom + extra - t->rows;
+    if (overflow > 0) t->inline_origin -= overflow;
+    if (t->inline_origin < 1) t->inline_origin = 1;
+    t->inline_rows = rows;
 }
 
 void term_restore(Term *t) {

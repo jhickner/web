@@ -8,7 +8,24 @@
 // their foreground colour, and anything that re-fits colours on the way (tmux
 // when it is unsure the terminal takes truecolor) would turn a small id like 1
 // into a palette index and lose it. This value survives the trip.
-#define IMAGE_ID   0x0A5F31
+//
+// The low byte is the process, because inline mode leaves its cells behind on
+// purpose - the picture stays in the scrollback after quitting. Those cells go
+// on naming whatever id they were drawn with, so a second run that reused the
+// id would repaint the old block with the new page: the earlier window mirrors
+// the new one, and a picture arriving in two places at once reads as a single
+// one torn in half.
+// Both process bytes are forced odd so neither can come out zero, which is what
+// the three-distinct-bytes rule above is really asking for. That leaves about
+// fourteen bits of the pid, so two runs sharing an id is a one-in-sixteen-
+// thousand event rather than a one-in-256 one.
+#define IMAGE_ID_BASE 0x0A0000
+static unsigned image_id(void) {
+    unsigned pid = (unsigned)getpid();
+    unsigned hi = ((pid >> 8) & 0xff) | 1;
+    unsigned lo = (pid & 0xff) | 1;
+    return IMAGE_ID_BASE | (hi << 8) | lo;
+}
 #define PLACEMENT  1
 #define CHUNK      4096
 
@@ -104,8 +121,9 @@ static void draw_grid(Kitty *k) {
     char enc[8], cell[8];
     size_t celln = utf8_encode(PLACEHOLDER_CP, cell);
 
-    buf_addf(&k->out, "\x1b[38;2;%u;%u;%um", (IMAGE_ID >> 16) & 0xff,
-             (IMAGE_ID >> 8) & 0xff, IMAGE_ID & 0xff);
+    unsigned id = image_id();
+    buf_addf(&k->out, "\x1b[38;2;%u;%u;%um", (id >> 16) & 0xff,
+             (id >> 8) & 0xff, id & 0xff);
     for (int r = 0; r < rows; r++) {
         buf_addf(&k->out, "\x1b[%d;%dH", k->y + r, k->x);
         for (int c = 0; c < cols; c++) {
@@ -137,8 +155,8 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
         char hdr[64];
         int hn;
         if (first)
-            hn = snprintf(hdr, sizeof hdr, "\x1b_Ga=t,f=100,t=d,i=%d,q=2,m=%d;",
-                          IMAGE_ID, more);
+            hn = snprintf(hdr, sizeof hdr, "\x1b_Ga=t,f=100,t=d,i=%u,q=2,m=%d;",
+                          image_id(), more);
         else
             hn = snprintf(hdr, sizeof hdr, "\x1b_Gm=%d;", more);
 
@@ -156,8 +174,8 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
     // drop placements, and one 40-byte escape is cheaper than finding out.
     char place[128];
     int pn = snprintf(place, sizeof place,
-                      "\x1b_Ga=p,U=1,i=%d,p=%d,c=%d,r=%d,q=2\x1b\\",
-                      IMAGE_ID, PLACEMENT, k->cols, k->rows);
+                      "\x1b_Ga=p,U=1,i=%u,p=%d,c=%d,r=%d,q=2\x1b\\",
+                      image_id(), PLACEMENT, k->cols, k->rows);
     emit_esc(k, place, (size_t)pn);
 
     if (k->grid_dirty) {
@@ -181,7 +199,7 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
 void kitty_clear(Kitty *k) {
     k->out.len = 0;
     char seq[64];
-    int n = snprintf(seq, sizeof seq, "\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", IMAGE_ID);
+    int n = snprintf(seq, sizeof seq, "\x1b_Ga=d,d=I,i=%u,q=2\x1b\\", image_id());
     emit_esc(k, seq, (size_t)n);
     writeall(k->ttyfd, k->out.p, k->out.len);
     k->out.len = 0;

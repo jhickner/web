@@ -61,7 +61,8 @@ typedef struct {
     int   next_id;
 } Chrome;
 
-int  chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window);
+int  chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
+                   bool mute);
 int  chrome_attach(Chrome *c);
 void chrome_kill(Chrome *c);
 
@@ -129,6 +130,7 @@ typedef struct {
 int  term_probe(Term *t);                 // open the tty and measure it
 void term_enter(Term *t, bool inline_mode); // raw mode, alt screen, mouse
 void term_reserve_inline(Term *t, int rows);
+void term_resize_inline(Term *t, int rows);   // caller drops the image first
 void term_restore(Term *t);
 void term_size(Term *t);
 int  term_read(Term *t);                  // pull available bytes

@@ -51,7 +51,9 @@ While reading:
 | `d` / `u` | half a screen |
 | `space` / `b` | a screen |
 | `gg` / `G` | top / bottom of the page |
-| `[` / `]` | zoom out / in |
+| `[` / `]` | zoom out / in — or resize the window, inline |
+| `w` / `W` | step the width the page is told it has |
+| `s` | render scale: 1x, 2x, 3x |
 | `/` | find in page, then `n` / `N` for next and previous |
 | `i` | hand the keyboard to the page |
 | `esc` | take it back |
@@ -61,6 +63,13 @@ page has the keyboard.
 
 Zoom is remembered between runs, in `~/.config/web/state`. `--zoom` overrides it
 for one run without disturbing it.
+
+`w` and `s` are the two halves of how big the page comes out. `w` sets the width
+the page is *told* it has — 800, 1024, 1280, 1440, 1600, 1920, then back to
+whatever the cells work out to — which is what decides where a layout breaks.
+`s` sets how many pixels Chrome renders per pixel the terminal shows: above 1x
+it draws larger and comes back down, which is the only way to get detail finer
+than the cells, at the square of the cost in bytes.
 
 `cmd+v` needs nothing: the terminal turns it into a bracketed paste, which is
 ordinary input. `cmd+c` is the other way around — the terminal keeps that one
@@ -105,14 +114,25 @@ kill it.
 
 ## Inline mode
 
-`--inline` scrolls a block into the bottom of the screen and draws there,
-leaving the shell's screen and scrollback intact. Quitting leaves the page
+`--inline` opens a block where the cursor already is — right under the command
+you ran — and draws there, leaving the shell's screen and scrollback intact.
+Whether that takes any scrolling depends on how far down the screen you were,
+which only the terminal knows, so it is asked rather than assumed. Quitting
+leaves the page
 behind: the placeholder cells are ordinary text, so the picture scrolls up with
 everything else and stays in your history.
 
 ```sh
 ./web --rows 20 news.ycombinator.com
 ```
+
+The block is a window, not a viewport onto a bigger one, so `[` and `]` resize
+it and the page is told about it the way it would be told about a dragged
+corner: the box sets the cell rect, the cell rect sets the viewport, and the
+layout follows. It keeps a 16:10 shape, struck in pixels rather than cells,
+which are not square. Growing scrolls the extra rows into view; shrinking keeps
+the top edge where it is and simply owns fewer rows, so the history above never
+moves. `alt+=` and `alt+-` still zoom, inline or not.
 
 Without it, `web` takes the whole terminal on the alternate screen and restores
 it on the way out.
