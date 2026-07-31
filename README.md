@@ -62,8 +62,9 @@ While reading:
 Page up and down and tab always go to the page, as do all four arrows once the
 page has the keyboard.
 
-Zoom is remembered between runs, in `~/.config/web/state`. `--zoom` overrides it
-for one run without disturbing it.
+Zoom and the height of the inline window are remembered between runs, in
+`~/.config/web/state`. `--zoom` and `--rows` override them for one run without
+disturbing them.
 
 `^S` hides the status line, and `--no-status` starts without it. The row is not
 left blank: `--full` gives it to the page, and the inline window simply becomes
@@ -166,7 +167,8 @@ corner: the box sets the cell rect, the cell rect sets the viewport, and the
 layout follows. It keeps a 16:10 shape, struck in pixels rather than cells,
 which are not square. Growing scrolls the extra rows into view; shrinking keeps
 the top edge where it is and simply owns fewer rows, so the history above never
-moves. `alt+=` and `alt+-` still zoom either way.
+moves. The height you settle on is kept for the next run, and comes back down if
+that one is in a shorter terminal. `alt+=` and `alt+-` still zoom either way.
 
 `--full` gives up the window and takes the whole terminal on the alternate
 screen instead, restoring it on the way out. There is no box to resize there, so

@@ -447,10 +447,11 @@ static void request_fit(App *a) {
         "document.body?document.body.scrollWidth:0)\",\"returnByValue\":true");
 }
 
-// What is worth outliving the process: the zoom, which belongs to the terminal
-// it is being read in rather than to any page, and the user agent, which has to
-// be known before Chrome starts and can only be learned from a Chrome already
-// running. Both are keyed to nothing - one browser, one terminal, one file.
+// What is worth outliving the process: the zoom and the height of the inline
+// window, which belong to the terminal they are being read in rather than to
+// any page, and the user agent, which has to be known before Chrome starts and
+// can only be learned from a Chrome already running. All of it is keyed to
+// nothing - one browser, one terminal, one file.
 static void state_path(char *out, size_t cap) {
     const char *cfg = getenv("XDG_CONFIG_HOME");
     const char *home = getenv("HOME");
@@ -470,6 +471,9 @@ static void load_state(App *a) {
         if (!strncmp(line, "zoom=", 5)) {
             double z = atof(line + 5);
             if (z >= 0.4 && z <= 4.0) a->zoom = z;
+        } else if (!strncmp(line, "rows=", 5)) {
+            int r = atoi(line + 5);
+            if (r >= 2 && r <= 500) a->want_rows = r;
         } else if (!strncmp(line, "ua=", 3) && line[3]) {
             snprintf(a->ua, sizeof a->ua, "%s", line + 3);
         }
@@ -485,6 +489,10 @@ static void save_state(App *a) {
     FILE *f = fopen(path, "w");
     if (!f) return;
     fprintf(f, "zoom=%.4f\n", a->zoom);
+    // --full has no window of its own, so it carries whatever was stored for
+    // the inline one through rather than dropping it.
+    int rows = a->box_rows > 0 ? a->box_rows : a->want_rows;
+    if (rows > 0) fprintf(f, "rows=%d\n", rows);
     if (a->ua[0]) fprintf(f, "ua=%s\n", a->ua);
     fclose(f);
 }
@@ -534,6 +542,7 @@ static void resize_box(App *a, int delta) {
     term_resize_inline(&a->term, want + status);   // the status line sits below
     a->status_last.len = 0;
     relayout(a);
+    save_state(a);
 
     char m[64];
     snprintf(m, sizeof m, "window %dx%d", a->css_w, a->css_h);
@@ -1182,7 +1191,10 @@ int main(int argc, char **argv) {
     if (a.inline_mode) {
         int status = a.status_open ? 1 : 0;   // the row below the box, if shown
         int rows = a.want_rows > 0 ? a.want_rows + status : a.term.rows / 2;
-        if (rows > a.term.rows) rows = a.term.rows;
+        // A height remembered from a taller terminal, or asked for on the
+        // command line, comes back down to what this one has - and never takes
+        // the last row, which the shell gets its prompt back on.
+        if (rows > a.term.rows - 1) rows = a.term.rows - 1;
         if (rows < 4) rows = 4;
         term_reserve_inline(&a.term, rows);
         a.box_rows = rows - status;
