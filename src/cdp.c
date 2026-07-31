@@ -100,7 +100,7 @@ static int adopt_running(Chrome *c) {
 }
 
 int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
-                  bool mute) {
+                  bool mute, const char *user_agent, bool debug) {
     const char *bin = find_chrome();
     if (!bin) {
         fprintf(stderr, "web: no Chrome found. Set WEB_CHROME=/path/to/chrome\n");
@@ -118,7 +118,10 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
                  home ? home : "/tmp");
     mkdirs(c->profile);
 
-    if (adopt_running(c) == 0) return 0;   // caller navigates it to `url`
+    // Only worth adopting a browser we could actually drive. A login window is
+    // wanted for itself, and a headless browser already holding the profile
+    // would swallow the request and show nothing.
+    if (debug && adopt_running(c) == 0) return 0;   // caller navigates it to `url`
 
     // A stale port file would be read as this run's port, and a lock left by a
     // killed run makes Chrome abort before it ever opens the port.
@@ -139,7 +142,7 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     const char *argv[48];
     int a = 0;
     argv[a++] = bin;
-    argv[a++] = "--remote-debugging-port=0";
+    if (debug) argv[a++] = "--remote-debugging-port=0";
     argv[a++] = profarg;
     argv[a++] = winsize;
     argv[a++] = "--no-first-run";
@@ -171,6 +174,16 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     argv[a++] = "--disable-renderer-backgrounding";
     argv[a++] = "--disable-backgrounding-occluded-windows";
 
+    // Set here rather than through Emulation.setUserAgentOverride, which
+    // silences navigator.userAgentData entirely: a browser claiming to be
+    // Chrome while reporting no brands at all is a stranger sight than the
+    // headless marker this is removing. The flag leaves the hints intact.
+    char uaarg[600];
+    if (user_agent && *user_agent) {
+        snprintf(uaarg, sizeof uaarg, "--user-agent=%s", user_agent);
+        argv[a++] = uaarg;
+    }
+
     if (!show_window) argv[a++] = "--headless=new";
     argv[a++] = url;
     argv[a] = NULL;
@@ -193,6 +206,8 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     }
     c->pid = pid;
     setpgid(pid, pid);
+
+    if (!debug) return 0;      // nothing to attach to, and no port to wait for
 
     TRACE("spawned chrome pid %d, waiting for port", (int)pid);
     c->port = read_devtools_port(c->profile, 15.0);
@@ -250,6 +265,42 @@ static int http_get(int port, const char *path, Buf *out) {
     return out->len ? 0 : -1;
 }
 
+// Chrome's own user agent, with the one word that gives it away taken out.
+// Nothing here is headless in any sense a site should care about - it lays out,
+// paints and composites the same as any window - but the string says
+// "HeadlessChrome", and Google refuses to sign anyone in from it.
+//
+// Read from the browser rather than written out here: a hardcoded version goes
+// stale on the next Chrome update, and a user agent claiming a version the
+// browser does not have is a worse tell than the one it replaces.
+int chrome_user_agent(Chrome *c, char *out, size_t cap) {
+    Buf resp = {0};
+    if (http_get(c->port, "/json/version", &resp) != 0 || !resp.len) {
+        buf_free(&resp);
+        return -1;
+    }
+    size_t n = 0;
+    const char *ua = json_str(resp.p, "User-Agent", &n);
+    if (!ua || !n || n >= cap) { buf_free(&resp); return -1; }
+
+    size_t o = 0;
+    int patched = 0;
+    for (size_t i = 0; i < n && o + 1 < cap; ) {
+        if (n - i >= 14 && !memcmp(ua + i, "HeadlessChrome", 14)) {
+            if (o + 6 >= cap) break;
+            memcpy(out + o, "Chrome", 6);
+            o += 6;
+            i += 14;
+            patched = 1;
+            continue;
+        }
+        out[o++] = ua[i++];
+    }
+    out[o] = 0;
+    buf_free(&resp);
+    return patched;      // 1 = this browser is still announcing itself headless
+}
+
 int chrome_attach(Chrome *c) {
     TRACE("attaching on port %d", c->port);
     Buf resp = {0};
@@ -298,9 +349,33 @@ int chrome_attach(Chrome *c) {
     return 0;
 }
 
+// True until the browser is really gone. An adopted browser is not our child,
+// so waitpid has nothing to reap and the signal probe is the only answer.
+static bool chrome_alive(Chrome *c) {
+    if (c->pid <= 0) return false;
+    if (waitpid(c->pid, NULL, WNOHANG) == c->pid) return false;
+    return kill(c->pid, 0) == 0 || errno != ESRCH;
+}
+
 void chrome_kill(Chrome *c) {
+    // Ask the browser to close before signalling it. Chrome batches its cookie
+    // writes and commits them on a clean shutdown; killed instead, it can lose
+    // the session that was just established, which reads as being signed out
+    // again on the next run.
+    if (c->pid > 0 && c->ws.fd > 0 && !c->ws.closed) {
+        cdp_call(c, "Browser.close", "");
+        for (int i = 0; i < 120; i++) {          // up to three seconds
+            if (!chrome_alive(c)) { c->pid = 0; break; }
+            struct timespec ts = {0, 25 * 1000000};
+            nanosleep(&ts, NULL);
+        }
+    }
+
     if (c->pid > 0) {
-        kill(-c->pid, SIGTERM);
+        // The browser, not its group: the group signal takes the helpers down
+        // first and the orderly shutdown never runs, which is what loses the
+        // cookie store. The group only gets involved as a last resort below.
+        kill(c->pid, SIGTERM);
         for (int i = 0; i < 40; i++) {
             if (waitpid(c->pid, NULL, WNOHANG) == c->pid) { c->pid = 0; break; }
             struct timespec ts = {0, 25 * 1000000};

@@ -61,9 +61,13 @@ typedef struct {
     int   next_id;
 } Chrome;
 
+// debug=false leaves out the remote-debugging port entirely: a browser that
+// can be driven over CDP can also have its credentials read that way, and
+// Google refuses to sign anyone in to one.
 int  chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
-                   bool mute);
+                   bool mute, const char *user_agent, bool debug);
 int  chrome_attach(Chrome *c);
+int  chrome_user_agent(Chrome *c, char *out, size_t cap);
 void chrome_kill(Chrome *c);
 
 // Fire-and-forget CDP call; params is a JSON object body without braces.

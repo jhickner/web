@@ -64,6 +64,32 @@ page has the keyboard.
 Zoom is remembered between runs, in `~/.config/web/state`. `--zoom` overrides it
 for one run without disturbing it.
 
+## Not headless, whatever the string says
+
+Chrome in this mode lays out, paints and composites exactly as it does in a
+window — the only thing it lacks is the window. Its user agent disagrees: it
+says `HeadlessChrome`, and Google refuses to sign anyone in from that. So `web`
+takes the browser's own user agent, removes that one word, and passes it back
+with `--user-agent` at launch.
+
+The string is read from Chrome rather than written down here — a hardcoded
+version goes stale on the next update, and claiming a version the browser does
+not have is a worse tell than the one being removed. That means it can only be
+learned from a Chrome that is already running, so it is cached in the state file
+and used from the next launch on. A browser that predates the cache — the first
+run against a new Chrome build, or one adopted from an earlier run — gets the
+same correction through `Emulation.setUserAgentOverride` instead, which fixes
+the agent but costs `navigator.userAgentData`. The launch flag keeps both, which
+is why it is the one that matters.
+
+Signing in is its own problem: a browser that can be driven over CDP can have
+its credentials read that way, so Google will not sign anyone in to one.
+`--login` opens an ordinary window on the same profile with no debugging port
+at all — but with the same keychain options every other run uses, because those
+decide the key Chrome seals its cookies with, and a session sealed with the
+wrong one is a session `web` cannot read. Sign in, press Enter, and the browser
+is shut down properly so the cookies are committed on the way out.
+
 `w` and `s` are the two halves of how big the page comes out. `w` sets the width
 the page is *told* it has — 800, 1024, 1280, 1440, 1600, 1920, then back to
 whatever the cells work out to — which is what decides where a layout breaks.
@@ -103,6 +129,8 @@ trade every keyboard-driven browser has to make somewhere.
 --inline    draw a block in the shell's flow instead of taking over
 --rows N    rows for that block (implies --inline)
 --show      also open a real Chrome window, for debugging
+--mute      start with the page's audio switched off
+--login     open a window to sign in with, on the same profile
 --keep      leave Chrome running on exit so the next start is instant
 ```
 

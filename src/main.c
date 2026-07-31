@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include "web.h"
 
@@ -48,6 +50,7 @@ typedef struct {
     uint64_t last_hash;
     unsigned frames, skipped;
     double  last_draw;
+    double  last_metrics_fix;  // when the viewport override was last restored
 
     bool    show_stats;        // ^G
     double  zoom;              // page magnification, alt+= / alt+-
@@ -77,6 +80,8 @@ typedef struct {
     char    msg[256];
     double  msg_until;
 
+    char    ua[512];           // chrome's own user agent, headless marker gone
+    bool    ua_patch_req;      // this browser predates the flag and needs fixing
     bool    mute;              // start chrome with its audio switched off
     bool    keep;              // leave chrome running so the next start adopts it
     Buf     status, status_last;
@@ -420,8 +425,10 @@ static void request_fit(App *a) {
         "document.body?document.body.scrollWidth:0)\",\"returnByValue\":true");
 }
 
-// Zoom is the one setting worth outliving the process: it is a property of the
-// terminal it is being read in, not of any page.
+// What is worth outliving the process: the zoom, which belongs to the terminal
+// it is being read in rather than to any page, and the user agent, which has to
+// be known before Chrome starts and can only be learned from a Chrome already
+// running. Both are keyed to nothing - one browser, one terminal, one file.
 static void state_path(char *out, size_t cap) {
     const char *cfg = getenv("XDG_CONFIG_HOME");
     const char *home = getenv("HOME");
@@ -429,26 +436,34 @@ static void state_path(char *out, size_t cap) {
     else             snprintf(out, cap, "%s/.config/web", home ? home : "/tmp");
 }
 
-static double load_zoom(void) {
+static void load_state(App *a) {
     char dir[512], path[600];
     state_path(dir, sizeof dir);
     snprintf(path, sizeof path, "%s/state", dir);
     FILE *f = fopen(path, "r");
-    if (!f) return 0;
-    double z = 0;
-    if (fscanf(f, "zoom=%lf", &z) != 1) z = 0;
+    if (!f) return;
+    char line[700];
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (!strncmp(line, "zoom=", 5)) {
+            double z = atof(line + 5);
+            if (z >= 0.4 && z <= 4.0) a->zoom = z;
+        } else if (!strncmp(line, "ua=", 3) && line[3]) {
+            snprintf(a->ua, sizeof a->ua, "%s", line + 3);
+        }
+    }
     fclose(f);
-    return z >= 0.4 && z <= 4.0 ? z : 0;
 }
 
-static void save_zoom(double z) {
+static void save_state(App *a) {
     char dir[512], path[600];
     state_path(dir, sizeof dir);
     mkdirs(dir);
     snprintf(path, sizeof path, "%s/state", dir);
     FILE *f = fopen(path, "w");
     if (!f) return;
-    fprintf(f, "zoom=%.4f\n", z);
+    fprintf(f, "zoom=%.4f\n", a->zoom);
+    if (a->ua[0]) fprintf(f, "ua=%s\n", a->ua);
     fclose(f);
 }
 
@@ -477,7 +492,7 @@ static void cycle_width(App *a, int step) {
     }
     a->fit_w = 0;
     relayout(a);
-    save_zoom(a->zoom);
+    save_state(a);
     notify(a, m);
     request_fit(a);
 }
@@ -531,7 +546,7 @@ static void zoom_by(App *a, double factor) {
     // Only what was asked for is remembered. The fit pass below can lower
     // a->zoom to whatever a stubbornly wide page allows, and saving that would
     // let one such page quietly become the setting for every later run.
-    save_zoom(a->zoom);
+    save_state(a);
 
     char m[64];
     snprintf(m, sizeof m, "zoom %.0f%%", a->zoom * 100);
@@ -814,7 +829,7 @@ static void handle_key(App *a, Event *ev) {
             a->zoom = 1.0;
             a->fit_w = 0;
             relayout(a);
-            save_zoom(a->zoom);
+            save_state(a);
             notify(a, "zoom 100%");
             request_fit(a);
             return;
@@ -871,6 +886,21 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         // being buried in frames it cannot draw - and keeps the loop reaching
         // the keyboard between frames.
         app_cdp(a, "Page.screencastFrameAck", "\"sessionId\":%d", (int)sid);
+
+        // Going fullscreen throws the viewport override away and puts the page
+        // back on the real screen, so the frames stop matching the cells they
+        // are drawn into. Every frame says what size it thinks the device is,
+        // which is enough to notice and put it back. Rate limited because the
+        // repair restarts the screencast, and a mismatch that survives it would
+        // otherwise loop.
+        double dw = json_num(msg, "deviceWidth", 0);
+        if (dw > 0 && (int)(dw + 0.5) != a->css_w &&
+            now_sec() - a->last_metrics_fix > 1.0) {
+            a->last_metrics_fix = now_sec();
+            term_log("device metrics went to %.0f, wanted %d: reapplying",
+                     dw, a->css_w);
+            relayout(a);
+        }
         return;
     }
 
@@ -973,6 +1003,7 @@ static void usage(void) {
         "  --inline    draw a block in the shell's flow instead of taking over\n"
         "  --rows N    rows for that block (implies --inline)\n"
         "  --mute      start with the page's audio switched off\n"
+        "  --login     open a window to sign in with, on the same profile\n"
         "  --keep      leave chrome running on exit so the next start is instant\n");
 }
 
@@ -993,10 +1024,10 @@ static void first_size(App *a, int *w, int *h) {
 int main(int argc, char **argv) {
     App a = {0};
     a.want_scale = 1;
-    double saved = load_zoom();       // --zoom below still wins over it
-    a.zoom = saved > 0 ? saved : 1.0;
+    a.zoom = 1.0;
+    load_state(&a);                   // --zoom below still wins over it
     a.fit_width = true;
-    bool show = false;
+    bool show = false, login = false;
     const char *start = "https://duckduckgo.com";
 
     for (int i = 1; i < argc; i++) {
@@ -1019,6 +1050,8 @@ int main(int argc, char **argv) {
             a.keep = true;
         } else if (!strcmp(argv[i], "--mute")) {
             a.mute = true;
+        } else if (!strcmp(argv[i], "--login")) {
+            login = true;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage();
             return 0;
@@ -1047,8 +1080,64 @@ int main(int argc, char **argv) {
     int fw, fh;
     first_size(&a, &fw, &fh);
 
-    if (chrome_launch(&a.chrome, first, fw, fh, show, a.mute) < 0) return 1;
+    // A window to sign in with, opened on the same profile and with the same
+    // flags every other run uses. The flags are the point: Chrome seals its
+    // cookies with a key chosen by the keychain options, so a sign-in done in
+    // an ordinary browser leaves a session this one cannot unseal.
+    if (login) {
+        if (chrome_launch(&a.chrome, first, 1200, 900, true, a.mute, a.ua, false) < 0)
+            return 1;
+        // Closing the window is not the same as quitting on macOS - the browser
+        // stays running with nothing on screen - so waiting for it to exit on
+        // its own would wait forever. Waiting on the keyboard instead also
+        // gives us the moment to shut it down properly.
+        fprintf(stderr, "web: sign in, then press Enter here.\n");
+        for (;;) {
+            if (a.chrome.pid > 0 &&
+                waitpid(a.chrome.pid, NULL, WNOHANG) == a.chrome.pid) {
+                a.chrome.pid = 0;         // quit from the menu; nothing to do
+                break;
+            }
+            struct pollfd p = {STDIN_FILENO, POLLIN, 0};
+            if (poll(&p, 1, 200) > 0 && (p.revents & POLLIN)) {
+                char buf[64];
+                (void)!read(STDIN_FILENO, buf, sizeof buf);
+                break;
+            }
+        }
+        if (a.chrome.pid > 0) {
+            // The browser itself, not its process group: signalled as a group
+            // the helpers go down first and the orderly shutdown never happens,
+            // which loses the cookie store - and with it the sign-in.
+            kill(a.chrome.pid, SIGTERM);
+            for (int i = 0; i < 200; i++) {
+                if (waitpid(a.chrome.pid, NULL, WNOHANG) == a.chrome.pid) break;
+                struct timespec ts = {0, 25 * 1000000};
+                nanosleep(&ts, NULL);
+            }
+        }
+        return 0;
+    }
+
+    // Started on a blank page rather than straight at the address, so the first
+    // request to anywhere real is made after everything below is set up.
+    if (chrome_launch(&a.chrome, "about:blank", fw, fh, show, a.mute, a.ua, true) < 0)
+        return 1;
     if (chrome_attach(&a.chrome) < 0) { chrome_kill(&a.chrome); return 1; }
+
+    // Ask the browser what it is calling itself and keep the corrected answer
+    // for next time. The launch flag above needs the string before there is a
+    // browser to ask, so the first run of a new Chrome build is the one that
+    // learns it; every run after that starts out right.
+    {
+        char ua[512];
+        int rc = chrome_user_agent(&a.chrome, ua, sizeof ua);
+        if (rc >= 0 && strcmp(ua, a.ua) != 0) {
+            snprintf(a.ua, sizeof a.ua, "%s", ua);
+            save_state(&a);
+        }
+        a.ua_patch_req = rc == 1;   // applied below, once the session is up
+    }
 
     term_enter(&a.term, a.inline_mode);
     if (a.inline_mode) {
@@ -1065,6 +1154,17 @@ int main(int argc, char **argv) {
 
     app_cdp(&a, "Page.enable", "");
     app_cdp(&a, "Runtime.enable", "");
+
+    // A browser we adopted, or the first run against a new Chrome, was started
+    // before its own user agent could be read, so it is still saying headless.
+    // Overriding it here costs navigator.userAgentData, which the launch flag
+    // would have kept - the lesser of the two tells, and only until this
+    // browser is replaced by one started the right way.
+    if (a.ua_patch_req && a.ua[0]) {
+        char esc[1100];
+        json_escape(esc, sizeof esc, a.ua);
+        app_cdp(&a, "Emulation.setUserAgentOverride", "\"userAgent\":\"%s\"", esc);
+    }
     // The overlay scrollbar appears on a scroll, waits half a second, then
     // fades out over a dozen compositor frames - and every one of those is a
     // full-page PNG across the terminal. It costs more than everything else
@@ -1079,7 +1179,7 @@ int main(int argc, char **argv) {
                  "\"source\":\"%s\"", esc);
         app_cdp(&a, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
     }
-    if (a.chrome.adopted) navigate(&a, first);
+    navigate(&a, first);       // the blank page above is not where we are going
     relayout(&a);
     draw_status(&a);
 
