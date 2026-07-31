@@ -34,6 +34,7 @@ set -g allow-passthrough all
 | `^R` | reload |
 | `^Y` | copy the page selection, or the address if nothing is selected |
 | `^G` | frame size, write time, and throughput |
+| `^S` | hide or show the status line |
 | `^Q` | quit |
 | `alt+0` | reset zoom |
 | `alt+f` | fit-to-width on/off |
@@ -63,6 +64,11 @@ page has the keyboard.
 
 Zoom is remembered between runs, in `~/.config/web/state`. `--zoom` overrides it
 for one run without disturbing it.
+
+`^S` hides the status line, and `--no-status` starts without it. The row is not
+left blank: `--full` gives it to the page, and the inline window simply becomes
+one row shorter. The address bar and the find prompt are drawn there, so opening
+either brings the line back until it is done with.
 
 ## Not headless, whatever the string says
 
@@ -127,6 +133,7 @@ trade every keyboard-driven browser has to make somewhere.
 --scale N   device pixel ratio (default 1; 2 is sharper but 4x the data)
 --zoom F    page magnification (default 1.0)
 --rows N    how many cell rows the window gets
+--no-status start with the status line hidden (^S toggles it)
 --full      take over the whole terminal instead of drawing a window
 --show      also open a real Chrome window, for debugging
 --mute      start with the page's audio switched off

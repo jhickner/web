@@ -61,6 +61,8 @@ typedef struct {
     bool    inline_mode;       // a block in the shell's flow, like rom
     int     want_rows;         // rows for that block, 0 = pick one
     int     status_row;
+    bool    hide_status;       // the status line is not wanted, ^S
+    bool    status_open;       // whether it is on screen right now
 
     bool    insert;            // a text field has focus: keys belong to the page
     bool    pending_g;         // first half of gg
@@ -197,10 +199,11 @@ static void relayout(App *a) {
     Term *t = &a->term;
     term_size(t);
 
+    int status = a->status_open ? 1 : 0;
     int rect_cols;
     if (a->inline_mode) {
         // The terminal may have shrunk under the box since it was last sized.
-        int max_rows = t->rows - 1;
+        int max_rows = t->rows - status;
         if (a->box_rows > max_rows) a->box_rows = max_rows;
         if (a->box_rows < 2) a->box_rows = 2;
         a->img_rows = a->box_rows;
@@ -209,13 +212,13 @@ static void relayout(App *a) {
         // whose last row falls past the bottom scrolls the terminal as it is
         // drawn, which lands half the picture at the top and half at the
         // bottom - and the halves never line back up.
-        if (t->inline_origin + a->img_rows > t->rows)
-            t->inline_origin = t->rows - a->img_rows;
+        if (t->inline_origin + a->img_rows + status - 1 > t->rows)
+            t->inline_origin = t->rows - a->img_rows - status + 1;
         if (t->inline_origin < 1) t->inline_origin = 1;
         kitty_set_rect(&a->kitty, 1, t->inline_origin, rect_cols, a->img_rows);
         a->status_row = t->inline_origin + a->img_rows;
     } else {
-        a->img_rows = t->rows - 1;
+        a->img_rows = t->rows - status;
         if (a->img_rows < 1) a->img_rows = 1;
         rect_cols = t->cols;
         kitty_set_rect(&a->kitty, 1, 1, rect_cols, a->img_rows);
@@ -279,10 +282,27 @@ static void relayout(App *a) {
 
 // ------------------------------------------------------------------ status
 
+// The address bar and the find prompt are drawn on the status line, so a line
+// that has been hidden comes back for as long as one of them is open.
+static void status_sync(App *a) {
+    bool want = !a->hide_status || a->editing;
+    if (want == a->status_open) return;
+    a->status_open = want;
+    a->status_last.len = 0;
+    kitty_clear(&a->kitty);          // the row it lived on changes hands
+    if (a->inline_mode)
+        term_resize_inline(&a->term, a->box_rows + (want ? 1 : 0));
+    else
+        writeall(a->term.fd, "\x1b[2J", 4);
+    relayout(a);
+}
+
 // Called after every input batch and every frame, so it keeps its buffer and
 // stays quiet when the line has not changed: an unnecessary repaint here lands
 // in the middle of a stream of image data.
 static void draw_status(App *a) {
+    status_sync(a);
+    if (!a->status_open) return;
     Term *t = &a->term;
     Buf b = a->status;
     b.len = 0;
@@ -503,14 +523,15 @@ static void cycle_width(App *a, int step) {
 // would be told about a dragged window corner: the box sets the cell rect, the
 // cell rect sets the viewport, and the layout follows from there.
 static void resize_box(App *a, int delta) {
+    int status = a->status_open ? 1 : 0;
     int want = a->box_rows + delta;
     if (want < 2) want = 2;
-    if (want > a->term.rows - 1) want = a->term.rows - 1;
+    if (want > a->term.rows - status) want = a->term.rows - status;
     if (want == a->box_rows) return;
 
     a->box_rows = want;
     kitty_clear(&a->kitty);            // the rows underneath are about to move
-    term_resize_inline(&a->term, want + 1);   // the status line lives below it
+    term_resize_inline(&a->term, want + status);   // the status line sits below
     a->status_last.len = 0;
     relayout(a);
 
@@ -739,6 +760,9 @@ static void handle_key(App *a, Event *ev) {
             return;
         case 'g':
             a->show_stats = !a->show_stats;
+            return;
+        case 's':
+            a->hide_status = !a->hide_status;
             return;
         case 'y': copy_selection(a); return;
         case 'r':
@@ -1010,6 +1034,7 @@ static void usage(void) {
         "  --zoom F    page magnification (default 1.0)\n"
         "  --full      take over the whole terminal instead of drawing a window\n"
         "  --rows N    how many cell rows the window gets\n"
+        "  --no-status start with the status line hidden (^S toggles it)\n"
         "  --mute      start with the page's audio switched off\n"
         "  --login     open a window to sign in with, on the same profile\n"
         "  --keep      leave chrome running on exit so the next start is instant\n");
@@ -1020,7 +1045,7 @@ static void usage(void) {
 static void first_size(App *a, int *w, int *h) {
     int rows = a->inline_mode
         ? (a->want_rows > 0 ? a->want_rows : a->term.rows / 2)
-        : a->term.rows - 1;
+        : a->term.rows - (a->status_open ? 1 : 0);
     if (rows < 1) rows = 1;
     double z = a->zoom > 0 ? a->zoom : 1.0;
     *w = (int)(a->term.cols * a->term.cell_w / z);
@@ -1055,6 +1080,8 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--rows") && i + 1 < argc) {
             a.want_rows = atoi(argv[++i]);
             a.inline_mode = true;
+        } else if (!strcmp(argv[i], "--no-status")) {
+            a.hide_status = true;
         } else if (!strcmp(argv[i], "--show")) {
             show = true;
         } else if (!strcmp(argv[i], "--keep")) {
@@ -1070,6 +1097,7 @@ int main(int argc, char **argv) {
             start = argv[i];
         }
     }
+    a.status_open = !a.hide_status;
 
     char first[1200];
     if (strstr(start, "://") || !strncmp(start, "about:", 6))
@@ -1152,11 +1180,12 @@ int main(int argc, char **argv) {
 
     term_enter(&a.term, a.inline_mode);
     if (a.inline_mode) {
-        int rows = a.want_rows > 0 ? a.want_rows + 1 : a.term.rows / 2;
+        int status = a.status_open ? 1 : 0;   // the row below the box, if shown
+        int rows = a.want_rows > 0 ? a.want_rows + status : a.term.rows / 2;
         if (rows > a.term.rows) rows = a.term.rows;
         if (rows < 4) rows = 4;
         term_reserve_inline(&a.term, rows);
-        a.box_rows = rows - 1;         // the row below the box is the status line
+        a.box_rows = rows - status;
     }
     g_app = &a;
     g_input_pump = pump_input;
