@@ -1,4 +1,5 @@
 #include <limits.h>
+#include <locale.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -15,95 +16,34 @@ volatile sig_atomic_t g_quit = 0;
 static void on_winch(int sig) { (void)sig; g_resized = 1; }
 static void on_term(int sig)  { (void)sig; g_quit = 1; }
 
-enum { PEND_NONE, PEND_MOVE };
-
-// One pointer move held back so the next one replaces it: a drag that arrives
-// while a frame is being written then costs one dispatch and one frame instead
-// of one of each per step.
-typedef struct {
-    int         kind;
-    int         x, y;
-    int         mods;
-    int         buttons;
-    const char *btn;
-} Pending;
-
-typedef struct {
-    Term    term;
-    Kitty   kitty;
-    Chrome  chrome;
-    Pending pend;
-
-    int     css_w, css_h;      // page viewport in CSS pixels
-    int     scale;             // device pixel ratio actually in use
-    int     want_scale;        // what was asked for on the command line
-    int     img_rows;          // cell rows the page occupies
-
-    char    url[1024];
-    char    title[256];
-    bool    loading;
-    int     title_req;
-
-    bool    editing;           // URL bar has focus
-    char    edit[1024];
-    size_t  edit_len;
-
-    uint64_t last_hash;
-    unsigned frames, skipped;
-    double  last_draw;
-    double  last_metrics_fix;  // when the viewport override was last restored
-    double  expect_frame;      // something was done that should redraw; deadline
-    double  last_unwedge;      // when the screencast was last restarted for it
-
-    bool    show_stats;        // ^G
-    double  zoom;              // page magnification, alt+= / alt+-
-    int     copy_req;          // outstanding "give me the selection" call
-
-    bool    inline_mode;       // a block in the shell's flow, like rom
-    int     want_rows;         // rows for that block, 0 = pick one
-    int     status_row;
-    bool    hide_status;       // the status line is not wanted, ^S
-    bool    status_open;       // whether it is on screen right now
-
-    bool    insert;            // a text field has focus: keys belong to the page
-    bool    mouse_down;        // a button went down on the page and is still held
-    bool    pending_g;         // first half of gg
-    int     prompt;            // 0 none, 1 address, 2 find
-    char    find[256];         // last search, for n and N
-
-    int     box_rows;          // inline: cell rows the window occupies
-    int     width_idx;         // cursor into WIDTHS, 0 = derived from the cells
-    bool    scale_locked;      // the render scale was chosen by hand
-
-    bool    fit_width;         // widen the viewport so no page is cut off
-    int     fit_req;
-    int     fit_w;             // width the page says it needs
-    size_t  last_bytes;        // base64 size of the frame just drawn
-    double  last_write_ms;     // how long it took to reach the terminal
-    double  fps;               // smoothed, so the number is readable
-    double  bytes_per_sec;
-
-    char    msg[256];
-    double  msg_until;
-
-    char    ua[512];           // chrome's own user agent, headless marker gone
-    bool    ua_patch_req;      // this browser predates the flag and needs fixing
-    bool    mute;              // start chrome with its audio switched off
-    bool    clear_exit;        // erase the inline block on the way out
-    bool    keep;              // leave chrome running so the next start adopts it
-
-    int     recolor;           // RECOLOR_*
-    double  recolor_strength;  // how far towards it, 0..1
-    Theme   theme;             // the terminal's own colours
-    bool    theme_ready;       // it has been asked for them
-    int     recolor_script_req;
-    char    recolor_script_id[32];   // the document-start script now installed
-    Buf     status, status_last;
-} App;
-
 static App *g_app;
 
 // ----------------------------------------------------------- cdp dispatch
+
+// The table is small and a reply always comes back quickly, so a full slot is
+// the oldest one and dropping it loses nothing anybody is still waiting on.
+void app_req_note(App *a, int id, int kind) {
+    if (id <= 0) return;
+    int oldest = 0;
+    for (int i = 0; i < REQ_MAX; i++) {
+        if (a->reqs[i].kind == RQ_NONE) { oldest = i; break; }
+        if (a->reqs[i].id < a->reqs[oldest].id) oldest = i;
+    }
+    a->reqs[oldest].id = id;
+    a->reqs[oldest].kind = kind;
+}
+
+int app_req_take(App *a, int id) {
+    for (int i = 0; i < REQ_MAX; i++) {
+        if (a->reqs[i].kind != RQ_NONE && a->reqs[i].id == id) {
+            int kind = a->reqs[i].kind;
+            a->reqs[i].kind = RQ_NONE;
+            a->reqs[i].id = 0;
+            return kind;
+        }
+    }
+    return RQ_NONE;
+}
 
 static void flush_pending(App *a) {
     Pending *p = &a->pend;
@@ -117,9 +57,7 @@ static void flush_pending(App *a) {
     }
 }
 
-// Everything that is not a coalesced pointer event goes through here, so a held
-// back scroll or move always reaches the page ahead of whatever follows it.
-static int app_cdp(App *a, const char *method, const char *fmt, ...) {
+int app_cdp(App *a, const char *method, const char *fmt, ...) {
     flush_pending(a);
     va_list ap;
     va_start(ap, fmt);
@@ -144,13 +82,22 @@ static void queue_move(App *a, int x, int y, const char *btn, int buttons,
 // work at any moment; everything else waits for the normal input pass, which
 // keeps this free of the reentrancy that handling input mid-draw would bring.
 static void pump_input(void) {
-    if (!g_app) return;
+    // Without a terminal, term.fd fell back to stdin - which is then a script,
+    // not keystrokes, and reading it here would feed it to the page a byte at a
+    // time.
+    if (!g_app || !g_app->has_tty) return;
     struct pollfd p = {g_app->term.fd, POLLIN, 0};
     if (poll(&p, 1, 0) <= 0 || !(p.revents & POLLIN)) return;
     term_read(&g_app->term);
     for (size_t i = 0; i < g_app->term.in.len; i++) {
         unsigned char c = (unsigned char)g_app->term.in.p[i];
-        if (c == 0x11 || c == 0x03) { term_log("QUIT via pump byte %02x", c); g_quit = 1; return; }
+        // ^C is the editor's clear-line while the pane holds the keyboard, and
+        // this runs mid-frame where that distinction cannot be made later.
+        if (c == 0x11 || (c == 0x03 && !g_app->repl_focus)) {
+            term_log("QUIT via pump byte %02x", c);
+            g_quit = 1;
+            return;
+        }
     }
 }
 
@@ -183,9 +130,7 @@ static void clipboard_put(const char *text) {
     }
 }
 
-static void relayout(App *a);
-
-static void notify(App *a, const char *s) {
+void notify(App *a, const char *s) {
     snprintf(a->msg, sizeof a->msg, "%s", s);
     a->msg_until = now_sec() + 2.0;
 }
@@ -205,15 +150,25 @@ static int box_cols_for(App *a, int rows) {
     return want;
 }
 
-static void relayout(App *a) {
+// Asking again is what makes Chrome hand over a fresh frame, so this is how
+// anything wanting a redraw gets one.
+static void screencast_start(App *a) {
+    if (!a->has_tty || a->cast_w < 1 || a->cast_h < 1) return;
+    app_cdp(a, "Page.startScreencast",
+             "\"format\":\"png\",\"maxWidth\":%d,\"maxHeight\":%d,\"everyNthFrame\":1",
+             a->cast_w, a->cast_h);
+}
+
+void relayout(App *a) {
     Term *t = &a->term;
     term_size(t);
 
     int status = a->status_open ? 1 : 0;
+    int below = status + a->repl_rows;      // everything under the picture
     int rect_cols;
     if (a->inline_mode) {
         // The terminal may have shrunk under the box since it was last sized.
-        int max_rows = t->rows - status;
+        int max_rows = t->rows - below;
         if (a->box_rows > max_rows) a->box_rows = max_rows;
         if (a->box_rows < 2) a->box_rows = 2;
         a->img_rows = a->box_rows;
@@ -222,18 +177,19 @@ static void relayout(App *a) {
         // whose last row falls past the bottom scrolls the terminal as it is
         // drawn, which lands half the picture at the top and half at the
         // bottom - and the halves never line back up.
-        if (t->inline_origin + a->img_rows + status - 1 > t->rows)
-            t->inline_origin = t->rows - a->img_rows - status + 1;
+        if (t->inline_origin + a->img_rows + below - 1 > t->rows)
+            t->inline_origin = t->rows - a->img_rows - below + 1;
         if (t->inline_origin < 1) t->inline_origin = 1;
         kitty_set_rect(&a->kitty, 1, t->inline_origin, rect_cols, a->img_rows);
         a->status_row = t->inline_origin + a->img_rows;
     } else {
-        a->img_rows = t->rows - status;
+        a->img_rows = t->rows - below;
         if (a->img_rows < 1) a->img_rows = 1;
         rect_cols = t->cols;
         kitty_set_rect(&a->kitty, 1, 1, rect_cols, a->img_rows);
-        a->status_row = t->rows;
+        a->status_row = t->rows - a->repl_rows;
     }
+    a->repl_row = a->status_row + status;
 
     // The pixels the picture will actually occupy. Everything below works back
     // from these: whatever the terminal is handed gets resampled to this size,
@@ -285,9 +241,9 @@ static void relayout(App *a) {
     app_cdp(a, "Emulation.setDeviceMetricsOverride",
              "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":%.6f,\"mobile\":false",
              a->css_w, a->css_h, dsf);
-    app_cdp(a, "Page.startScreencast",
-             "\"format\":\"png\",\"maxWidth\":%d,\"maxHeight\":%d,\"everyNthFrame\":1",
-             rect_w * a->scale, rect_h * a->scale);
+    a->cast_w = rect_w * a->scale;
+    a->cast_h = rect_h * a->scale;
+    screencast_start(a);
 }
 
 // ------------------------------------------------------------------ status
@@ -296,16 +252,19 @@ static void relayout(App *a) {
 // that has been hidden comes back for as long as one of them is open.
 static void status_sync(App *a) {
     bool want = !a->hide_status || a->editing;
-    if (want == a->status_open) return;
+    int  rows = repl_pane_rows(a);
+    if (want == a->status_open && rows == a->repl_rows) return;
     a->status_open = want;
+    a->repl_rows = rows;
     a->status_last.len = 0;
-    kitty_clear(&a->kitty);          // the row it lived on changes hands
+    a->repl_last.len = 0;
+    kitty_clear(&a->kitty);          // the rows it lived on change hands
     // Inline, the page itself is not resized by this, so the frame that comes
     // back is the one already on screen - and a duplicate is normally dropped,
     // which would leave the block empty for as long as the page sits still.
     a->last_hash = 0;
     if (a->inline_mode)
-        term_resize_inline(&a->term, a->box_rows + (want ? 1 : 0));
+        term_resize_inline(&a->term, a->box_rows + (want ? 1 : 0) + rows);
     else
         writeall(a->term.fd, "\x1b[2J", 4);
     relayout(a);
@@ -315,6 +274,7 @@ static void status_sync(App *a) {
 // stays quiet when the line has not changed: an unnecessary repaint here lands
 // in the middle of a stream of image data.
 static void draw_status(App *a) {
+    if (!a->has_tty) return;
     status_sync(a);
     if (!a->status_open) return;
     Term *t = &a->term;
@@ -387,6 +347,11 @@ static void draw_status(App *a) {
     buf_add(&a->status_last, b.p, b.len);
 }
 
+static void draw_panes(App *a) {
+    draw_status(a);
+    repl_pane_paint(a);
+}
+
 // ------------------------------------------------------------------ input
 
 static void send_char(App *a, const char *text) {
@@ -414,7 +379,7 @@ static void send_key(App *a, int vk, const char *key, const char *code,
              vk, vk, key, code, cdp_mods);
 }
 
-static bool special_key(App *a, int key, int mods) {
+bool special_key(App *a, int key, int mods) {
     switch (key) {
     case KEY_ENTER:     send_key(a, 13, "Enter", "Enter", "\\r", mods); return true;
     case KEY_TAB:       send_key(a, 9, "Tab", "Tab", NULL, mods); return true;
@@ -469,7 +434,7 @@ static bool file_url(const char *raw, char *out, size_t cap) {
     return true;
 }
 
-static void navigate(App *a, const char *raw) {
+void navigate(App *a, const char *raw) {
     char url[1100];
     if (strstr(raw, "://") || strncmp(raw, "about:", 6) == 0) {
         snprintf(url, sizeof url, "%s", raw);
@@ -504,9 +469,10 @@ static void navigate(App *a, const char *raw) {
 // viewport means real horizontal overflow, and nothing else does.
 static void request_fit(App *a) {
     if (!a->fit_width) return;
-    a->fit_req = app_cdp(a, "Runtime.evaluate",
+    app_req_note(a, app_cdp(a, "Runtime.evaluate",
         "\"expression\":\"Math.max(document.documentElement.scrollWidth,"
-        "document.body?document.body.scrollWidth:0)\",\"returnByValue\":true");
+        "document.body?document.body.scrollWidth:0)\",\"returnByValue\":true"),
+        RQ_FIT);
 }
 
 // What is worth outliving the process: the zoom and the height of the inline
@@ -656,7 +622,7 @@ static void zoom_by(App *a, double factor) {
     request_fit(a);
 }
 
-static void run_js(App *a, const char *js) {
+void run_js(App *a, const char *js) {
     char esc[2048];
     json_escape(esc, sizeof esc, js);
     app_cdp(a, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
@@ -669,7 +635,7 @@ static void run_js(App *a, const char *js) {
 static void ensure_theme(App *a) {
     if (a->theme_ready) return;
     a->theme_ready = true;
-    if (term_theme(&a->term, &a->theme) < 0)
+    if (!a->has_tty || term_theme(&a->term, &a->theme) < 0)
         term_log("terminal did not report its colours; using the fallback");
 }
 
@@ -703,9 +669,8 @@ static void apply_recolor(App *a) {
     // between them the filter is there before the first paint of a new page and
     // arrives immediately on this one.
     if (a->recolor != RECOLOR_OFF)
-        a->recolor_script_req =
-            app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
-                     "\"source\":\"%s\"", esc.p);
+        app_req_note(a, app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
+                                "\"source\":\"%s\"", esc.p), RQ_RECOLOR);
     app_cdp(a, "Runtime.evaluate", "\"expression\":\"%s\"", esc.p);
     buf_free(&js);
     buf_free(&esc);
@@ -737,7 +702,7 @@ static void cycle_recolor(App *a) {
 // moves, so panes and inner scrollers behave the way they look; the target is
 // clamped to the ends first, so a step at the top or bottom of a page simply
 // does nothing instead of leaving something behind to unwind.
-static void scroll_at(App *a, int x, int y, int dy) {
+void scroll_at(App *a, int x, int y, int dy) {
     char js[768];
     snprintf(js, sizeof js,
              "(function(x,y,d){"
@@ -757,13 +722,13 @@ static void scroll_at(App *a, int x, int y, int dy) {
     run_js(a, js);
 }
 
-static void scroll_by(App *a, int dy) {
+void scroll_by(App *a, int dy) {
     scroll_at(a, a->css_w / 2, a->css_h / 2, dy);
 }
 
 // gg and G mean the page, not whatever pane happens to sit under the middle of
 // the view: "top" is somewhere you can name, and a step is not.
-static void scroll_page_end(App *a, bool bottom) {
+void scroll_page_end(App *a, bool bottom) {
     run_js(a, bottom
         ? "(function(t){t.scrollTo({top:t.scrollHeight,behavior:'instant'});})"
           "(document.scrollingElement||document.documentElement)"
@@ -771,7 +736,7 @@ static void scroll_page_end(App *a, bool bottom) {
           "(document.scrollingElement||document.documentElement)");
 }
 
-static void nav_history(App *a, int delta) {
+void nav_history(App *a, int delta) {
     run_js(a, delta < 0 ? "history.back()" : "history.forward()");
 }
 
@@ -797,6 +762,7 @@ static const char FOCUS_WATCHER[] =
     "rep();})()";
 
 static void handle_mouse(App *a, Event *ev) {
+    if (repl_pane_mouse(a, ev)) return;
     Kitty *k = &a->kitty;
     bool inside = ev->mx >= k->x && ev->mx < k->x + k->cols &&
                   ev->my >= k->y && ev->my < k->y + k->rows;
@@ -822,6 +788,36 @@ static void handle_mouse(App *a, Event *ev) {
     double fy = (cy - k->y + 0.5) / (double)k->rows;
     int x = (int)(fx * a->css_w);
     int y = (int)(fy * a->css_h);
+
+    // Picker mode deliberately consumes the click. Keeping it armed makes it
+    // useful for inspecting several controls in a row; `pick` toggles it off.
+    if (a->selector_pick && ev->button == 0 && !ev->motion) {
+        if (ev->press) {
+            int id = app_cdp(a, "Runtime.evaluate",
+                "\"expression\":\"(function(x,y){var e=document.elementFromPoint(x,y);"
+                "if(!e)return '';function n(s){return(s||'').replace(/\\\\s+/g,' ').trim()}"
+                "function nm(q){var a=q.getAttribute('aria-label');if(a)return n(a);"
+                "var b=q.getAttribute('aria-labelledby'),t='';if(b)b.split(/\\\\s+/).forEach("
+                "function(i){var z=document.getElementById(i);if(z)t+=' '+z.textContent});"
+                "if(n(t))return n(t);if(q.labels&&q.labels[0])return n(q.labels[0].textContent);"
+                "return n(q.innerText||q.getAttribute('alt')||q.getAttribute('title'))}"
+                "var im={A:'link',BUTTON:'button',SELECT:'combobox',TEXTAREA:'textbox',"
+                "SUMMARY:'button',H1:'heading',H2:'heading',H3:'heading',H4:'heading',"
+                "H5:'heading',H6:'heading',IMG:'img'};var r=e.getAttribute('role')||im[e.tagName]||'';"
+                "if(e.tagName==='INPUT')r=e.type==='checkbox'?'checkbox':e.type==='radio'?'radio':"
+                "(e.type==='submit'||e.type==='button')?'button':'textbox';var a=nm(e);"
+                "if(r&&a&&a.indexOf(String.fromCharCode(34))<0&&a.indexOf(']')<0&&"
+                "a.indexOf(String.fromCharCode(10))<0)return 'role='+r+'[name=\\\"'+a+'\\\"]';"
+                "if(e.id)return '#'+CSS.escape(e.id);var p=[];while(e&&e.nodeType===1&&e!==document.body){"
+                "var s=e.tagName.toLowerCase(),i=1,q=e;while((q=q.previousElementSibling))"
+                "if(q.tagName===e.tagName)i++;if(i>1)s+=':nth-of-type('+i+')';p.unshift(s);"
+                "var z=p.join(' > ');try{if(document.querySelectorAll(z).length===1)return z}catch(_){}"
+                "e=e.parentElement}return p.join(' > ')})(%d,%d)\",\"returnByValue\":true",
+                x, y);
+            app_req_note(a, id, RQ_SELECTOR);
+        }
+        return;
+    }
 
     int cdp_mods = 0;
     if (ev->mods & MOD_ALT)   cdp_mods |= 1;
@@ -879,16 +875,22 @@ static void handle_paste(App *a, const char *text, size_t len) {
 // to itself - window.getSelection() reads empty while an input has focus - so
 // the focused element is asked first, and answers nothing unless it is one.
 static void copy_selection(App *a) {
-    a->copy_req = app_cdp(a, "Runtime.evaluate",
+    app_req_note(a, app_cdp(a, "Runtime.evaluate",
         "\"expression\":\"(function(){try{var e=document.activeElement;"
         "if(e&&(e.tagName==='INPUT'||e.tagName==='TEXTAREA')&&"
         "e.selectionStart!==e.selectionEnd)"
         "return e.value.substring(e.selectionStart,e.selectionEnd);}catch(x){}"
         "return window.getSelection().toString();})()\","
-        "\"returnByValue\":true");
+        "\"returnByValue\":true"), RQ_COPY);
 }
 
 static void handle_key(App *a, Event *ev) {
+    // Ahead of everything: a focused pane is where the keyboard is, and ^Q is
+    // the one key that still means what it always did.
+    if (a->repl_focus) {
+        if (ev->mods == MOD_CTRL && ev->key == 'q') { g_quit = 1; return; }
+        if (repl_pane_key(a, ev)) return;
+    }
     if (a->editing) {
         if (ev->key == KEY_ENTER) {
             a->edit[a->edit_len] = 0;
@@ -949,6 +951,7 @@ static void handle_key(App *a, Event *ev) {
             a->hide_status = !a->hide_status;
             return;
         case 'y': copy_selection(a); return;
+        case 'x': repl_pane_toggle(a); return;
         case 'r':
             app_cdp(a, "Page.reload", "\"ignoreCache\":false");
             a->loading = true;
@@ -1013,6 +1016,9 @@ static void handle_key(App *a, Event *ev) {
         case 'i':
             a->insert = true;
             notify(a, "insert mode - esc to leave");
+            return;
+        case ':':
+            repl_pane_toggle(a);
             return;
         }
     }
@@ -1141,11 +1147,21 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
 
     if (strstr(msg, "Page.frameStartedLoading")) { a->loading = true; return; }
 
-    if (strstr(msg, "Page.loadEventFired")) {
+    // Either of these means the page has arrived, and neither can be relied on
+    // alone: a cold browser can finish loading before Page.enable takes effect,
+    // and the load event it would have reported is then never sent. The first
+    // one to show up wins and the other finds nothing left to do.
+    if (strstr(msg, "Page.loadEventFired") ||
+        strstr(msg, "Page.frameStoppedLoading")) {
+        if (!a->loading) return;
         a->loading = false;
+        a->load_seq++;
+        a->last_hash = 0;          // the new page may hash to the old frame
+        a->kitty.grid_dirty = true;
+        screencast_start(a);
         request_fit(a);
-        a->title_req = app_cdp(a, "Runtime.evaluate",
-                                "\"expression\":\"document.title\",\"returnByValue\":true");
+        app_req_note(a, app_cdp(a, "Runtime.evaluate",
+            "\"expression\":\"document.title\",\"returnByValue\":true"), RQ_TITLE);
         return;
     }
 
@@ -1154,8 +1170,13 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         return;
     }
 
-    if (a->fit_req && (int)json_num(msg, "id", 0) == a->fit_req) {
-        a->fit_req = 0;
+    // A reply always leads with its id; an event never does. Looked for anywhere
+    // in the body instead, an id nested in a page's own text could claim one.
+    int id = 0;
+    if (msg[0] == '{' && !strncmp(msg + 1, "\"id\":", 5))
+        id = (int)strtol(msg + 6, NULL, 10);
+    switch (id ? app_req_take(a, id) : RQ_NONE) {
+    case RQ_FIT: {
         int want = (int)json_num(msg, "value", 0);
         if (want > a->css_w + 8 && want < 8000) {
             a->fit_w = want;
@@ -1181,21 +1202,19 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
 
     // Kept so the next change can withdraw this script before adding its
     // replacement; Chrome names it in the reply and nowhere else.
-    if (a->recolor_script_req &&
-        (int)json_num(msg, "id", 0) == a->recolor_script_req) {
+    case RQ_RECOLOR: {
         size_t n;
         const char *v = json_str(msg, "identifier", &n);
         if (v && n && n < sizeof a->recolor_script_id) {
             memcpy(a->recolor_script_id, v, n);
             a->recolor_script_id[n] = 0;
         }
-        a->recolor_script_req = 0;
         return;
     }
 
-    if (a->copy_req && (int)json_num(msg, "id", 0) == a->copy_req) {
+    case RQ_COPY: {
         size_t n;
-        const char *v = json_str(msg, "value", &n);
+        const char *v = json_eval_str(msg, &n);
         char text[8192];
         size_t len = (v && n) ? json_unescape(text, sizeof text, v, n) : 0;
         if (len) {
@@ -1207,18 +1226,34 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
             clipboard_put(a->url);          // nothing selected: take the address
             notify(a, "copied url");
         }
-        a->copy_req = 0;
         return;
     }
 
-    if (a->title_req && (int)json_num(msg, "id", 0) == a->title_req) {
+    case RQ_SELECTOR: {
         size_t n;
-        const char *v = json_str(msg, "value", &n);
+        const char *v = json_eval_str(msg, &n);
+        char selector[2048];
+        size_t len = (v && n) ? json_unescape(selector, sizeof selector, v, n) : 0;
+        if (len) {
+            repl_pane_log(a, selector);
+            notify(a, "selector sent to command pane");
+        } else {
+            repl_pane_log(a, "error: no element at that point");
+        }
+        return;
+    }
+
+    case RQ_TITLE: {
+        size_t n;
+        const char *v = json_eval_str(msg, &n);
         if (v && n && n < sizeof a->title) {
             memcpy(a->title, v, n);
             a->title[n] = 0;
         }
-        a->title_req = 0;
+        return;
+    }
+
+    case RQ_SCRIPT: script_reply(a, msg); return;
     }
 }
 
@@ -1235,6 +1270,11 @@ static void usage(void) {
         "  --no-status start with the status line hidden (^S toggles it)\n"
         "  --clear     erase the window on exit instead of leaving it behind\n"
         "  --mute      start with the page's audio switched off\n"
+        "  --script F  run a command script; - reads stdin\n"
+        "  --delay MS  pause between script commands\n"
+        "  --step      wait for a key between script commands\n"
+        "  --timeout S how long a command waits before giving up (default 5)\n"
+        "  --json      script output as one JSON object per value\n"
         "  --recolor M map the page onto your terminal's colours:\n"
         "              off | hue | duotone | tint\n"
         "  --recolor-strength F   how far towards it, 0..1 (default 1)\n"
@@ -1257,6 +1297,7 @@ static void first_size(App *a, int *w, int *h) {
 }
 
 int main(int argc, char **argv) {
+    setlocale(LC_CTYPE, "");
     App a = {0};
     a.want_scale = 1;
     a.zoom = 1.0;
@@ -1265,8 +1306,10 @@ int main(int argc, char **argv) {
     load_state(&a);                   // --zoom below still wins over it
     a.fit_width = true;
     a.inline_mode = true;             // a window in the shell, unless --full
-    bool show = false, login = false;
+    bool show = false, login = false, url_given = false;
+    const char *script_src = NULL;
     const char *start = "https://duckduckgo.com";
+    script_init(&a);
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--scale") && i + 1 < argc) {
@@ -1306,6 +1349,17 @@ int main(int argc, char **argv) {
             a.recolor_strength = atof(argv[++i]);
             if (a.recolor_strength < 0.0) a.recolor_strength = 0.0;
             if (a.recolor_strength > 1.0) a.recolor_strength = 1.0;
+        } else if (!strcmp(argv[i], "--script") && i + 1 < argc) {
+            script_src = argv[++i];
+        } else if (!strcmp(argv[i], "--delay") && i + 1 < argc) {
+            a.script.delay = atof(argv[++i]) / 1000.0;
+        } else if (!strcmp(argv[i], "--timeout") && i + 1 < argc) {
+            a.script.timeout = atof(argv[++i]);
+            if (a.script.timeout < 0.1) a.script.timeout = 0.1;
+        } else if (!strcmp(argv[i], "--step")) {
+            a.script.step = true;
+        } else if (!strcmp(argv[i], "--json")) {
+            a.script.json = true;
         } else if (!strcmp(argv[i], "--login")) {
             login = true;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
@@ -1313,9 +1367,18 @@ int main(int argc, char **argv) {
             return 0;
         } else {
             start = argv[i];
+            url_given = true;
         }
     }
+    // A script says where it is going. Loading a search engine first would cost
+    // a page load nobody asked for, and would sit in the history behind it.
+    if (!url_given && (script_src || !isatty(STDIN_FILENO))) start = "about:blank";
     a.status_open = !a.hide_status;
+
+    // Before anything else opens a descriptor or asks the terminal a question:
+    // a script arriving on stdin is gone the moment something else reads it.
+    if (script_src) script_load(&a, script_src);
+    else if (!isatty(STDIN_FILENO)) script_load(&a, "-");
 
     char first[1200];
     if (strstr(start, "://") || !strncmp(start, "about:", 6))
@@ -1334,6 +1397,11 @@ int main(int argc, char **argv) {
     // would lay the page out, paint it, and then have to do both again the
     // moment the real viewport arrived.
     term_probe(&a.term);
+    // Two different questions with two different answers in a pipeline: whether
+    // there is a terminal to draw the page into, and whether fd 1 is that same
+    // terminal - because if it is, writing data there scrolls the picture away.
+    a.has_tty = isatty(a.term.fd);
+    a.stdout_tty = isatty(STDOUT_FILENO);
     int fw, fh;
     first_size(&a, &fw, &fh);
 
@@ -1396,8 +1464,8 @@ int main(int argc, char **argv) {
         a.ua_patch_req = rc == 1;   // applied below, once the session is up
     }
 
-    term_enter(&a.term, a.inline_mode);
-    if (a.inline_mode) {
+    if (a.has_tty) term_enter(&a.term, a.inline_mode);
+    if (a.has_tty && a.inline_mode) {
         int status = a.status_open ? 1 : 0;   // the row below the box, if shown
         int rows = a.want_rows > 0 ? a.want_rows + status : a.term.rows / 2;
         // A height remembered from a taller terminal, or asked for on the
@@ -1411,7 +1479,7 @@ int main(int argc, char **argv) {
     g_app = &a;
     g_input_pump = pump_input;
     bool tmux = getenv("TMUX") != NULL;
-    kitty_init(&a.kitty, a.term.fd, tmux);
+    if (a.has_tty) kitty_init(&a.kitty, a.term.fd, tmux);
 
     app_cdp(&a, "Page.enable", "");
     app_cdp(&a, "Runtime.enable", "");
@@ -1443,7 +1511,10 @@ int main(int argc, char **argv) {
     if (a.recolor != RECOLOR_OFF) apply_recolor(&a);
     navigate(&a, first);       // the blank page above is not where we are going
     relayout(&a);
-    draw_status(&a);
+    draw_panes(&a);
+
+    // A script named on the command line, or one piped in. Reading stdin only
+    // when it is not a terminal is what keeps `web url` interactive.
 
     while (!g_quit) {
         if (g_resized) {
@@ -1462,7 +1533,9 @@ int main(int argc, char **argv) {
         }
 
         struct pollfd fds[2] = {{0}};   // poll leaves revents alone on EINTR
-        fds[0].fd = a.term.fd;
+        // Without a terminal, term.fd fell back to stdin - which in that case is
+        // a script rather than keystrokes. poll ignores a negative fd.
+        fds[0].fd = a.has_tty ? a.term.fd : -1;
         fds[0].events = POLLIN;
         fds[1].fd = a.chrome.ws.fd;
         fds[1].events = POLLIN;
@@ -1471,6 +1544,8 @@ int main(int argc, char **argv) {
         // notice, so the loop sleeps until something actually happens.
         int wait = (a.term.in.len || a.msg_until > now_sec() ||
                     a.expect_frame > 0) ? 20 : -1;
+        int sw = script_wait_ms(&a);
+        if (sw >= 0 && (wait < 0 || sw < wait)) wait = sw;
         int rc = poll(fds, 2, wait);
         if (rc < 0 && !g_resized) continue;
 
@@ -1482,13 +1557,15 @@ int main(int argc, char **argv) {
                          ev.type, ev.key, ev.mods, ev.text[0] ? ev.text : "");
                 if (ev.type == EV_KEY) handle_key(&a, &ev);
                 else if (ev.type == EV_MOUSE) handle_mouse(&a, &ev);
-                else if (ev.type == EV_PASTE)
-                    handle_paste(&a, a.term.paste.p, a.term.paste.len);
+                else if (ev.type == EV_PASTE) {
+                    if (!repl_pane_key(&a, &ev))
+                        handle_paste(&a, a.term.paste.p, a.term.paste.len);
+                }
                 if (g_quit) break;
             }
             // A move held back during the batch goes out now.
             flush_pending(&a);
-            draw_status(&a);
+            draw_panes(&a);
             // Whatever that was, the page should have something to say about
             // it. If it does not, the watchdog below finds out.
             if (a.expect_frame == 0) a.expect_frame = now_sec() + 2.0;
@@ -1516,28 +1593,37 @@ int main(int argc, char **argv) {
                 on_cdp_message(&a, msg, len);
                 a.chrome.ws.msg.len = 0;
             }
-            draw_status(&a);
+            draw_panes(&a);
         }
         if (a.chrome.ws.closed) break;
 
+        script_step(&a);
+        draw_panes(&a);
+        // A script that was the only reason to be here is also the only thing
+        // keeping us here.
+        if (a.script.drain_exit && !script_busy(&a) && !a.repl_open) g_quit = 1;
+
         // A lone ESC only resolves on a later pass, once the wait has expired.
         Event ev;
-        if (a.term.in.len && term_next(&a.term, &ev)) {
+        if (a.has_tty && a.term.in.len && term_next(&a.term, &ev)) {
             if (ev.type == EV_KEY) handle_key(&a, &ev);
             else if (ev.type == EV_MOUSE) handle_mouse(&a, &ev);
             else if (ev.type == EV_PASTE)
                 handle_paste(&a, a.term.paste.p, a.term.paste.len);
             flush_pending(&a);
-            draw_status(&a);
+            draw_panes(&a);
         }
     }
 
     // Inline leaves the page behind unless it was asked not to.
-    if (!a.inline_mode || a.clear_exit) kitty_clear(&a.kitty);
-    kitty_free(&a.kitty);
-    term_restore(&a.term, a.clear_exit);
+    if (a.has_tty) {
+        if (!a.inline_mode || a.clear_exit) kitty_clear(&a.kitty);
+        kitty_free(&a.kitty);
+        term_restore(&a.term, a.clear_exit);
+    }
     buf_free(&a.status);
     buf_free(&a.status_last);
+    repl_pane_free(&a);
     // Most of a cold start is Chrome coming up. Left running, it holds the
     // profile and the next run adopts it instead of paying for that again.
     if (a.keep) ws_close(&a.chrome.ws);
@@ -1545,5 +1631,7 @@ int main(int argc, char **argv) {
     // Into the debug log rather than the terminal: quitting should hand the
     // shell back the way it found it.
     term_log("%u frames drawn, %u duplicates skipped", a.frames, a.skipped);
-    return 0;
+    int rc = a.script.failures ? 1 : 0;
+    script_free(&a);
+    return rc;
 }

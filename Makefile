@@ -12,7 +12,7 @@ all: $(BIN)
 $(BIN): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDLIBS)
 
-src/%.o: src/%.c src/web.h
+src/%.o: src/%.c src/web.h vendor/repl.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 install: $(BIN)

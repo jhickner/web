@@ -136,23 +136,29 @@ bool json_has(const char *js, const char *key) {
     return find_key(js, key) != NULL;
 }
 
+// The escape for one byte, or NULL when it passes through. `tmp` backs the
+// \u form, which is the only one that has to be built rather than named.
+static const char *escape_of(unsigned char c, char tmp[8]) {
+    switch (c) {
+    case '"':  return "\\\"";
+    case '\\': return "\\\\";
+    case '\n': return "\\n";
+    case '\r': return "\\r";
+    case '\t': return "\\t";
+    default:
+        if (c < 0x20) {
+            snprintf(tmp, 8, "\\u%04x", c);
+            return tmp;
+        }
+    }
+    return NULL;
+}
+
 size_t json_escape(char *dst, size_t cap, const char *src) {
     size_t o = 0;
     for (const unsigned char *s = (const unsigned char *)src; *s; s++) {
-        const char *rep = NULL;
         char tmp[8];
-        switch (*s) {
-        case '"':  rep = "\\\""; break;
-        case '\\': rep = "\\\\"; break;
-        case '\n': rep = "\\n";  break;
-        case '\r': rep = "\\r";  break;
-        case '\t': rep = "\\t";  break;
-        default:
-            if (*s < 0x20) {
-                snprintf(tmp, sizeof tmp, "\\u%04x", *s);
-                rep = tmp;
-            }
-        }
+        const char *rep = escape_of(*s, tmp);
         if (rep) {
             size_t n = strlen(rep);
             if (o + n + 1 >= cap) break;
@@ -165,6 +171,28 @@ size_t json_escape(char *dst, size_t cap, const char *src) {
     }
     if (cap) dst[o] = 0;
     return o;
+}
+
+// The same escape appended to a growable buffer. json_escape truncates silently
+// once the caller's array is full, which is fine for a URL and wrong for
+// anything carrying arbitrary page text or a script argument.
+void json_escape_buf(Buf *out, const char *src) {
+    for (const unsigned char *s = (const unsigned char *)src; *s; s++) {
+        char tmp[8];
+        const char *rep = escape_of(*s, tmp);
+        if (rep) buf_add(out, rep, strlen(rep));
+        else     buf_add(out, s, 1);
+    }
+}
+
+// The string a Runtime.evaluate returned by value. Anchored past the two nested
+// result objects: the reader below finds a key anywhere in the message, and a
+// page whose own text contains "value": would otherwise answer for the reply.
+// Chrome writes type before value, so the first one past the anchor is ours.
+const char *json_eval_str(const char *msg, size_t *len) {
+    const char *p = strstr(msg, "\"result\":{\"result\":{");
+    if (!p || json_has(msg, "exceptionDetails")) return NULL;
+    return json_str(p, "value", len);
 }
 
 // Turn a JSON string body back into bytes. Only the escapes CDP actually

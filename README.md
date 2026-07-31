@@ -41,6 +41,7 @@ set -g allow-passthrough all
 | `alt+f` | fit-to-width on/off |
 | `cmd+c` | copy the page selection (needs one line of terminal config, below) |
 | `cmd+v` | paste into the page, or into the address bar when it is open |
+| `^X` | open the command pane |
 | mouse | click, drag to select, wheel to scroll |
 
 While reading:
@@ -58,6 +59,7 @@ While reading:
 | `s` | render scale: 1x, 2x, 3x |
 | `/` | find in page, then `n` / `N` for next and previous |
 | `i` | hand the keyboard to the page |
+| `:` | open the command pane |
 | `esc` | take it back |
 
 Page up and down and tab always go to the page, as do all four arrows once the
@@ -145,6 +147,11 @@ trade every keyboard-driven browser has to make somewhere.
 --full      take over the whole terminal instead of drawing a window
 --show      also open a real Chrome window, for debugging
 --mute      start with the page's audio switched off
+--script F  run a command script; `-` reads stdin
+--delay MS  pause between script commands
+--step      wait for a key between script commands
+--timeout S how long a command waits before giving up (default 5)
+--json      script output as one JSON object per value
 --recolor M map the page onto your terminal's colours: off, hue, duotone, tint
 --recolor-strength F   how far towards it, 0..1 (default 1)
 --login     open a window to sign in with, on the same profile
@@ -156,6 +163,97 @@ milliseconds for everything else. `--keep` leaves the browser holding the
 profile when `web` exits, and the next run adopts it instead of paying for that
 again. The cost is a headless Chrome sitting in the process table until you
 kill it.
+
+## Driving it
+
+`web` reads a small command language, so a browser you were watching can also be
+one you script. The picture keeps drawing the whole way through - the script is
+its own demonstration, which is the thing headed automation does badly over ssh.
+
+```sh
+./web --script login.web
+printf 'goto example.com\ntext h1\n' | ./web        # stdin, when it is not a tty
+```
+
+```
+goto duckduckgo.com
+wait-for "input[name=q]"
+fill "input[name=q]" terminal web browser
+press Enter
+wait 2000
+text "role=heading"
+```
+
+Values go to **stdout**, one per line, while the page goes to the terminal - so
+the two never collide and `./web --script s.web | jq` works. `--json` wraps each
+value in an object instead. A command that cannot be satisfied writes to stderr
+and the process exits non-zero, so a script fails like any other program.
+
+| | |
+|---|---|
+| `goto U` | navigate; a bare phrase becomes a search, a real path becomes a file |
+| `back` `forward` `reload` | history |
+| `wait N` | pause N ms |
+| `wait-for S` / `wait-gone S` | until a selector is there, or is not |
+| `click S` | click the first visible match |
+| `fill S TEXT` | focus a field and replace its contents |
+| `type TEXT` | type into whatever has focus |
+| `press K` | `Enter`, `Tab`, `ArrowDown`, `ctrl+a` |
+| `scroll N` \| `top` \| `bottom` | scroll |
+| `text S` / `html S` / `attr S N` / `count S` | read the page |
+| `url` `title` | where we are |
+| `eval JS` | the escape hatch |
+| `echo TEXT` | a literal line |
+| `help` | list every command in the command pane |
+| `pick` | toggle click-to-copy selectors |
+| `stop` | throw away whatever is queued |
+
+`--delay MS` slows the run down to watch it, and `--step` waits for a key
+between commands.
+
+### Selectors
+
+Playwright's shape, small enough to hold in your head, resolved by one script
+injected with every call:
+
+```
+click "Sign in"                     a bare phrase is matched as text
+click "button.primary"              anything that parses as CSS is CSS
+click "text=Learn more"             explicit, and case-insensitive
+click 'text="Learn more"'           quoted means exactly that
+click "role=button[name=Submit]"    by role and accessible name
+click ".row >> nth=2 >> a"          chained, and indexed
+```
+
+`text=` matches the *deepest* element containing the phrase, so it lands on the
+link rather than on the `<body>` that also contains it. `role=` reads an
+explicit `role` attribute first and falls back to the implicit one for the tags
+that have one.
+
+Every verb that names an element waits for it, the way Playwright does: a
+selector that is not there yet, is not visible yet, or has something on top of
+it is asked again until `--timeout` runs out. Most of the flakiness of driving a
+browser lives in that gap.
+
+Clicks are dispatched as real mouse events at the element's centre rather than
+`element.click()`. They are trusted, they leave the hover and focus states a
+click leaves - and those are what make the run visible in the picture.
+
+### The command pane
+
+`:` while reading, or `^X` at any time, opens a line editor under the page.
+It has history, `^R` search, emacs kill bindings and a completion dropdown:
+type `/` to see every verb with its help. `esc` hands the keyboard back.
+
+Lines typed there join the same queue a script uses, so one can be dropped in
+behind a run already in progress and it simply happens in turn. `stop` clears
+what is waiting.
+
+`help` prints every command in the pane. `pick` turns selector picking on and
+off: while it is on, clicking the page writes a readable `role=...` selector
+(or a unique CSS selector) to the pane instead of activating the element.
+Use Shift+Enter for another input line, Page Up/Page Down or the mouse wheel to
+scroll the transcript, and Enter to run the whole multiline command.
 
 ## The window
 
