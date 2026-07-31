@@ -113,7 +113,8 @@ typedef struct {
     int    mx, my;       // 1-based cell coords
     int    px, py;       // pixel coords when the terminal reports them
     bool   have_pixels;
-    int    button;       // 0 left, 1 middle, 2 right, 3 wheel-up, 4 wheel-down
+    int    button;       // 0 left, 1 middle, 2 right, 3 wheel-up, 4 wheel-down,
+                         // 5 wheel-left, 6 wheel-right
     bool   press;
     bool   motion;
 } Event;

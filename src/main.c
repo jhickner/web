@@ -716,10 +716,17 @@ static void handle_mouse(App *a, Event *ev) {
     if (ev->mods & MOD_CTRL)  cdp_mods |= 2;
     if (ev->mods & MOD_SHIFT) cdp_mods |= 8;
 
-    if (ev->button == 3 || ev->button == 4) {
-        // A notch moves the page down, so a wheel-up is negative.
-        int step = a->css_h / 8;
-        scroll_at(a, x, y, ev->button == 3 ? -step : step);
+    if (ev->button >= 3) {
+        // Only the vertical notches move the page. A trackpad reports a
+        // sideways one for any swipe that is not perfectly straight, and
+        // folding those into a vertical step tells most at the ends of a page:
+        // the direction being pushed is clamped to nothing, so the drift is
+        // all that is left moving and the view lurches off the edge and back.
+        if (ev->button == 3 || ev->button == 4) {
+            // A notch moves the page down, so a wheel-up is negative.
+            int step = a->css_h / 8;
+            scroll_at(a, x, y, ev->button == 3 ? -step : step);
+        }
         return;
     }
 
