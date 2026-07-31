@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -415,25 +416,64 @@ static bool special_key(App *a, int key, int mods) {
     }
 }
 
+// Something that names a file on disk becomes a file:// URL. A name is only
+// taken as a path if it resolves to something that exists, so a host that looks
+// like one - example.com, or a bare word - is left alone unless there really is
+// a file of that name here, in which case the file is what was meant.
+static bool file_url(const char *raw, char *out, size_t cap) {
+    if (!raw || !*raw) return false;
+    if (strstr(raw, "://") || !strncmp(raw, "about:", 6)) return false;
+
+    char path[PATH_MAX];
+    if (raw[0] == '~' && (raw[1] == '/' || raw[1] == 0)) {
+        const char *home = getenv("HOME");
+        if (!home || !*home) return false;
+        snprintf(path, sizeof path, "%s%s", home, raw + 1);
+    } else {
+        snprintf(path, sizeof path, "%s", raw);
+    }
+
+    // Also the existence test: there is nothing to resolve a path against
+    // unless every part of it is really there.
+    char real[PATH_MAX];
+    if (!realpath(path, real)) return false;
+
+    size_t o = 0;
+    o += (size_t)snprintf(out, cap, "file://");
+    for (const unsigned char *s = (const unsigned char *)real; *s; s++) {
+        if (o + 4 >= cap) return false;
+        if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+            (*s >= '0' && *s <= '9') || strchr("-_.~/", *s))
+            out[o++] = (char)*s;
+        else
+            o += (size_t)snprintf(out + o, cap - o, "%%%02X", *s);
+    }
+    out[o] = 0;
+    return true;
+}
+
 static void navigate(App *a, const char *raw) {
     char url[1100];
     if (strstr(raw, "://") || strncmp(raw, "about:", 6) == 0) {
         snprintf(url, sizeof url, "%s", raw);
-    } else if (strchr(raw, ' ') || !strchr(raw, '.')) {
-        char q[1024];
-        size_t o = 0;
-        for (const unsigned char *s = (const unsigned char *)raw; *s && o < sizeof q - 4; s++) {
-            if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
-                (*s >= '0' && *s <= '9') || strchr("-_.~", *s)) {
-                q[o++] = (char)*s;
-            } else {
-                o += (size_t)snprintf(q + o, sizeof q - o, "%%%02X", *s);
+    } else if (!file_url(raw, url, sizeof url)) {
+        if (strchr(raw, ' ') || !strchr(raw, '.')) {
+            char q[1024];
+            size_t o = 0;
+            for (const unsigned char *s = (const unsigned char *)raw;
+                 *s && o < sizeof q - 4; s++) {
+                if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+                    (*s >= '0' && *s <= '9') || strchr("-_.~", *s)) {
+                    q[o++] = (char)*s;
+                } else {
+                    o += (size_t)snprintf(q + o, sizeof q - o, "%%%02X", *s);
+                }
             }
+            q[o] = 0;
+            snprintf(url, sizeof url, "https://duckduckgo.com/?q=%s", q);
+        } else {
+            snprintf(url, sizeof url, "https://%s", raw);
         }
-        q[o] = 0;
-        snprintf(url, sizeof url, "https://duckduckgo.com/?q=%s", q);
-    } else {
-        snprintf(url, sizeof url, "https://%s", raw);
     }
 
     char esc[2200];
@@ -1119,7 +1159,7 @@ int main(int argc, char **argv) {
     char first[1200];
     if (strstr(start, "://") || !strncmp(start, "about:", 6))
         snprintf(first, sizeof first, "%s", start);
-    else
+    else if (!file_url(start, first, sizeof first))
         snprintf(first, sizeof first, "https://%s", start);
     snprintf(a.url, sizeof a.url, "%s", first);
 

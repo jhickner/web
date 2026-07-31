@@ -62,6 +62,11 @@ While reading:
 Page up and down and tab always go to the page, as do all four arrows once the
 page has the keyboard.
 
+Local files open the same way, on the command line or in the address bar:
+`./web TODO.md`, `./web ~/notes/plan.html`. A name is only read as a path if it
+resolves to something that is really there, so `example.com` is still a site —
+unless there is a file called that next to you, which is then what you meant.
+
 Zoom and the height of the inline window are remembered between runs, in
 `~/.config/web/state`. `--zoom` and `--rows` override them for one run without
 disturbing them.
