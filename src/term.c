@@ -204,11 +204,23 @@ void term_resize_inline(Term *t, int rows) {
     t->inline_rows = rows;
 }
 
-void term_restore(Term *t) {
+void term_restore(Term *t, bool clear_inline) {
     if (t->fd < 0) return;
     writeall(t->fd, KBD_OFF, strlen(KBD_OFF));
     writeall(t->fd, MOUSE_OFF, strlen(MOUSE_OFF));
-    if (t->inline_mode) {
+    if (t->inline_mode && clear_inline) {
+        // Wipe the block and hand its first row back: that is the row the
+        // command was run from, so the prompt returns where it left off and
+        // nothing of the window survives into the scrollback.
+        char buf[32];
+        for (int i = 0; i < t->inline_rows; i++) {
+            int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[2K",
+                             t->inline_origin + i);
+            writeall(t->fd, buf, (size_t)n);
+        }
+        int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[?25h", t->inline_origin);
+        writeall(t->fd, buf, (size_t)n);
+    } else if (t->inline_mode) {
         // Park the cursor under the block and leave the picture on screen.
         char buf[32];
         int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\r\n\x1b[?25h", t->rows);

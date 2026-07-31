@@ -135,7 +135,7 @@ int  term_probe(Term *t);                 // open the tty and measure it
 void term_enter(Term *t, bool inline_mode); // raw mode, alt screen, mouse
 void term_reserve_inline(Term *t, int rows);
 void term_resize_inline(Term *t, int rows);   // caller drops the image first
-void term_restore(Term *t);
+void term_restore(Term *t, bool clear_inline);  // erase the block on the way out
 void term_size(Term *t);
 int  term_read(Term *t);                  // pull available bytes
 void term_log(const char *fmt, ...);      // WEB_DEBUG input trace

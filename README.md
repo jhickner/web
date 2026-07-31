@@ -135,6 +135,7 @@ trade every keyboard-driven browser has to make somewhere.
 --zoom F    page magnification (default 1.0)
 --rows N    how many cell rows the window gets
 --no-status start with the status line hidden (^S toggles it)
+--clear     erase the window on exit instead of leaving it behind
 --full      take over the whole terminal instead of drawing a window
 --show      also open a real Chrome window, for debugging
 --mute      start with the page's audio switched off
@@ -155,7 +156,9 @@ command you ran — and draws there, leaving the shell's screen and scrollback
 intact. Whether that takes any scrolling depends on how far down the screen you
 were, which only the terminal knows, so it is asked rather than assumed.
 Quitting leaves the page behind: the placeholder cells are ordinary text, so the
-picture scrolls up with everything else and stays in your history.
+picture scrolls up with everything else and stays in your history. `--clear`
+takes it away instead — the block is erased and the prompt comes back on the row
+the command was run from, as though nothing had been drawn.
 
 ```sh
 ./web --rows 20 news.ycombinator.com

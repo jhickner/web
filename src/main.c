@@ -87,6 +87,7 @@ typedef struct {
     char    ua[512];           // chrome's own user agent, headless marker gone
     bool    ua_patch_req;      // this browser predates the flag and needs fixing
     bool    mute;              // start chrome with its audio switched off
+    bool    clear_exit;        // erase the inline block on the way out
     bool    keep;              // leave chrome running so the next start adopts it
     Buf     status, status_last;
 } App;
@@ -1044,6 +1045,7 @@ static void usage(void) {
         "  --full      take over the whole terminal instead of drawing a window\n"
         "  --rows N    how many cell rows the window gets\n"
         "  --no-status start with the status line hidden (^S toggles it)\n"
+        "  --clear     erase the window on exit instead of leaving it behind\n"
         "  --mute      start with the page's audio switched off\n"
         "  --login     open a window to sign in with, on the same profile\n"
         "  --keep      leave chrome running on exit so the next start is instant\n");
@@ -1089,6 +1091,8 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--rows") && i + 1 < argc) {
             a.want_rows = atoi(argv[++i]);
             a.inline_mode = true;
+        } else if (!strcmp(argv[i], "--clear")) {
+            a.clear_exit = true;
         } else if (!strcmp(argv[i], "--no-status")) {
             a.hide_status = true;
         } else if (!strcmp(argv[i], "--show")) {
@@ -1322,9 +1326,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!a.inline_mode) kitty_clear(&a.kitty);   // inline leaves the page behind
+    // Inline leaves the page behind unless it was asked not to.
+    if (!a.inline_mode || a.clear_exit) kitty_clear(&a.kitty);
     kitty_free(&a.kitty);
-    term_restore(&a.term);
+    term_restore(&a.term, a.clear_exit);
     buf_free(&a.status);
     buf_free(&a.status_last);
     // Most of a cold start is Chrome coming up. Left running, it holds the
