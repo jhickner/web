@@ -1000,8 +1000,8 @@ static void usage(void) {
         "  --scale N   device pixel ratio (default 1; 2 is sharper but 4x the data)\n"
         "  --show      run Chrome with a visible window too\n"
         "  --zoom F    page magnification (default 1.0)\n"
-        "  --inline    draw a block in the shell's flow instead of taking over\n"
-        "  --rows N    rows for that block (implies --inline)\n"
+        "  --full      take over the whole terminal instead of drawing a window\n"
+        "  --rows N    how many cell rows the window gets\n"
         "  --mute      start with the page's audio switched off\n"
         "  --login     open a window to sign in with, on the same profile\n"
         "  --keep      leave chrome running on exit so the next start is instant\n");
@@ -1027,6 +1027,7 @@ int main(int argc, char **argv) {
     a.zoom = 1.0;
     load_state(&a);                   // --zoom below still wins over it
     a.fit_width = true;
+    a.inline_mode = true;             // a window in the shell, unless --full
     bool show = false, login = false;
     const char *start = "https://duckduckgo.com";
 
@@ -1040,7 +1041,9 @@ int main(int argc, char **argv) {
             if (a.zoom < 0.5) a.zoom = 0.5;
             if (a.zoom > 3.0) a.zoom = 3.0;
         } else if (!strcmp(argv[i], "--inline")) {
-            a.inline_mode = true;
+            a.inline_mode = true;      // the default; kept so scripts still work
+        } else if (!strcmp(argv[i], "--full")) {
+            a.inline_mode = false;
         } else if (!strcmp(argv[i], "--rows") && i + 1 < argc) {
             a.want_rows = atoi(argv[++i]);
             a.inline_mode = true;

@@ -126,8 +126,8 @@ trade every keyboard-driven browser has to make somewhere.
 ```
 --scale N   device pixel ratio (default 1; 2 is sharper but 4x the data)
 --zoom F    page magnification (default 1.0)
---inline    draw a block in the shell's flow instead of taking over
---rows N    rows for that block (implies --inline)
+--rows N    how many cell rows the window gets
+--full      take over the whole terminal instead of drawing a window
 --show      also open a real Chrome window, for debugging
 --mute      start with the page's audio switched off
 --login     open a window to sign in with, on the same profile
@@ -140,15 +140,14 @@ profile when `web` exits, and the next run adopts it instead of paying for that
 again. The cost is a headless Chrome sitting in the process table until you
 kill it.
 
-## Inline mode
+## The window
 
-`--inline` opens a block where the cursor already is — right under the command
-you ran — and draws there, leaving the shell's screen and scrollback intact.
-Whether that takes any scrolling depends on how far down the screen you were,
-which only the terminal knows, so it is asked rather than assumed. Quitting
-leaves the page
-behind: the placeholder cells are ordinary text, so the picture scrolls up with
-everything else and stays in your history.
+By default `web` opens a window where the cursor already is — right under the
+command you ran — and draws there, leaving the shell's screen and scrollback
+intact. Whether that takes any scrolling depends on how far down the screen you
+were, which only the terminal knows, so it is asked rather than assumed.
+Quitting leaves the page behind: the placeholder cells are ordinary text, so the
+picture scrolls up with everything else and stays in your history.
 
 ```sh
 ./web --rows 20 news.ycombinator.com
@@ -160,10 +159,11 @@ corner: the box sets the cell rect, the cell rect sets the viewport, and the
 layout follows. It keeps a 16:10 shape, struck in pixels rather than cells,
 which are not square. Growing scrolls the extra rows into view; shrinking keeps
 the top edge where it is and simply owns fewer rows, so the history above never
-moves. `alt+=` and `alt+-` still zoom, inline or not.
+moves. `alt+=` and `alt+-` still zoom either way.
 
-Without it, `web` takes the whole terminal on the alternate screen and restores
-it on the way out.
+`--full` gives up the window and takes the whole terminal on the alternate
+screen instead, restoring it on the way out. There is no box to resize there, so
+`[` and `]` go back to zooming.
 
 ## Zoom
 
