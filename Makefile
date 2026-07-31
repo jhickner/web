@@ -1,5 +1,6 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -Wno-unused-parameter
+LDLIBS  ?= -lm
 PREFIX  ?= /usr/local
 
 SRC  := $(wildcard src/*.c)
@@ -9,7 +10,7 @@ BIN  := web
 all: $(BIN)
 
 $(BIN): $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $(OBJ)
+	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDLIBS)
 
 src/%.o: src/%.c src/web.h
 	$(CC) $(CFLAGS) -c -o $@ $<

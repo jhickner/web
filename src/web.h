@@ -90,6 +90,25 @@ int  kitty_draw_png(Kitty *k, const char *b64, size_t len);
 void kitty_clear(Kitty *k);
 void kitty_free(Kitty *k);
 
+// ---------------------------------------------------------------- recolor
+
+// The terminal's own colours, as it reports them.
+typedef struct {
+    uint8_t fg[3], bg[3];
+    bool    from_terminal;    // false means the fallback below is in use
+} Theme;
+
+void theme_fallback(Theme *t);
+
+enum { RECOLOR_OFF, RECOLOR_HUE, RECOLOR_DUOTONE, RECOLOR_TINT, RECOLOR_COUNT };
+
+const char *recolor_mode_name(int mode);
+int         recolor_mode_from_name(const char *s);
+
+// The document-start script that installs (or, for RECOLOR_OFF, withdraws) the
+// filter. Appended to out, which the caller escapes and hands to Chrome.
+void        recolor_script(Buf *out, int mode, double strength, const Theme *t);
+
 // ---------------------------------------------------------------- terminal
 
 enum {
@@ -138,6 +157,7 @@ void term_resize_inline(Term *t, int rows);   // caller drops the image first
 void term_restore(Term *t);
 void term_size(Term *t);
 int  term_read(Term *t);                  // pull available bytes
+int  term_theme(Term *t, Theme *th);      // OSC 10/11; 0 if the terminal answered
 void term_log(const char *fmt, ...);      // WEB_DEBUG input trace
 int  term_next(Term *t, Event *ev);       // 1 = event decoded
 
