@@ -15,8 +15,18 @@ static bool g_have_saved = false;
 
 #define ENTER_UI  "\x1b[?1049h\x1b[?25l\x1b[2J"
 #define LEAVE_UI  "\x1b[?25h\x1b[?1049l"
-#define MOUSE_ON  "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
-#define MOUSE_OFF "\x1b[?1006l\x1b[?1002l\x1b[?1000l"
+// Bracketed paste is what makes the terminal's own paste key usable: without
+// it a paste arrives as bare keystrokes, indistinguishable from typing, and a
+// newline in the middle of it would submit whatever it landed in.
+#define MOUSE_ON  "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h"
+#define MOUSE_OFF "\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l"
+
+// Ask for kitty's disambiguated key reporting, which is the only way a cmd
+// chord can reach us at all: the legacy encoding has no bit for super. A
+// terminal that does not know the sequence ignores it and keeps sending the
+// legacy codes, so both encodings have to stay readable either way.
+#define KBD_ON  "\x1b[>1u"
+#define KBD_OFF "\x1b[<u"
 
 void term_size(Term *t) {
     struct winsize ws = {0};
@@ -45,7 +55,10 @@ void term_size(Term *t) {
     }
 }
 
-int term_open(Term *t, bool inline_mode) {
+// Measure the terminal without changing any of its state, so the viewport can
+// be sized before Chrome is told to open a window: a browser launched at the
+// wrong size lays the page out twice and paints a frame nobody wanted.
+int term_probe(Term *t) {
     // Open the terminal by its real device path. On macOS poll() reports
     // POLLNVAL for the /dev/tty clone device, so a descriptor from there can be
     // written to but never reports readable - the app renders fine and ignores
@@ -64,7 +77,11 @@ int term_open(Term *t, bool inline_mode) {
         if (t->fd != STDIN_FILENO) close(t->fd);
         t->fd = STDIN_FILENO;
     }
+    term_size(t);
+    return 0;
+}
 
+void term_enter(Term *t, bool inline_mode) {
     if (tcgetattr(t->fd, &g_saved) == 0) {
         g_have_saved = true;
         struct termios raw = g_saved;
@@ -86,8 +103,8 @@ int term_open(Term *t, bool inline_mode) {
     writeall(t->fd, inline_mode ? "\x1b[?25l" : ENTER_UI,
              inline_mode ? 6 : strlen(ENTER_UI));
     writeall(t->fd, MOUSE_ON, strlen(MOUSE_ON));
+    writeall(t->fd, KBD_ON, strlen(KBD_ON));
     term_size(t);
-    return 0;
 }
 
 // Scroll a block of rows into view and take the bottom of the screen for it.
@@ -106,6 +123,7 @@ void term_reserve_inline(Term *t, int rows) {
 
 void term_restore(Term *t) {
     if (t->fd < 0) return;
+    writeall(t->fd, KBD_OFF, strlen(KBD_OFF));
     writeall(t->fd, MOUSE_OFF, strlen(MOUSE_OFF));
     if (t->inline_mode) {
         // Park the cursor under the block and leave the picture on screen.
@@ -116,6 +134,7 @@ void term_restore(Term *t) {
         writeall(t->fd, LEAVE_UI, strlen(LEAVE_UI));
     }
     if (g_have_saved) tcsetattr(t->fd, TCSAFLUSH, &g_saved);
+    buf_free(&t->paste);
     buf_free(&t->in);
 }
 
@@ -167,6 +186,7 @@ static int mods_from_param(int p) {
     if (m & 1) out |= MOD_SHIFT;
     if (m & 2) out |= MOD_ALT;
     if (m & 4) out |= MOD_CTRL;
+    if (m & 8) out |= MOD_SUPER;
     return out;
 }
 
@@ -260,7 +280,7 @@ int term_next(Term *t, Event *ev) {
     }
 
     size_t i = 2;
-    while (i < n && (b[i] == '<' || b[i] == '?' || b[i] == ';' ||
+    while (i < n && (b[i] == '<' || b[i] == '?' || b[i] == ';' || b[i] == ':' ||
                      (b[i] >= '0' && b[i] <= '9')))
         i++;
     if (i >= n) return 0;
@@ -290,6 +310,65 @@ int term_next(Term *t, Event *ev) {
 
     int p1 = 0, p2 = 0;
     sscanf((const char *)b + 2, "%d;%d", &p1, &p2);
+
+    // A bracketed paste is one event, however much text is inside it. Until the
+    // closing marker arrives the whole thing has to stay in the buffer: cut
+    // short it would be delivered as two pastes, and a paste split down the
+    // middle is worse than a paste that waits.
+    if (final == '~' && p1 == 200) {
+        static const char END[] = "\x1b[201~";
+        const char *hay = t->in.p;
+        const char *stop = NULL;
+        for (size_t j = seqlen; j + sizeof END - 1 <= n; j++) {
+            if (!memcmp(hay + j, END, sizeof END - 1)) { stop = hay + j; break; }
+        }
+        if (!stop) return 0;                  // wait for the rest
+        size_t body = (size_t)(stop - (hay + seqlen));
+        t->paste.len = 0;
+        buf_add(&t->paste, hay + seqlen, body);
+        buf_add(&t->paste, "", 1);            // callers read it as a C string
+        t->paste.len--;
+        buf_consume(&t->in, seqlen + body + sizeof END - 1);
+        ev->type = EV_PASTE;
+        return 1;
+    }
+
+    // Kitty's CSI u form. Once the disambiguating mode is on, everything
+    // carrying a modifier arrives this way, so this is not just the cmd path:
+    // ^L and alt+f come through here too and have to land on the same key and
+    // modifier pair the legacy branch below would have produced.
+    if (final == 'u') {
+        int m = mods_from_param(p2);
+        ev->type = EV_KEY;
+        switch (p1) {
+        case 27:  ev->key = KEY_ESC; break;
+        case 13:  ev->key = KEY_ENTER; break;
+        case 9:   ev->key = KEY_TAB; break;
+        case 127: ev->key = KEY_BACKSPACE; break;
+        default:
+            // Above the unicode range are the functional keys, which this
+            // build has no bindings for; the legacy forms still carry the ones
+            // it does use.
+            if (p1 <= 0 || p1 >= 0x110000) { ev->key = KEY_NONE; break; }
+            ev->key = p1;
+            // The protocol reports the unshifted key and a shift bit, but the
+            // rest of the app reads a shifted letter as its own key: G is a
+            // binding, shift+g is not.
+            if ((m & MOD_SHIFT) && p1 >= 'a' && p1 <= 'z') {
+                ev->key = p1 - 32;
+                m &= ~MOD_SHIFT;
+            }
+            if (!(m & (MOD_CTRL | MOD_ALT | MOD_SUPER)) &&
+                ev->key >= 0x20 && ev->key < 0x7f) {
+                ev->text[0] = (char)ev->key;
+                ev->text[1] = 0;
+            }
+            break;
+        }
+        ev->mods = m;
+        buf_consume(&t->in, seqlen);
+        return ev->key != KEY_NONE;
+    }
 
     ev->type = EV_KEY;
     ev->mods = mods_from_param(p2);

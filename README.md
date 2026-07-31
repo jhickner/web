@@ -37,22 +37,43 @@ set -g allow-passthrough all
 | `^Q` | quit |
 | `alt+0` | reset zoom |
 | `alt+f` | fit-to-width on/off |
+| `cmd+c` | copy the page selection (needs one line of terminal config, below) |
+| `cmd+v` | paste into the page, or into the address bar when it is open |
 | mouse | click, drag to select, wheel to scroll |
 
 While reading:
 
 | Key | Action |
 |---|---|
+| `↓` / `↑` | down / up, a line at a time |
+| `←` / `→` | back / forward |
 | `j` / `k` | down / up |
 | `d` / `u` | half a screen |
 | `space` / `b` | a screen |
-| `gg` / `G` | top / bottom |
+| `gg` / `G` | top / bottom of the page |
 | `[` / `]` | zoom out / in |
 | `/` | find in page, then `n` / `N` for next and previous |
 | `i` | hand the keyboard to the page |
 | `esc` | take it back |
 
-Arrows, page up and down, and tab always go to the page.
+Page up and down and tab always go to the page, as do all four arrows once the
+page has the keyboard.
+
+Zoom is remembered between runs, in `~/.config/web/state`. `--zoom` overrides it
+for one run without disturbing it.
+
+`cmd+v` needs nothing: the terminal turns it into a bracketed paste, which is
+ordinary input. `cmd+c` is the other way around — the terminal keeps that one
+for itself, and since the page is an image there is never anything in the
+terminal to copy. One line in `~/.config/ghostty/config` hands it over:
+
+```sh
+keybind = performable:cmd+c=copy_to_clipboard
+```
+
+`performable:` means the key is only consumed when the action can actually run,
+so cmd+c still copies a terminal selection everywhere else and only falls
+through to the program when there is no selection to take.
 
 ## Modes
 
@@ -73,7 +94,14 @@ trade every keyboard-driven browser has to make somewhere.
 --inline    draw a block in the shell's flow instead of taking over
 --rows N    rows for that block (implies --inline)
 --show      also open a real Chrome window, for debugging
+--keep      leave Chrome running on exit so the next start is instant
 ```
+
+Most of a start is Chrome coming up: about half a second, against thirty
+milliseconds for everything else. `--keep` leaves the browser holding the
+profile when `web` exits, and the next run adopts it instead of paying for that
+again. The cost is a headless Chrome sitting in the process table until you
+kill it.
 
 ## Inline mode
 
@@ -133,6 +161,26 @@ Chrome only emits a frame when the page actually changes, and each frame is
 acknowledged only after it is on screen. That ack is the backpressure: a slow
 terminal cannot be buried in frames it has no chance of drawing, and the event
 loop always gets back to the keyboard between them.
+
+That makes the whole cost of scrolling the number of frames it takes, and the
+page decides that, not us. Three things decide it:
+
+**Scrollbars are turned off.** The overlay scrollbar appears on a scroll, waits
+half a second and fades out over a dozen compositor frames — each one a
+full-page PNG, for a widget that cannot be grabbed from a terminal anyway. It
+was most of the cost of scrolling.
+
+**Scrolling is one jump.** A step reads the scroller under the point, clamps the
+target to its ends, and sets it — `behavior:'instant'`, which a page asking for
+smooth scrolling in CSS cannot override. Nothing animates, so a step costs the
+one frame it takes to land, and a step at the top or bottom does nothing at all
+rather than leaving distance behind to unwind.
+
+**Pointer moves collapse.** A move that arrives while a frame is being written
+is held, and the next one replaces it, so a drag costs one dispatch and one
+frame instead of one of each per step.
+
+Between them a page-down went from twenty-six frames to one.
 
 Under tmux the picture cannot simply be placed at the cursor, because tmux
 neither tracks nor redraws it. The way through is the protocol's Unicode

@@ -12,10 +12,24 @@ volatile sig_atomic_t g_quit = 0;
 static void on_winch(int sig) { (void)sig; g_resized = 1; }
 static void on_term(int sig)  { (void)sig; g_quit = 1; }
 
+enum { PEND_NONE, PEND_MOVE };
+
+// One pointer move held back so the next one replaces it: a drag that arrives
+// while a frame is being written then costs one dispatch and one frame instead
+// of one of each per step.
+typedef struct {
+    int         kind;
+    int         x, y;
+    int         mods;
+    int         buttons;
+    const char *btn;
+} Pending;
+
 typedef struct {
     Term    term;
     Kitty   kitty;
     Chrome  chrome;
+    Pending pend;
 
     int     css_w, css_h;      // page viewport in CSS pixels
     int     scale;             // device pixel ratio actually in use
@@ -58,9 +72,49 @@ typedef struct {
 
     char    msg[256];
     double  msg_until;
+
+    bool    keep;              // leave chrome running so the next start adopts it
+    Buf     status, status_last;
 } App;
 
 static App *g_app;
+
+// ----------------------------------------------------------- cdp dispatch
+
+static void flush_pending(App *a) {
+    Pending *p = &a->pend;
+    int kind = p->kind;
+    p->kind = PEND_NONE;
+    if (kind == PEND_MOVE) {
+        cdp_call(&a->chrome, "Input.dispatchMouseEvent",
+                 "\"type\":\"mouseMoved\",\"x\":%d,\"y\":%d,\"button\":\"%s\","
+                 "\"buttons\":%d,\"modifiers\":%d",
+                 p->x, p->y, p->btn, p->buttons, p->mods);
+    }
+}
+
+// Everything that is not a coalesced pointer event goes through here, so a held
+// back scroll or move always reaches the page ahead of whatever follows it.
+static int app_cdp(App *a, const char *method, const char *fmt, ...) {
+    flush_pending(a);
+    va_list ap;
+    va_start(ap, fmt);
+    int id = cdp_vcall(&a->chrome, method, fmt, ap);
+    va_end(ap);
+    return id;
+}
+
+static void queue_move(App *a, int x, int y, const char *btn, int buttons,
+                       int mods) {
+    Pending *p = &a->pend;
+    if (p->kind != PEND_MOVE) flush_pending(a);
+    p->kind = PEND_MOVE;
+    p->x = x;
+    p->y = y;
+    p->btn = btn;
+    p->buttons = buttons;
+    p->mods = mods;
+}
 
 // Runs while a frame is being written. It only looks for the keys that must
 // work at any moment; everything else waits for the normal input pass, which
@@ -130,13 +184,18 @@ static void relayout(App *a) {
         a->status_row = t->rows;
     }
 
-    // The picture is stretched into the cell rect, so the viewport has to keep
-    // that same shape or the page comes out distorted.
-    double z = a->zoom > 0 ? a->zoom : 1.0;
-    double cell_aspect = (double)(a->img_rows * t->cell_h) /
-                         (double)(t->cols * t->cell_w);
+    // The pixels the picture will actually occupy. Everything below works back
+    // from these: whatever the terminal is handed gets resampled to this size,
+    // and a resample by any fraction is what shaves the bottom off a line of
+    // text, so the goal is to be handed exactly this and never resample at all.
+    int rect_w = t->cols * t->cell_w;
+    int rect_h = a->img_rows * t->cell_h;
+    if (rect_w < 1) rect_w = 1;
+    if (rect_h < 1) rect_h = 1;
 
-    int w = (int)(t->cols * t->cell_w / z);
+    double z = a->zoom > 0 ? a->zoom : 1.0;
+
+    int w = (int)(rect_w / z);
     // A page with a minimum layout width would otherwise hang off the side.
     // Widening the viewport to what it asks for keeps all of it in view; the
     // text ends up smaller, which is the honest trade.
@@ -144,28 +203,44 @@ static void relayout(App *a) {
     if (w < 200) w = 200;
 
     a->css_w = w;
-    a->css_h = (int)(w * cell_aspect);
+    a->css_h = (int)((double)w * rect_h / rect_w + 0.5);
     if (a->css_h < 200) a->css_h = 200;
 
     // Every frame crosses the terminal as base64, so the pixel count sets the
     // cost of everything: Chrome's encode, the write, and how long a keypress
     // waits behind it. A 2x ratio quadruples that, so cap it on wide panes.
     a->scale = a->want_scale;
-    while (a->scale > 1 && (long)a->css_w * a->scale > 1920) a->scale--;
+    while (a->scale > 1 && (long)rect_w * a->scale > 1920) a->scale--;
 
-    cdp_call(&a->chrome, "Emulation.setDeviceMetricsOverride",
-             "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":%d,\"mobile\":false",
-             a->css_w, a->css_h, a->scale);
-    cdp_call(&a->chrome, "Page.startScreencast",
+    // The ratio that turns the viewport into those pixels. Zoom and fit-width
+    // both make it fractional, and it is Chrome's job rather than the
+    // terminal's: asked for the final size it lays the text out at that size
+    // and hints it there, where the terminal could only stretch a bitmap that
+    // was already wrong.
+    double dsf = (double)rect_w * a->scale / (double)a->css_w;
+
+    a->status_last.len = 0;    // the status line may have moved rows
+
+    // Both calls go out every time, including when the numbers have not moved.
+    // Restarting the screencast is what makes Chrome hand over a fresh frame,
+    // so this is the only way anything asking for a redraw gets one.
+    app_cdp(a, "Emulation.setDeviceMetricsOverride",
+             "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":%.6f,\"mobile\":false",
+             a->css_w, a->css_h, dsf);
+    app_cdp(a, "Page.startScreencast",
              "\"format\":\"png\",\"maxWidth\":%d,\"maxHeight\":%d,\"everyNthFrame\":1",
-             a->css_w * a->scale, a->css_h * a->scale);
+             rect_w * a->scale, rect_h * a->scale);
 }
 
 // ------------------------------------------------------------------ status
 
+// Called after every input batch and every frame, so it keeps its buffer and
+// stays quiet when the line has not changed: an unnecessary repaint here lands
+// in the middle of a stream of image data.
 static void draw_status(App *a) {
     Term *t = &a->term;
-    Buf b = {0};
+    Buf b = a->status;
+    b.len = 0;
     int row = a->status_row > 0 ? a->status_row : t->rows;
 
     buf_addf(&b, "\x1b[%d;1H\x1b[2K", row);
@@ -203,8 +278,14 @@ static void draw_status(App *a) {
         buf_add(&b, "\x1b[?25l", 6);
     }
 
+    a->status = b;
+    if (b.len == a->status_last.len &&
+        (b.len == 0 || memcmp(b.p, a->status_last.p, b.len) == 0))
+        return;
+
     writeall(t->fd, b.p, b.len);
-    buf_free(&b);
+    a->status_last.len = 0;
+    buf_add(&a->status_last, b.p, b.len);
 }
 
 // ------------------------------------------------------------------ input
@@ -212,7 +293,7 @@ static void draw_status(App *a) {
 static void send_char(App *a, const char *text) {
     char esc[64];
     json_escape(esc, sizeof esc, text);
-    cdp_call(&a->chrome, "Input.dispatchKeyEvent",
+    app_cdp(a, "Input.dispatchKeyEvent",
              "\"type\":\"char\",\"text\":\"%s\"", esc);
 }
 
@@ -223,12 +304,12 @@ static void send_key(App *a, int vk, const char *key, const char *code,
     if (mods & MOD_CTRL)  cdp_mods |= 2;
     if (mods & MOD_SHIFT) cdp_mods |= 8;
 
-    cdp_call(&a->chrome, "Input.dispatchKeyEvent",
+    app_cdp(a, "Input.dispatchKeyEvent",
              "\"type\":\"%s\",\"windowsVirtualKeyCode\":%d,\"nativeVirtualKeyCode\":%d,"
              "\"key\":\"%s\",\"code\":\"%s\",\"modifiers\":%d%s%s%s",
              text ? "keyDown" : "rawKeyDown", vk, vk, key, code, cdp_mods,
              text ? ",\"text\":\"" : "", text ? text : "", text ? "\"" : "");
-    cdp_call(&a->chrome, "Input.dispatchKeyEvent",
+    app_cdp(a, "Input.dispatchKeyEvent",
              "\"type\":\"keyUp\",\"windowsVirtualKeyCode\":%d,\"nativeVirtualKeyCode\":%d,"
              "\"key\":\"%s\",\"code\":\"%s\",\"modifiers\":%d",
              vk, vk, key, code, cdp_mods);
@@ -276,17 +357,8 @@ static void navigate(App *a, const char *raw) {
 
     char esc[2200];
     json_escape(esc, sizeof esc, url);
-    cdp_call(&a->chrome, "Page.navigate", "\"url\":\"%s\"", esc);
+    app_cdp(a, "Page.navigate", "\"url\":\"%s\"", esc);
     a->loading = true;
-}
-
-// Scroll with a wheel event at the middle of the view rather than
-// window.scrollBy: the wheel goes to whatever scrollable thing is under the
-// pointer, so panes and inner scrollers behave the way they look.
-static void scroll_by(App *a, int dy) {
-    cdp_call(&a->chrome, "Input.dispatchMouseEvent",
-             "\"type\":\"mouseWheel\",\"x\":%d,\"y\":%d,\"deltaX\":0,\"deltaY\":%d",
-             a->css_w / 2, a->css_h / 2, dy);
 }
 
 // Ask the page whether it actually fits the viewport it was just given.
@@ -294,9 +366,41 @@ static void scroll_by(App *a, int dy) {
 // viewport means real horizontal overflow, and nothing else does.
 static void request_fit(App *a) {
     if (!a->fit_width) return;
-    a->fit_req = cdp_call(&a->chrome, "Runtime.evaluate",
+    a->fit_req = app_cdp(a, "Runtime.evaluate",
         "\"expression\":\"Math.max(document.documentElement.scrollWidth,"
         "document.body?document.body.scrollWidth:0)\",\"returnByValue\":true");
+}
+
+// Zoom is the one setting worth outliving the process: it is a property of the
+// terminal it is being read in, not of any page.
+static void state_path(char *out, size_t cap) {
+    const char *cfg = getenv("XDG_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    if (cfg && *cfg) snprintf(out, cap, "%s/web", cfg);
+    else             snprintf(out, cap, "%s/.config/web", home ? home : "/tmp");
+}
+
+static double load_zoom(void) {
+    char dir[512], path[600];
+    state_path(dir, sizeof dir);
+    snprintf(path, sizeof path, "%s/state", dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    double z = 0;
+    if (fscanf(f, "zoom=%lf", &z) != 1) z = 0;
+    fclose(f);
+    return z >= 0.4 && z <= 4.0 ? z : 0;
+}
+
+static void save_zoom(double z) {
+    char dir[512], path[600];
+    state_path(dir, sizeof dir);
+    mkdirs(dir);
+    snprintf(path, sizeof path, "%s/state", dir);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "zoom=%.4f\n", z);
+    fclose(f);
 }
 
 // Zoom is a request, not a command: the viewport narrows to magnify, and a page
@@ -311,6 +415,10 @@ static void zoom_by(App *a, double factor) {
 
     a->fit_w = 0;                 // re-measure from the width just asked for
     relayout(a);
+    // Only what was asked for is remembered. The fit pass below can lower
+    // a->zoom to whatever a stubbornly wide page allows, and saving that would
+    // let one such page quietly become the setting for every later run.
+    save_zoom(a->zoom);
 
     char m[64];
     snprintf(m, sizeof m, "zoom %.0f%%", a->zoom * 100);
@@ -321,7 +429,49 @@ static void zoom_by(App *a, double factor) {
 static void run_js(App *a, const char *js) {
     char esc[2048];
     json_escape(esc, sizeof esc, js);
-    cdp_call(&a->chrome, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
+    app_cdp(a, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
+}
+
+// One jump, landed on immediately. The scroller under the point is the one that
+// moves, so panes and inner scrollers behave the way they look; the target is
+// clamped to the ends first, so a step at the top or bottom of a page simply
+// does nothing instead of leaving something behind to unwind.
+static void scroll_at(App *a, int x, int y, int dy) {
+    char js[768];
+    snprintf(js, sizeof js,
+             "(function(x,y,d){"
+             "var e=document.elementFromPoint(x,y);"
+             "while(e){var o=getComputedStyle(e).overflowY;"
+             "if((o==='auto'||o==='scroll')&&e.scrollHeight>e.clientHeight+1)break;"
+             "e=e.parentElement;}"
+             "var t=e||document.scrollingElement||document.documentElement;"
+             "var m=t.scrollHeight-t.clientHeight,v=t.scrollTop+d;"
+             "if(v<0)v=0;if(v>m)v=m;"
+             // 'instant' and not the scrollTop setter: the setter obeys a page
+             // that asks for smooth scrolling in CSS, and every step of that
+             // animation is another full-page PNG across the terminal.
+             "t.scrollTo({top:v,left:t.scrollLeft,behavior:'instant'});"
+             "})(%d,%d,%d)",
+             x, y, dy);
+    run_js(a, js);
+}
+
+static void scroll_by(App *a, int dy) {
+    scroll_at(a, a->css_w / 2, a->css_h / 2, dy);
+}
+
+// gg and G mean the page, not whatever pane happens to sit under the middle of
+// the view: "top" is somewhere you can name, and a step is not.
+static void scroll_page_end(App *a, bool bottom) {
+    run_js(a, bottom
+        ? "(function(t){t.scrollTo({top:t.scrollHeight,behavior:'instant'});})"
+          "(document.scrollingElement||document.documentElement)"
+        : "(function(t){t.scrollTo({top:0,behavior:'instant'});})"
+          "(document.scrollingElement||document.documentElement)");
+}
+
+static void nav_history(App *a, int delta) {
+    run_js(a, delta < 0 ? "history.back()" : "history.forward()");
 }
 
 static void find_next(App *a, bool backwards) {
@@ -362,27 +512,49 @@ static void handle_mouse(App *a, Event *ev) {
     if (ev->mods & MOD_SHIFT) cdp_mods |= 8;
 
     if (ev->button == 3 || ev->button == 4) {
-        // Positive deltaY scrolls the page down, so a wheel-up is negative.
-        int dy = ev->button == 3 ? -120 : 120;
-        cdp_call(&a->chrome, "Input.dispatchMouseEvent",
-                 "\"type\":\"mouseWheel\",\"x\":%d,\"y\":%d,\"deltaX\":0,"
-                 "\"deltaY\":%d,\"modifiers\":%d", x, y, dy, cdp_mods);
+        // A notch moves the page down, so a wheel-up is negative.
+        int step = a->css_h / 8;
+        scroll_at(a, x, y, ev->button == 3 ? -step : step);
         return;
     }
 
     const char *btn = ev->button == 1 ? "middle" : ev->button == 2 ? "right" : "left";
     if (ev->motion) {
-        cdp_call(&a->chrome, "Input.dispatchMouseEvent",
-                 "\"type\":\"mouseMoved\",\"x\":%d,\"y\":%d,\"button\":\"%s\","
-                 "\"buttons\":%d,\"modifiers\":%d",
-                 x, y, btn, ev->press ? 1 : 0, cdp_mods);
+        queue_move(a, x, y, btn, ev->press ? 1 : 0, cdp_mods);
         return;
     }
-    cdp_call(&a->chrome, "Input.dispatchMouseEvent",
+    app_cdp(a, "Input.dispatchMouseEvent",
              "\"type\":\"%s\",\"x\":%d,\"y\":%d,\"button\":\"%s\","
              "\"buttons\":%d,\"clickCount\":1,\"modifiers\":%d",
              ev->press ? "mousePressed" : "mouseReleased", x, y, btn,
              ev->press ? 1 : 0, cdp_mods);
+}
+
+// The terminal's own paste key reaches us as text, so it works without the page
+// ever seeing a modifier: whatever has the keyboard here gets it.
+static void handle_paste(App *a, const char *text, size_t len) {
+    if (!len) return;
+    if (a->editing) {
+        // A pasted newline is a line break in text but an instruction here, so
+        // the address bar takes the first line and stops.
+        size_t n = strcspn(text, "\r\n");
+        if (n > len) n = len;
+        if (a->edit_len + n + 1 > sizeof a->edit) n = sizeof a->edit - a->edit_len - 1;
+        memcpy(a->edit + a->edit_len, text, n);
+        a->edit_len += n;
+        return;
+    }
+    char esc[8192];
+    json_escape(esc, sizeof esc, text);
+    app_cdp(a, "Input.insertText", "\"text\":\"%s\"", esc);
+}
+
+// Ask the page for its selection; the reply decides whether we copy the
+// selected text or fall back to the address.
+static void copy_selection(App *a) {
+    a->copy_req = app_cdp(a, "Runtime.evaluate",
+                           "\"expression\":\"window.getSelection().toString()\","
+                           "\"returnByValue\":true");
 }
 
 static void handle_key(App *a, Event *ev) {
@@ -419,6 +591,13 @@ static void handle_key(App *a, Event *ev) {
         return;
     }
 
+    // cmd only reaches us at all where the terminal has been told to let it
+    // through, and only for chords it does not claim for itself.
+    if (ev->mods == MOD_SUPER) {
+        if (ev->key == 'c') { copy_selection(a); return; }
+        return;                 // anything else is the terminal's business
+    }
+
     if (ev->mods == MOD_CTRL) {
         switch (ev->key) {
         case 'q': case 'c': term_log("QUIT via ^%c", ev->key); g_quit = 1; return;
@@ -431,24 +610,14 @@ static void handle_key(App *a, Event *ev) {
         case 'g':
             a->show_stats = !a->show_stats;
             return;
-        case 'y':
-            // Ask the page for its selection; the reply decides whether we copy
-            // the selected text or fall back to the address.
-            a->copy_req = cdp_call(&a->chrome, "Runtime.evaluate",
-                                   "\"expression\":\"window.getSelection().toString()\","
-                                   "\"returnByValue\":true");
-            return;
+        case 'y': copy_selection(a); return;
         case 'r':
-            cdp_call(&a->chrome, "Page.reload", "\"ignoreCache\":false");
+            app_cdp(a, "Page.reload", "\"ignoreCache\":false");
             a->loading = true;
             notify(a, "reloading");
             return;
-        case 'o':
-            cdp_call(&a->chrome, "Runtime.evaluate", "\"expression\":\"history.back()\"");
-            return;
-        case 'p':
-            cdp_call(&a->chrome, "Runtime.evaluate", "\"expression\":\"history.forward()\"");
-            return;
+        case 'o': nav_history(a, -1); return;
+        case 'p': nav_history(a, +1); return;
         }
     }
 
@@ -461,6 +630,12 @@ static void handle_key(App *a, Event *ev) {
         if (a->pending_g && ev->key != 'g') a->pending_g = false;
 
         switch (ev->key) {
+        // Chrome moves 40 CSS pixels per arrow press; matching it means a page
+        // scrolls here at the speed it does in a window.
+        case KEY_DOWN:  scroll_by(a, 40);  return;
+        case KEY_UP:    scroll_by(a, -40); return;
+        case KEY_LEFT:  nav_history(a, -1); return;
+        case KEY_RIGHT: nav_history(a, +1); return;
         case 'j': scroll_by(a, 60);    return;
         case 'k': scroll_by(a, -60);   return;
         case 'd': scroll_by(a, half);  return;
@@ -470,13 +645,13 @@ static void handle_key(App *a, Event *ev) {
         case 'g':
             if (a->pending_g) {
                 a->pending_g = false;
-                run_js(a, "window.scrollTo(0,0)");
+                scroll_page_end(a, false);
             } else {
                 a->pending_g = true;
             }
             return;
         case 'G':
-            run_js(a, "window.scrollTo(0,document.body.scrollHeight)");
+            scroll_page_end(a, true);
             return;
         case '[': zoom_by(a, 1.0 / 1.25); return;
         case ']': zoom_by(a, 1.25);        return;
@@ -516,6 +691,7 @@ static void handle_key(App *a, Event *ev) {
             a->zoom = 1.0;
             a->fit_w = 0;
             relayout(a);
+            save_zoom(a->zoom);
             notify(a, "zoom 100%");
             request_fit(a);
             return;
@@ -560,8 +736,8 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
                 a->last_write_ms = (t1 - t0) * 1000.0;
                 a->frames++;
                 a->last_draw = t1;
-                term_log("frame %u: %zu KB b64, write %.1f ms, %.1f fps",
-                         a->frames, dlen / 1024, a->last_write_ms, a->fps);
+                term_log("%.3f frame %u: %zu KB b64, write %.1f ms, %.1f fps",
+                         t1, a->frames, dlen / 1024, a->last_write_ms, a->fps);
             } else {
                 a->skipped++;
             }
@@ -571,7 +747,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         // until then, which is the only thing keeping a slow terminal from
         // being buried in frames it cannot draw - and keeps the loop reaching
         // the keyboard between frames.
-        cdp_call(&a->chrome, "Page.screencastFrameAck", "\"sessionId\":%d", (int)sid);
+        app_cdp(a, "Page.screencastFrameAck", "\"sessionId\":%d", (int)sid);
         return;
     }
 
@@ -599,13 +775,13 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
     if (strstr(msg, "Page.loadEventFired")) {
         a->loading = false;
         request_fit(a);
-        a->title_req = cdp_call(&a->chrome, "Runtime.evaluate",
+        a->title_req = app_cdp(a, "Runtime.evaluate",
                                 "\"expression\":\"document.title\",\"returnByValue\":true");
         return;
     }
 
     if (strstr(msg, "Page.javascriptDialogOpening")) {
-        cdp_call(&a->chrome, "Page.handleJavaScriptDialog", "\"accept\":false");
+        app_cdp(a, "Page.handleJavaScriptDialog", "\"accept\":false");
         return;
     }
 
@@ -672,13 +848,29 @@ static void usage(void) {
         "  --show      run Chrome with a visible window too\n"
         "  --zoom F    page magnification (default 1.0)\n"
         "  --inline    draw a block in the shell's flow instead of taking over\n"
-        "  --rows N    rows for that block (implies --inline)\n");
+        "  --rows N    rows for that block (implies --inline)\n"
+        "  --keep      leave chrome running on exit so the next start is instant\n");
+}
+
+// The size Chrome should open at, close enough that the page lays out once.
+// relayout settles the exact numbers as soon as the terminal is fully set up.
+static void first_size(App *a, int *w, int *h) {
+    int rows = a->inline_mode
+        ? (a->want_rows > 0 ? a->want_rows : a->term.rows / 2)
+        : a->term.rows - 1;
+    if (rows < 1) rows = 1;
+    double z = a->zoom > 0 ? a->zoom : 1.0;
+    *w = (int)(a->term.cols * a->term.cell_w / z);
+    *h = (int)(rows * a->term.cell_h / z);
+    if (*w < 200) *w = 200;
+    if (*h < 200) *h = 200;
 }
 
 int main(int argc, char **argv) {
     App a = {0};
     a.want_scale = 1;
-    a.zoom = 1.0;
+    double saved = load_zoom();       // --zoom below still wins over it
+    a.zoom = saved > 0 ? saved : 1.0;
     a.fit_width = true;
     bool show = false;
     const char *start = "https://duckduckgo.com";
@@ -699,6 +891,8 @@ int main(int argc, char **argv) {
             a.inline_mode = true;
         } else if (!strcmp(argv[i], "--show")) {
             show = true;
+        } else if (!strcmp(argv[i], "--keep")) {
+            a.keep = true;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage();
             return 0;
@@ -714,16 +908,24 @@ int main(int argc, char **argv) {
         snprintf(first, sizeof first, "https://%s", start);
     snprintf(a.url, sizeof a.url, "%s", first);
 
+    term_log("%.3f start", now_sec());
     signal(SIGPIPE, SIG_IGN);
     signal(SIGWINCH, on_winch);
     signal(SIGTERM, on_term);
     signal(SIGHUP, on_term);
 
+    // Measure the terminal before Chrome starts. Launched at some other size it
+    // would lay the page out, paint it, and then have to do both again the
+    // moment the real viewport arrived.
+    term_probe(&a.term);
+    int fw, fh;
+    first_size(&a, &fw, &fh);
+
     fprintf(stderr, "web: starting chrome...\n");
-    if (chrome_launch(&a.chrome, first, 1280, 800, show) < 0) return 1;
+    if (chrome_launch(&a.chrome, first, fw, fh, show) < 0) return 1;
     if (chrome_attach(&a.chrome) < 0) { chrome_kill(&a.chrome); return 1; }
 
-    term_open(&a.term, a.inline_mode);
+    term_enter(&a.term, a.inline_mode);
     if (a.inline_mode) {
         int rows = a.want_rows > 0 ? a.want_rows + 1 : a.term.rows / 2;
         if (rows > a.term.rows) rows = a.term.rows;
@@ -735,15 +937,21 @@ int main(int argc, char **argv) {
     bool tmux = getenv("TMUX") != NULL;
     kitty_init(&a.kitty, a.term.fd, tmux);
 
-    cdp_call(&a.chrome, "Page.enable", "");
-    cdp_call(&a.chrome, "Runtime.enable", "");
+    app_cdp(&a, "Page.enable", "");
+    app_cdp(&a, "Runtime.enable", "");
+    // The overlay scrollbar appears on a scroll, waits half a second, then
+    // fades out over a dozen compositor frames - and every one of those is a
+    // full-page PNG across the terminal. It costs more than everything else
+    // scrolling does, and there is nothing to see: the terminal has no pointer
+    // to grab it with.
+    app_cdp(&a, "Emulation.setScrollbarsHidden", "\"hidden\":true");
     {
         char esc[2048];
         json_escape(esc, sizeof esc, FOCUS_WATCHER);
-        cdp_call(&a.chrome, "Runtime.addBinding", "\"name\":\"__webmode\"");
-        cdp_call(&a.chrome, "Page.addScriptToEvaluateOnNewDocument",
+        app_cdp(&a, "Runtime.addBinding", "\"name\":\"__webmode\"");
+        app_cdp(&a, "Page.addScriptToEvaluateOnNewDocument",
                  "\"source\":\"%s\"", esc);
-        cdp_call(&a.chrome, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
+        app_cdp(&a, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
     }
     if (a.chrome.adopted) navigate(&a, first);
     relayout(&a);
@@ -757,17 +965,24 @@ int main(int argc, char **argv) {
                 a.term.inline_origin = a.term.rows - a.term.inline_rows + 1;
             } else {
                 writeall(a.term.fd, "\x1b[2J", 4);
+                // The clear took the placeholder cells with it, and a resize
+                // that lands on the same rect would not otherwise redraw them.
+                a.kitty.grid_dirty = true;
             }
+            a.status_last.len = 0;      // the screen it was on is gone
             relayout(&a);
         }
 
-        struct pollfd fds[2];
+        struct pollfd fds[2] = {{0}};   // poll leaves revents alone on EINTR
         fds[0].fd = a.term.fd;
         fds[0].events = POLLIN;
         fds[1].fd = a.chrome.ws.fd;
         fds[1].events = POLLIN;
 
-        int rc = poll(fds, 2, 100);
+        // Nothing here is on a timer except an undecided ESC and an expiring
+        // notice, so the loop sleeps until something actually happens.
+        int wait = (a.term.in.len || a.msg_until > now_sec()) ? 20 : -1;
+        int rc = poll(fds, 2, wait);
         if (rc < 0 && !g_resized) continue;
 
         if (fds[0].revents & POLLIN) {
@@ -778,8 +993,12 @@ int main(int argc, char **argv) {
                          ev.type, ev.key, ev.mods, ev.text[0] ? ev.text : "");
                 if (ev.type == EV_KEY) handle_key(&a, &ev);
                 else if (ev.type == EV_MOUSE) handle_mouse(&a, &ev);
+                else if (ev.type == EV_PASTE)
+                    handle_paste(&a, a.term.paste.p, a.term.paste.len);
                 if (g_quit) break;
             }
+            // A move held back during the batch goes out now.
+            flush_pending(&a);
             draw_status(&a);
         }
 
@@ -800,6 +1019,9 @@ int main(int argc, char **argv) {
         if (a.term.in.len && term_next(&a.term, &ev)) {
             if (ev.type == EV_KEY) handle_key(&a, &ev);
             else if (ev.type == EV_MOUSE) handle_mouse(&a, &ev);
+            else if (ev.type == EV_PASTE)
+                handle_paste(&a, a.term.paste.p, a.term.paste.len);
+            flush_pending(&a);
             draw_status(&a);
         }
     }
@@ -807,7 +1029,12 @@ int main(int argc, char **argv) {
     if (!a.inline_mode) kitty_clear(&a.kitty);   // inline leaves the page behind
     kitty_free(&a.kitty);
     term_restore(&a.term);
-    chrome_kill(&a.chrome);
+    buf_free(&a.status);
+    buf_free(&a.status_last);
+    // Most of a cold start is Chrome coming up. Left running, it holds the
+    // profile and the next run adopts it instead of paying for that again.
+    if (a.keep) ws_close(&a.chrome.ws);
+    else chrome_kill(&a.chrome);
     printf("web: %u frames drawn, %u duplicates skipped\n", a.frames, a.skipped);
     return 0;
 }

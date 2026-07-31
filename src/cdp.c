@@ -37,18 +37,6 @@ static const char *find_chrome(void) {
     return NULL;
 }
 
-static void mkdirs(const char *path) {
-    char tmp[512];
-    snprintf(tmp, sizeof tmp, "%s", path);
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p != '/') continue;
-        *p = 0;
-        mkdir(tmp, 0755);
-        *p = '/';
-    }
-    mkdir(tmp, 0755);
-}
-
 // Chrome writes the chosen port here once the debug endpoint is listening, so
 // we can pass --remote-debugging-port=0 and avoid racing for a free port.
 static int read_devtools_port(const char *profile, double timeout) {
@@ -65,7 +53,9 @@ static int read_devtools_port(const char *profile, double timeout) {
             }
             fclose(f);
         }
-        struct timespec ts = {0, 50 * 1000000};
+        // Chrome takes roughly a quarter second to get here, and every
+        // millisecond of poll granularity is a millisecond of startup.
+        struct timespec ts = {0, 4 * 1000000};
         nanosleep(&ts, NULL);
     }
     return -1;
@@ -145,7 +135,7 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window) {
     snprintf(winsize, sizeof winsize, "--window-size=%d,%d", w, h);
     snprintf(profarg, sizeof profarg, "--user-data-dir=%s", c->profile);
 
-    const char *argv[32];
+    const char *argv[48];
     int a = 0;
     argv[a++] = bin;
     argv[a++] = "--remote-debugging-port=0";
@@ -159,6 +149,27 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window) {
     argv[a++] = "--mute-audio";
     argv[a++] = "--noerrdialogs";
     argv[a++] = "--disable-features=Translate,MediaRouter";
+
+    // Subsystems that only cost startup time here: none of them can be seen
+    // through a terminal, and the keychain one can block on a system prompt.
+    argv[a++] = "--use-mock-keychain";
+    argv[a++] = "--password-store=basic";
+    argv[a++] = "--disable-extensions";
+    argv[a++] = "--disable-default-apps";
+    argv[a++] = "--disable-client-side-phishing-detection";
+    argv[a++] = "--disable-domain-reliability";
+    argv[a++] = "--disable-breakpad";
+    argv[a++] = "--metrics-recording-only";
+    argv[a++] = "--no-pings";
+    argv[a++] = "--disable-hang-monitor";
+
+    // A window nobody is looking at gets its timers throttled and its renderer
+    // put to sleep, which shows up as a page that stops animating and a
+    // screencast that goes quiet.
+    argv[a++] = "--disable-background-timer-throttling";
+    argv[a++] = "--disable-renderer-backgrounding";
+    argv[a++] = "--disable-backgrounding-occluded-windows";
+
     if (!show_window) argv[a++] = "--headless=new";
     argv[a++] = url;
     argv[a] = NULL;
@@ -264,7 +275,7 @@ int chrome_attach(Chrome *c) {
             }
         }
         if (!ws_path[0]) {
-            struct timespec ts = {0, 100 * 1000000};
+            struct timespec ts = {0, 5 * 1000000};
             nanosleep(&ts, NULL);
         }
     }
@@ -303,20 +314,18 @@ void chrome_kill(Chrome *c) {
     if (c->ws.fd > 0) ws_close(&c->ws);
 }
 
-int cdp_call(Chrome *c, const char *method, const char *params_fmt, ...) {
+int cdp_vcall(Chrome *c, const char *method, const char *params_fmt, va_list ap) {
     Buf b = {0};
     int id = c->next_id++;
     buf_addf(&b, "{\"id\":%d,\"method\":\"%s\",\"params\":{", id, method);
     if (params_fmt && *params_fmt) {
-        va_list ap;
-        va_start(ap, params_fmt);
-        int n = vsnprintf(NULL, 0, params_fmt, ap);
-        va_end(ap);
+        va_list copy;
+        va_copy(copy, ap);
+        int n = vsnprintf(NULL, 0, params_fmt, copy);
+        va_end(copy);
         if (n > 0) {
             buf_reserve(&b, b.len + (size_t)n + 4);
-            va_start(ap, params_fmt);
             vsnprintf(b.p + b.len, (size_t)n + 1, params_fmt, ap);
-            va_end(ap);
             b.len += (size_t)n;
         }
     }
@@ -325,4 +334,12 @@ int cdp_call(Chrome *c, const char *method, const char *params_fmt, ...) {
     int rc = ws_send_text(&c->ws, b.p, b.len);
     buf_free(&b);
     return rc < 0 ? -1 : id;
+}
+
+int cdp_call(Chrome *c, const char *method, const char *params_fmt, ...) {
+    va_list ap;
+    va_start(ap, params_fmt);
+    int id = cdp_vcall(c, method, params_fmt, ap);
+    va_end(ap);
+    return id;
 }

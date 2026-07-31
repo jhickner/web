@@ -39,22 +39,43 @@ static size_t utf8_encode(uint32_t cp, char *out) {
 }
 
 // tmux only forwards escape sequences it is told to pass through, and the
-// payload's own ESCs have to be doubled on the way.
-static void emit_esc(Kitty *k, const char *seq, size_t n) {
+// payload's own ESCs have to be doubled on the way. The wrapper is opened and
+// closed separately from the payload so a frame can be appended straight into
+// the output buffer instead of being staged somewhere first.
+static void esc_open(Kitty *k) {
+    if (k->tmux) buf_add(&k->out, "\x1bPtmux;", 7);
+}
+
+static void esc_close(Kitty *k) {
+    if (k->tmux) buf_add(&k->out, "\x1b\\", 2);
+}
+
+// Payload that may contain ESCs.
+static void esc_body(Kitty *k, const char *seq, size_t n) {
     if (!k->tmux) {
         buf_add(&k->out, seq, n);
         return;
     }
-    buf_add(&k->out, "\x1bPtmux;", 7);
-    size_t start = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (seq[i] != 0x1b) continue;
-        buf_add(&k->out, seq + start, i - start + 1);
+    const char *end = seq + n;
+    while (seq < end) {
+        const char *e = memchr(seq, 0x1b, (size_t)(end - seq));
+        if (!e) break;
+        buf_add(&k->out, seq, (size_t)(e - seq) + 1);
         buf_add(&k->out, "\x1b", 1);
-        start = i + 1;
+        seq = e + 1;
     }
-    buf_add(&k->out, seq + start, n - start);
-    buf_add(&k->out, "\x1b\\", 2);
+    buf_add(&k->out, seq, (size_t)(end - seq));
+}
+
+// Payload known to hold no ESCs, such as base64 image data.
+static void esc_raw(Kitty *k, const char *seq, size_t n) {
+    buf_add(&k->out, seq, n);
+}
+
+static void emit_esc(Kitty *k, const char *seq, size_t n) {
+    esc_open(k);
+    esc_body(k, seq, n);
+    esc_close(k);
 }
 
 void kitty_init(Kitty *k, int ttyfd, bool tmux) {
@@ -99,6 +120,11 @@ static void draw_grid(Kitty *k) {
 int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
     k->out.len = 0;
 
+    // Every chunk grows by its own escape header and, under tmux, a passthrough
+    // wrapper, so ask for the room once rather than doubling the buffer a
+    // dozen times on the way through a quarter-megabyte frame.
+    buf_reserve(&k->out, len + (len / CHUNK + 2) * 64 + 4096);
+
     // q=2 suppresses the terminal's replies, which would otherwise land in our
     // stdin as garbage keystrokes.
     size_t off = 0;
@@ -108,19 +134,19 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
         if (n > CHUNK) n = CHUNK;
         int more = (off + n < len);
 
-        char seq[8192 + 128];
-        size_t o = 0;
+        char hdr[64];
+        int hn;
         if (first)
-            o += (size_t)snprintf(seq + o, sizeof seq - o,
-                                  "\x1b_Ga=t,f=100,t=d,i=%d,q=2,m=%d;",
-                                  IMAGE_ID, more);
+            hn = snprintf(hdr, sizeof hdr, "\x1b_Ga=t,f=100,t=d,i=%d,q=2,m=%d;",
+                          IMAGE_ID, more);
         else
-            o += (size_t)snprintf(seq + o, sizeof seq - o, "\x1b_Gm=%d;", more);
-        memcpy(seq + o, b64 + off, n);
-        o += n;
-        seq[o++] = 0x1b;
-        seq[o++] = '\\';
-        emit_esc(k, seq, o);
+            hn = snprintf(hdr, sizeof hdr, "\x1b_Gm=%d;", more);
+
+        esc_open(k);
+        esc_body(k, hdr, (size_t)hn);
+        esc_raw(k, b64 + off, n);       // base64 alphabet cannot contain an ESC
+        esc_body(k, "\x1b\\", 2);
+        esc_close(k);
 
         off += n;
         first = false;

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 #include "web.h"
@@ -65,6 +66,18 @@ double now_sec(void) {
 // larger than the terminal's buffer comes back as EAGAIN part-way through.
 // Stopping there would leave a half-written escape sequence on screen, so wait
 // for room and finish the write.
+void mkdirs(const char *path) {
+    char tmp[512];
+    snprintf(tmp, sizeof tmp, "%s", path);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        mkdir(tmp, 0755);
+        *p = '/';
+    }
+    mkdir(tmp, 0755);
+}
+
 int writeall(int fd, const char *p, size_t n) {
     while (n) {
         ssize_t w = write(fd, p, n);

@@ -23,6 +23,7 @@ void buf_free(Buf *b);
 
 double now_sec(void);
 int    writeall(int fd, const char *p, size_t n);
+void   mkdirs(const char *path);
 
 // ---------------------------------------------------------------- json
 
@@ -66,6 +67,7 @@ void chrome_kill(Chrome *c);
 
 // Fire-and-forget CDP call; params is a JSON object body without braces.
 int  cdp_call(Chrome *c, const char *method, const char *params_fmt, ...);
+int  cdp_vcall(Chrome *c, const char *method, const char *params_fmt, va_list ap);
 
 // ---------------------------------------------------------------- graphics
 
@@ -94,9 +96,9 @@ enum {
     KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
 };
 
-enum { MOD_SHIFT = 1, MOD_ALT = 2, MOD_CTRL = 4 };
+enum { MOD_SHIFT = 1, MOD_ALT = 2, MOD_CTRL = 4, MOD_SUPER = 8 };
 
-typedef enum { EV_NONE, EV_KEY, EV_MOUSE, EV_EOF } EvType;
+typedef enum { EV_NONE, EV_KEY, EV_MOUSE, EV_PASTE, EV_EOF } EvType;
 
 typedef struct {
     EvType type;
@@ -114,6 +116,7 @@ typedef struct {
 typedef struct {
     int    fd;
     Buf    in;
+    Buf    paste;         // text of the EV_PASTE just decoded
     bool   raw;
     bool   inline_mode;   // draw in the normal flow, not the alternate screen
     int    inline_rows;   // rows reserved for the block, status line included
@@ -123,7 +126,8 @@ typedef struct {
     double esc_at;      // when a lone ESC showed up, to tell it from a sequence
 } Term;
 
-int  term_open(Term *t, bool inline_mode);
+int  term_probe(Term *t);                 // open the tty and measure it
+void term_enter(Term *t, bool inline_mode); // raw mode, alt screen, mouse
 void term_reserve_inline(Term *t, int rows);
 void term_restore(Term *t);
 void term_size(Term *t);
