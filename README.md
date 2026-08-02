@@ -58,6 +58,7 @@ While reading:
 | `[` / `]` | zoom out / in — or resize the window, inline |
 | `w` / `W` | step the width the page is told it has |
 | `s` | render scale: 1x, 2x, 3x |
+| `t` | frame transport: png, then two jpeg settings that only time it |
 | `/` | find in page, then `n` / `N` for next and previous |
 | `i` | hand the keyboard to the page |
 | `:` | open the command pane |
@@ -70,6 +71,25 @@ Local files open the same way, on the command line or in the address bar:
 `./web TODO.md`, `./web ~/notes/plan.html`. A name is only read as a path if it
 resolves to something that is really there, so `example.com` is still a site —
 unless there is a file called that next to you, which is then what you meant.
+
+A PDF is a partial exception. Chrome draws it with the viewer extension, in a
+frame of its own in a process of its own, and the document `web` can reach is a
+stub: an empty body and a stylesheet link. So nothing about a PDF is done with
+script — it is all real input, routed by the browser rather than by anything
+this end can see.
+
+Scrolling needs nothing special: `j`, `k`, `d`, `u`, `space`, `b` and the wheel
+become wheel events, which the browser routes by what is under the pointer.
+
+Keys are the part with a catch. A frame in another process cannot be handed the
+keyboard from here — it has to be **clicked in** first. Click anywhere on the
+PDF and the viewer's own keys start working: the arrows are handed straight
+over, so they move the view in the document and change the page with the
+thumbnail rail focused, and `gg` and `G` become its `Home` and `End`. Before
+that first click they say so rather than doing nothing.
+
+`/` stays unavailable: `window.find` searches this document, and a PDF's text
+is not in it.
 
 Zoom and the height of the inline window are remembered between runs, in
 `~/.config/web/state`. `--zoom` and `--rows` override them for one run without
@@ -536,6 +556,50 @@ is held, and the next one replaces it, so a drag costs one dispatch and one
 frame instead of one of each per step.
 
 Between them a page-down went from twenty-six frames to one.
+
+### Where the time actually goes
+
+`t` steps the transport — `png`, `jpeg` at 80, `jpeg` at 90. The jpeg settings
+**do not draw**: the kitty protocol takes PNG or raw pixels and nothing else, so
+a jpeg frame cannot be put on screen without decoding it here first, which is
+exactly the copy this renderer exists to avoid. What they do instead is ask
+Chrome for jpeg and time what comes back, so `^G` reads out the size and rate of
+frames of that format against the same page. The status line says `jpg80 HELD`
+while one is selected, because the picture is standing still.
+
+That measures the one thing worth knowing before writing a decoder: whether
+Chrome's PNG encoder is what sets the frame rate. On a text-heavy page it says:
+
+| | KB a frame | gap | our write |
+|---|---|---|---|
+| `png` | 137 | 37.5 ms | 8.0 ms |
+| `jpg80` | 72 | 17.3 ms | — |
+| `jpg90` | 95 | 17.5 ms | — |
+
+17 ms is the 60 Hz floor, so under jpeg Chrome is pinned at the compositor rate
+and its encode costs nothing. Take that floor and our own write off png's 37.5
+and about 13 ms of PNG encode is left, which is the whole of what a format
+change could win — and a decoder cannot collect it, since decoding a frame that
+size is 17–34 ms before the pixels have gone anywhere, and they then travel raw
+at 45x the bytes or deflated to something PNG already beat.
+
+What it leaves is the remote case: over a devtools port jpg80 halves the wire,
+and below about 25 Mbps the bytes saved are worth more than the decode. Locally
+the wire is free and png is simply the right format.
+
+The other half of that measurement went the other way. Chrome's screencast
+takes an `everyNthFrame`, and asking it for fewer frames looks like the one
+lever that saves work at both ends at once. It is not, and the ack is why: the
+next frame is held until the last is on screen, so Chrome is already producing
+frames at the rate this terminal can draw them and no faster. The frames a skip
+discards are mostly frames Chrome would never have made. What it does buy is
+coarser deltas — on a video, dropping every second frame cost a third of the
+rate and took the write share only from 21% to 16%, because the frames that
+survive have more changed in them and cost more to write.
+
+The ack was already the frame throttle, and a better one than a number: it
+adapts continuously, to the terminal actually in front of it, with nothing to
+tune. So `web` asks for every frame and lets the ack pace them.
 
 Under tmux the picture cannot simply be placed at the cursor, because tmux
 neither tracks nor redraws it. The way through is the protocol's Unicode

@@ -204,7 +204,7 @@ typedef struct {
 // issued with, so the kind has to be remembered alongside it.
 enum {
     RQ_NONE, RQ_TITLE, RQ_URL, RQ_COPY, RQ_FIT, RQ_RECOLOR, RQ_SCRIPT,
-    RQ_SELECTOR, RQ_RECORD
+    RQ_SELECTOR, RQ_RECORD, RQ_PDF
 };
 
 #define REQ_MAX 8
@@ -270,6 +270,14 @@ typedef struct {
     char    title[256];
     bool    loading;
     unsigned load_seq;         // bumped on every load event, for script waits
+
+    // Chrome draws a PDF with the viewer extension, in a frame of its own in a
+    // process of its own. Nothing this document can be asked reaches it, so the
+    // page is moved with real input instead of with script. Keys reach it only
+    // once it has been clicked in - a frame in another process cannot be given
+    // the keyboard any other way - and that is what the second flag remembers.
+    bool    pdf;
+    bool    pdf_clicked;
 
     bool    editing;           // URL bar has focus
     char    edit[1024];

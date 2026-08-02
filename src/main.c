@@ -854,6 +854,19 @@ static void cycle_recolor(App *a) {
 // clamped to the ends first, so a step at the top or bottom of a page simply
 // does nothing instead of leaving something behind to unwind.
 void scroll_at(App *a, int x, int y, int dy) {
+    // The hunt below runs over a document that, for a PDF, is a stub: an empty
+    // body and a stylesheet link, with the viewer itself in a frame of another
+    // process that this one cannot see. There is no scroller here to find. A
+    // wheel event is routed by the browser to whatever is under the point
+    // instead, which is the viewer.
+    if (a->pdf) {
+        app_cdp(a, "Input.dispatchMouseEvent",
+                 "\"type\":\"mouseWheel\",\"x\":%d,\"y\":%d,"
+                 "\"deltaX\":0,\"deltaY\":%d,\"modifiers\":0", x, y, dy);
+        record_scrolled(a, dy);
+        return;
+    }
+
     char js[768];
     snprintf(js, sizeof js,
              "(function(x,y,d){"
@@ -882,6 +895,19 @@ void scroll_by(App *a, int dy) {
 // the view: "top" is somewhere you can name, and a step is not.
 void scroll_page_end(App *a, bool bottom) {
     record_line(a, bottom ? "scroll bottom" : "scroll top");
+    // An end is a distance only the viewer knows: it cannot be asked for as a
+    // wheel the way a step can, and the #page= fragment it reads on the way in
+    // is ignored once it is up. Home and End are its own, and plain - with
+    // ctrl, the pair it takes everywhere else, they do nothing.
+    if (a->pdf) {
+        if (!a->pdf_clicked) {
+            notify(a, "click the pdf first - it takes keys only once clicked");
+            return;
+        }
+        send_key(a, bottom ? 35 : 36, bottom ? "End" : "Home",
+                 bottom ? "End" : "Home", NULL, 0);
+        return;
+    }
     run_js(a, bottom
         ? "(function(t){t.scrollTo({top:t.scrollHeight,behavior:'instant'});})"
           "(document.scrollingElement||document.documentElement)"
@@ -896,6 +922,11 @@ void nav_history(App *a, int delta) {
 
 static void find_next(App *a, bool backwards) {
     if (!a->find[0]) return;
+    // window.find searches this document, and a PDF's text is not in it.
+    if (a->pdf) {
+        notify(a, "find is not available on a pdf");
+        return;
+    }
     char js[512], q[256];
     json_escape(q, sizeof q, a->find);      // once for JS, once more for JSON
     snprintf(js, sizeof js,
@@ -1135,6 +1166,9 @@ static void handle_mouse(App *a, Event *ev) {
         return;
     }
     a->mouse_down = ev->press;
+    // Whatever it landed on - a page, the thumbnail rail, the toolbar - the
+    // viewer now holds the keyboard, and the keys it knows start working.
+    if (a->pdf && ev->press) a->pdf_clicked = true;
     app_cdp(a, "Input.dispatchMouseEvent",
              "\"type\":\"%s\",\"x\":%d,\"y\":%d,\"button\":\"%s\","
              "\"buttons\":%d,\"clickCount\":1,\"modifiers\":%d",
@@ -1269,8 +1303,15 @@ static void handle_key(App *a, Event *ev) {
         switch (ev->key) {
         // Chrome moves 40 CSS pixels per arrow press; matching it means a page
         // scrolls here at the speed it does in a window.
-        case KEY_DOWN:  scroll_by(a, 40);  return;
-        case KEY_UP:    scroll_by(a, -40); return;
+        // On a clicked-into PDF the arrows are handed over rather than turned
+        // into a scroll, because where they go is the viewer's business: in
+        // the document they move the view, and with the thumbnail rail focused
+        // they change the page. Neither is something to imitate from here.
+        case KEY_DOWN:
+        case KEY_UP:
+            if (a->pdf && a->pdf_clicked) { special_key(a, ev->key, ev->mods); return; }
+            scroll_by(a, ev->key == KEY_DOWN ? 40 : -40);
+            return;
         case KEY_LEFT:  nav_history(a, -1); return;
         case KEY_RIGHT: nav_history(a, +1); return;
         case 'j': scroll_by(a, 60);    return;
@@ -1423,6 +1464,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         // them leaves the picture stranded where it was.
         a->expect_frame = now_sec() + 2.0;
         a->kitty.grid_dirty = true;
+        a->pdf = a->pdf_clicked = false;   // until the new document says so
         size_t n;
         const char *u = json_str(msg, "url", &n);
         if (u && n < sizeof a->url) {
@@ -1513,6 +1555,9 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         request_fit(a);
         app_req_note(a, app_cdp(a, "Runtime.evaluate",
             "\"expression\":\"document.title\",\"returnByValue\":true"), RQ_TITLE);
+        app_req_note(a, app_cdp(a, "Runtime.evaluate",
+            "\"expression\":\"document.contentType\",\"returnByValue\":true"),
+            RQ_PDF);
         return;
     }
 
@@ -1548,6 +1593,13 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         }
         // No re-measure here: the reply above already reflects the widened
         // viewport, so one round is always enough and cannot loop.
+        return;
+    }
+
+    case RQ_PDF: {
+        size_t n;
+        const char *v = json_str(msg, "value", &n);
+        a->pdf = v && n == 15 && !memcmp(v, "application/pdf", 15);
         return;
     }
 
