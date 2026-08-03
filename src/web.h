@@ -60,7 +60,7 @@ void ws_close(WS *ws);
 typedef struct {
     pid_t pid;
     int   port;
-    bool  adopted;      // took over a browser left behind by an earlier run
+    bool  adopted;      // an earlier run's, so we open a window of our own in it
     bool  foreign;      // attached to one we never started: leave it running
     char  profile[512];
     char  target[96];   // the page we are driving, so the others stay theirs
@@ -89,6 +89,11 @@ void chrome_close_target(Chrome *c);
 
 // Leave a tab behind that holds the browser open for the next run to adopt.
 void chrome_park(Chrome *c);
+
+// --keep, remembered against the browser instead of the run, so that one
+// window asking for it keeps the browser for every window.
+void chrome_mark_kept(Chrome *c);
+bool chrome_is_kept(Chrome *c);
 
 // Fire-and-forget CDP call; params is a JSON object body without braces.
 int  cdp_call(Chrome *c, const char *method, const char *params_fmt, ...);

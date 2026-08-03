@@ -87,40 +87,13 @@ int chrome_probe(int port) {
     return ok ? 0 : -1;
 }
 
-// A previous run that died without cleaning up leaves a live Chrome holding
-// the profile lock, which would make every later launch abort. If that browser
-// still answers on its recorded port, take it over instead.
-static int adopt_running(Chrome *c) {
-    char path[600];
-    snprintf(path, sizeof path, "%s/DevToolsActivePort", c->profile);
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
-    int port = 0;
-    int ok = fscanf(f, "%d", &port);
-    fclose(f);
-    if (ok != 1 || port <= 0) return -1;
-
-    if (chrome_probe(port) != 0) return -1;
-
-    // Chrome records "<hostname>-<pid>" in the lock symlink, which is the only
-    // place the pid of a browser we did not spawn is written down.
-    snprintf(path, sizeof path, "%s/SingletonLock", c->profile);
-    char link[256];
-    ssize_t n = readlink(path, link, sizeof link - 1);
-    if (n > 0) {
-        link[n] = 0;
-        char *dash = strrchr(link, '-');
-        if (dash) c->pid = (pid_t)atoi(dash + 1);
-    }
-
-    c->port = port;
-    c->adopted = true;
-    TRACE("adopted running chrome on port %d (pid %d)", port, (int)c->pid);
-    return 0;
+static bool pid_alive(pid_t p) {
+    if (p <= 0) return false;
+    return kill(p, 0) == 0 || errno != ESRCH;
 }
 
-// Chrome records "<hostname>-<pid>" in the lock symlink: the process holding
-// this profile, if there still is one.
+// Chrome records "<hostname>-<pid>" in the lock symlink, which is the only
+// place the pid of a browser we did not spawn is written down.
 static pid_t singleton_pid(const char *profile) {
     char path[600];
     snprintf(path, sizeof path, "%s/SingletonLock", profile);
@@ -130,6 +103,97 @@ static pid_t singleton_pid(const char *profile) {
     link[n] = 0;
     char *dash = strrchr(link, '-');
     return dash ? (pid_t)atoi(dash + 1) : 0;
+}
+
+// Chrome writes down the port it picked, but only when it picked it: handed one
+// with --port it writes nothing at all, and that browser is then invisible to
+// every later run. So we keep our own note of where the browser we started went
+// - and of which process it is, since a port on its own could belong to
+// anything by the time somebody reads it back.
+static void note_browser(Chrome *c) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/web-port", c->profile);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "%d %d\n", c->port, (int)c->pid);
+    fclose(f);
+}
+
+// The noted port, or -1 if there is no note or the browser it named is gone.
+static int noted_browser(const char *profile, pid_t *pid) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/web-port", profile);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    int port = 0, holder = 0;
+    int got = fscanf(f, "%d %d", &port, &holder);
+    fclose(f);
+    if (got < 1 || port <= 0) return -1;
+    if (got >= 2 && holder > 0 && !pid_alive((pid_t)holder)) return -1;
+    if (pid) *pid = (pid_t)(got >= 2 ? holder : 0);
+    return port;
+}
+
+// --keep belongs to the browser rather than to the run that asked for it: one
+// window wanting it kept is every window wanting it kept, and the mark outlives
+// the window that made it. The pid is what ties it to this browser - kill this
+// one and the next starts unmarked, whatever is still lying in the profile.
+void chrome_mark_kept(Chrome *c) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/web-keep", c->profile);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "%d\n", (int)c->pid);
+    fclose(f);
+}
+
+bool chrome_is_kept(Chrome *c) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/web-keep", c->profile);
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    int marked = 0;
+    int got = fscanf(f, "%d", &marked);
+    fclose(f);
+    if (got != 1) return false;
+    // With a pid missing on either side the mark stands on the strength of the
+    // file alone: this is the browser holding the profile, and something asked
+    // for it to stay.
+    return marked <= 0 || c->pid <= 0 || marked == (int)c->pid;
+}
+
+static void forget_browser(Chrome *c) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/web-keep", c->profile);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/web-port", c->profile);
+    unlink(path);
+    // A browser on its way out must not be adopted by the next run, which
+    // would then have this one's killer come for it a few seconds later.
+    snprintf(path, sizeof path, "%s/DevToolsActivePort", c->profile);
+    unlink(path);
+}
+
+// A previous run that died without cleaning up leaves a live Chrome holding
+// the profile lock, which would make every later launch abort. If that browser
+// still answers on its recorded port, take it over instead.
+static int adopt_running(Chrome *c) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/DevToolsActivePort", c->profile);
+    int port = 0;
+    FILE *f = fopen(path, "r");
+    if (f) {
+        if (fscanf(f, "%d", &port) != 1) port = 0;
+        fclose(f);
+    }
+    if (port <= 0 || chrome_probe(port) != 0) port = noted_browser(c->profile, NULL);
+    if (port <= 0 || chrome_probe(port) != 0) return -1;
+
+    c->pid = singleton_pid(c->profile);
+    c->port = port;
+    c->adopted = true;
+    TRACE("adopted running chrome on port %d (pid %d)", port, (int)c->pid);
+    return 0;
 }
 
 int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
@@ -161,8 +225,21 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     if (debug && port > 0 && port_taken(port)) {
         if (chrome_probe(port) == 0) {
             c->port = port;
-            c->adopted = c->foreign = true;    // not ours to shut down
-            TRACE("took over the browser already on port %d", port);
+            // Ours by our own note of it, even though we did not start it: an
+            // earlier run left it here, so this one takes a tab of its own and
+            // is as entitled to shut it down as any other run would be. A
+            // browser that is somebody else's - Playwright's, say - is being
+            // looked at rather than moved into: it keeps the page it is on,
+            // and it outlives us.
+            pid_t holder = 0;
+            if (noted_browser(c->profile, &holder) == port) {
+                c->adopted = true;
+                c->pid = holder;
+            } else {
+                c->foreign = true;    // not ours to shut down, nor to open in
+            }
+            TRACE("took over the %s browser on port %d",
+                  c->foreign ? "foreign" : "earlier run's", port);
             return 0;
         }
         fprintf(stderr, "web: something that is not a browser is already on "
@@ -176,9 +253,7 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     // takes the profile out from under it. A lock with something alive behind
     // it is worth waiting on rather than breaking.
     if (debug) {
-        pid_t holder = singleton_pid(c->profile);
-        bool live = holder > 0 && kill(holder, 0) == 0;
-        double deadline = now_sec() + (live ? 3.0 : 0.0);
+        double deadline = now_sec() + (pid_alive(singleton_pid(c->profile)) ? 3.0 : 0.0);
         for (;;) {
             if (adopt_running(c) == 0) {
                 // A pinned port is a promise to whatever is going to connect to
@@ -305,6 +380,7 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
         chrome_kill(c);
         return -1;
     }
+    note_browser(c);
     return 0;
 }
 
@@ -581,6 +657,7 @@ static bool chrome_alive(Chrome *c) {
 }
 
 void chrome_kill(Chrome *c) {
+    forget_browser(c);      // whatever is left of it, nothing should adopt it
     // Ask the browser to close before signalling it. Chrome batches its cookie
     // writes and commits them on a clean shutdown; killed instead, it can lose
     // the session that was just established, which reads as being signed out
@@ -625,12 +702,7 @@ void chrome_kill_bg(Chrome *c) {
         chrome_kill(c);                 // nothing to wait for; just the socket
         return;
     }
-
-    // A browser on its way out must not be adopted by the next run, which
-    // would then have this one's killer come for it a few seconds later.
-    char path[600];
-    snprintf(path, sizeof path, "%s/DevToolsActivePort", c->profile);
-    unlink(path);
+    forget_browser(c);
 
     pid_t pid = fork();
     if (pid < 0) { chrome_kill(c); return; }

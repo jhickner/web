@@ -206,7 +206,8 @@ trade every keyboard-driven browser has to make somewhere.
 --recolor M map the page onto your terminal's colours: off, hue, duotone, tint
 --recolor-strength F   how far towards it, 0..1 (default 1)
 --login     open a window to sign in with, on the same profile
---keep      leave Chrome running on exit so the next start is instant
+--keep      leave Chrome running on exit so the next start is instant, and
+            keep it for every other window too
 --port N    fix Chrome's devtools port instead of letting it pick one
 --no-pause  keep drawing while the terminal is not focused
 --record[=F] write what you do to the page out as commands
@@ -428,11 +429,20 @@ a script. Three things follow from it:
   the one it attached to is never shut down — quitting leaves it running. The
   shutdown is polite, so it takes a moment; it is waited out by a background
   process rather than by the one holding your prompt.
+- `--keep` is asked of the browser, not of the run that asked it: while any
+  window has asked for this browser to stay, no window's quit will shut it
+  down. The request dies with the browser, so the next one starts unmarked.
 - the picture needs the frames to match the cells they are drawn into, so the
   device metrics override goes on their page too. Playwright sees that viewport.
 - `--port N` with a browser already answering there takes it over rather than
   starting a second one, which is also what makes `--keep --port` work. Given no
   address on the command line it leaves that browser on whatever page it is on.
+- unless that browser turns out to be one of ours. A run writes down the port it
+  started Chrome on, so a later `--port` pointed at the same browser knows it is
+  an earlier run's rather than a stranger's: it takes a tab of its own, and it
+  can shut the browser down like any other run. Chrome writes its own port down
+  only when it chose the port itself, so this note is also what lets a plain
+  `web` find a `--keep --port` browser at all.
 
 ## The window
 

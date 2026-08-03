@@ -1774,9 +1774,12 @@ static void leave_browser(App *a) {
         return;
     }
 
+    // Whether this run asked for the browser to stay, or another window did:
+    // one window's --keep keeps it for all of them, whichever quits last.
+    bool kept = a->keep || chrome_is_kept(c);
     int others = chrome_other_pages(c);
-    if (a->keep) chrome_park(c);          // something for the next run to find
-    if (a->keep || others > 0) {
+    if (kept) chrome_park(c);             // something for the next run to find
+    if (kept || others > 0) {
         chrome_close_target(c);
         if (c->ws.fd > 0) ws_close(&c->ws);
         return;
@@ -2052,6 +2055,10 @@ int main(int argc, char **argv) {
                       port) < 0)
         return 1;
     if (chrome_attach(&a.chrome) < 0) { chrome_kill(&a.chrome); return 1; }
+    // Marked now rather than on the way out, so a window that quits before this
+    // one already knows the browser has been asked to stay. Somebody else's is
+    // never ours to mark: we do not shut it down either way.
+    if (a.keep && !a.chrome.foreign) chrome_mark_kept(&a.chrome);
 
     // Ask the browser what it is calling itself and keep the corrected answer
     // for next time. The launch flag above needs the string before there is a
