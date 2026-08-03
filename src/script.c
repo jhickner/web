@@ -19,7 +19,8 @@
 
 // Data goes to fd 1 - but only when fd 1 is not the terminal the page is drawn
 // on. Writing there would scroll the picture out from under its placeholder
-// cells, which nothing puts back.
+// cells, which nothing puts back. Nor when a screenshot has been promised
+// there: a line of text in front of a PNG is a PNG nothing will open.
 static void out_line(App *a, const char *payload) {
     Script *s = &a->script;
     Buf b = {0};
@@ -33,7 +34,8 @@ static void out_line(App *a, const char *payload) {
         buf_add(&b, payload, strlen(payload));
         buf_add(&b, "\n", 1);
     }
-    if (!a->stdout_tty) writeall(STDOUT_FILENO, b.p, b.len);
+    if (a->shot_stdout)       writeall(STDERR_FILENO, b.p, b.len);
+    else if (!a->stdout_tty)  writeall(STDOUT_FILENO, b.p, b.len);
     if (a->console_open) console_log(a, payload);
     else if (a->stdout_tty) notify(a, payload);
     buf_free(&b);

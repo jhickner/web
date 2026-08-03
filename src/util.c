@@ -109,6 +109,29 @@ int writeall(int fd, const char *p, size_t n) {
     return 0;
 }
 
+// ------------------------------------------------------------------- base64
+
+size_t base64_decode(const char *src, size_t n, char *dst) {
+    static const char A[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                            "abcdefghijklmnopqrstuvwxyz0123456789+/";
+    unsigned acc = 0;
+    int bits = 0;
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        // Padding and anything else outside the alphabet is skipped, so a
+        // wrapped string decodes the same as an unwrapped one.
+        const char *p = memchr(A, src[i], 64);
+        if (!p) continue;
+        acc = (acc << 6) | (unsigned)(p - A);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            dst[o++] = (char)((acc >> bits) & 0xff);
+        }
+    }
+    return o;
+}
+
 // --------------------------------------------------------------------- json
 
 static const char *find_key(const char *js, const char *key) {

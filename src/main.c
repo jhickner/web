@@ -218,9 +218,32 @@ static void screencast_start(App *a) {
              a->cast_w, a->cast_h);
 }
 
+// The viewport a screenshot run gets when there is no terminal to take the
+// shape from. Everything below works back from the cell rect, and with no tty
+// that rect is invented out of the fallback terminal size - a couple of dozen
+// pixels of window that nothing was ever going to be drawn into. A picture
+// asked for from a pipeline is a picture of a page, so it gets a page's
+// viewport, at whatever pixel ratio --scale asked for. Zoom is left out of it
+// deliberately: it is the size of a window in a terminal, remembered from
+// whichever terminal last set it, and there is no window here for it to mean
+// anything about.
+#define SHOT_CSS_W 1280
+#define SHOT_CSS_H 800
+
 void relayout(App *a) {
     Term *t = &a->term;
     term_size(t);
+
+    if (!a->has_tty && a->shot_path) {
+        a->css_w = SHOT_CSS_W;
+        a->css_h = SHOT_CSS_H;
+        a->scale = a->want_scale;
+        app_cdp(a, "Emulation.setDeviceMetricsOverride",
+                 "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":%d,"
+                 "\"mobile\":false",
+                 a->css_w, a->css_h, a->scale);
+        return;
+    }
 
     int status = a->status_open ? 1 : 0;
     int below = status + a->console_rows;      // everything under the picture
@@ -471,6 +494,104 @@ static void exec_pump(App *a) {
         buf_consume(&a->exec_buf, nl ? len + 1 : len);
     }
     if (eof) exec_done(a);
+}
+
+// -------------------------------------------------------------- screenshot
+
+// How long the page gets to arrive before it is photographed as it stands. A
+// picture of a half-drawn page is worth more than a run that never returns.
+#define SHOT_LOAD_MAX   30.0
+// The two round trips after that are the browser answering, not the network.
+#define SHOT_SETTLE_MAX  3.0
+#define SHOT_SEND_MAX   15.0
+
+// Between the load event and the shutter: the fonts the page asked for, and
+// two frames after them. A webfont swaps in after the load event and a first
+// paint can still be on its way, and either one photographs as a page that is
+// not the page.
+static const char SHOT_READY_JS[] =
+    "new Promise(function(r){"
+    "(document.fonts?document.fonts.ready:Promise.resolve()).then(function(){"
+    "requestAnimationFrame(function(){requestAnimationFrame(function(){r(1)})})"
+    "})})";
+
+static void shot_fail(App *a, const char *why) {
+    fprintf(stderr, "web: --screenshot: %s\n", why);
+    a->shot_state = SHOT_FAIL;
+}
+
+// The picture, out of base64 and onto disk.
+static void shot_write(App *a, const char *msg) {
+    size_t n = 0;
+    const char *b64 = json_str(msg, "data", &n);
+    if (!b64 || !n) { shot_fail(a, "the browser sent no picture back"); return; }
+
+    Buf png = {0};
+    if (buf_reserve(&png, n / 4 * 3 + 4) < 0) {
+        shot_fail(a, "out of memory for the picture");
+        return;
+    }
+    png.len = base64_decode(b64, n, png.p);
+
+    int rc = 0;
+    if (!strcmp(a->shot_path, "-")) {
+        rc = writeall(STDOUT_FILENO, png.p, png.len);
+        if (rc < 0) fprintf(stderr, "web: --screenshot: %s\n", strerror(errno));
+    } else {
+        FILE *f = fopen(a->shot_path, "wb");
+        if (!f || fwrite(png.p, 1, png.len, f) != png.len) rc = -1;
+        if (f && fclose(f) != 0) rc = -1;
+        if (rc < 0)
+            fprintf(stderr, "web: %s: %s\n", a->shot_path, strerror(errno));
+    }
+    buf_free(&png);
+    a->shot_state = rc < 0 ? SHOT_FAIL : SHOT_DONE;
+}
+
+// The shutter. It photographs the viewport, so a run with a terminal under it
+// files what the window was showing and one without files the page-sized
+// viewport relayout gave it instead.
+static void shot_capture(App *a) {
+    app_req_note(a, app_cdp(a, "Page.captureScreenshot", "\"format\":\"png\""),
+                 RQ_SHOT);
+    a->shot_state = SHOT_SENT;
+    a->shot_deadline = now_sec() + SHOT_SEND_MAX;
+}
+
+// Driven once per pass of the main loop while a shot is outstanding. Each state
+// waits for one thing and gives up on it at a deadline of its own, so nothing
+// the page or the browser fails to do can leave the run parked.
+static void shot_step(App *a) {
+    switch (a->shot_state) {
+    case SHOT_LOAD: {
+        // The page, then whatever javascript was piped in against it, then the
+        // pause after the last line of it: the same three the script runner's
+        // own exit waits on, because a shot taken between them is a shot of a
+        // page mid-sentence.
+        bool ready = !a->loading && !script_busy(a) && !a->console_open &&
+                     a->exec_fd < 0 && now_sec() >= a->script.next_at;
+        if (!ready && now_sec() < a->shot_deadline) return;
+        char esc[sizeof SHOT_READY_JS * 2];
+        json_escape(esc, sizeof esc, SHOT_READY_JS);
+        app_req_note(a, app_cdp(a, "Runtime.evaluate",
+            "\"expression\":\"%s\",\"returnByValue\":true,\"awaitPromise\":true",
+            esc), RQ_SHOT_READY);
+        a->shot_state = SHOT_SETTLE;
+        a->shot_deadline = now_sec() + SHOT_SETTLE_MAX;
+        return;
+    }
+
+    case SHOT_SETTLE:
+        if (now_sec() < a->shot_deadline) return;
+        term_log("shot: the page never reported itself painted; shooting anyway");
+        shot_capture(a);
+        return;
+
+    case SHOT_SENT:
+        if (now_sec() < a->shot_deadline) return;
+        shot_fail(a, "the browser never answered with a picture");
+        return;
+    }
 }
 
 // ------------------------------------------------------------------ status
@@ -1574,6 +1695,16 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
     }
 
     case RQ_SCRIPT: script_reply(a, msg); return;
+
+    // The page says it has finished painting. Whether it answered or threw,
+    // there is nothing more to wait for.
+    case RQ_SHOT_READY:
+        if (a->shot_state == SHOT_SETTLE) shot_capture(a);
+        return;
+
+    case RQ_SHOT:
+        if (a->shot_state == SHOT_SENT) shot_write(a, msg);
+        return;
     }
 }
 
@@ -1595,6 +1726,8 @@ static void usage(void) {
         "  --step      wait for a key between those lines\n"
         "  --timeout S how long a line waits before giving up (default 5)\n"
         "  --json      script output as one JSON object per value\n"
+        "  --screenshot F   write the loaded page to F as a png and exit\n"
+        "              (- for stdout; the shot waits for the page to arrive)\n"
         "  --login     open a window to sign in with, on the same profile\n"
         "  --keep      leave chrome running on exit so the next start is instant\n"
         "  --endpoint  print every running window as JSON and exit\n"
@@ -1729,6 +1862,11 @@ int app_attach(App *a, int port, char *msg, size_t cap) {
 // The size Chrome should open at, close enough that the page lays out once.
 // relayout settles the exact numbers as soon as the terminal is fully set up.
 static void first_size(App *a, int *w, int *h) {
+    if (!a->has_tty && a->shot_path) {
+        *w = SHOT_CSS_W;
+        *h = SHOT_CSS_H;
+        return;
+    }
     int rows = a->inline_mode
         ? (a->want_rows > 0 ? a->want_rows : a->term.rows / 2)
         : a->term.rows - (a->status_open ? 1 : 0);
@@ -1795,6 +1933,8 @@ int main(int argc, char **argv) {
             exec_cmd = argv[++i];
         } else if (!strcmp(argv[i], "--mute")) {
             a.mute = true;
+        } else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) {
+            a.shot_path = argv[++i];
         } else if (!strcmp(argv[i], "--eval") && i + 1 < argc) {
             eval_js = argv[++i];
         } else if (!strcmp(argv[i], "--delay") && i + 1 < argc) {
@@ -1871,6 +2011,18 @@ int main(int argc, char **argv) {
     // terminal - because if it is, writing data there scrolls the picture away.
     a.has_tty = isatty(a.term.fd);
     a.stdout_tty = isatty(STDOUT_FILENO);
+    // A png down a terminal is noise. Said now rather than after a browser has
+    // been started and a page fetched for a picture with nowhere to go.
+    a.shot_stdout = a.shot_path && !strcmp(a.shot_path, "-");
+    if (a.shot_stdout && a.stdout_tty) {
+        fprintf(stderr, "web: --screenshot - needs somewhere to write to; "
+                        "redirect it or name a file\n");
+        return 1;
+    }
+    // The fit pass measures the page against the cell rect and lowers the zoom
+    // to what it allows. There is no cell rect here, and the viewport is not
+    // something the page gets a say in.
+    if (a.shot_path && !a.has_tty) a.fit_width = false;
     int fw, fh;
     first_size(&a, &fw, &fh);
 
@@ -1967,6 +2119,12 @@ int main(int argc, char **argv) {
     // would take it off whatever that is.
     if (a.chrome.foreign && !url_given) ask_where(&a);
     else navigate(&a, first);
+    // Timed from here rather than from the top of main: what the picture is
+    // waiting for is the page, and none of starting a browser was that.
+    if (a.shot_path) {
+        a.shot_state = SHOT_LOAD;
+        a.shot_deadline = now_sec() + SHOT_LOAD_MAX;
+    }
     relayout(&a);
     draw_panes(&a);
 
@@ -2036,6 +2194,9 @@ int main(int argc, char **argv) {
                     a.expect_frame > 0 || draining) ? 20 : -1;
         int sw = script_wait_ms(&a);
         if (sw >= 0 && (wait < 0 || sw < wait)) wait = sw;
+        // Everything a pending shot waits for arrives as an event except the
+        // deadlines, and those need the loop to come round on its own.
+        if (a.shot_path && (wait < 0 || wait > 100)) wait = 100;
         int rc = poll(fds, 3, wait);
         if (rc < 0 && !g_resized) continue;
 
@@ -2110,8 +2271,16 @@ int main(int argc, char **argv) {
         // Not while --exec is still running either: the script it was given may
         // be the whole reason this window exists, and leaving mid-sentence
         // would take the page out from under it.
-        if (a.script.drain_exit && !script_busy(&a) && !a.console_open &&
-            a.exec_fd < 0 && now_sec() >= a.script.next_at) {
+        //
+        // A run that was asked for a picture waits for that instead, on its own
+        // clock: the settle above is measured from a queue that has already run
+        // out, and a page still on its way in has not started spending it.
+        if (a.shot_path) {
+            shot_step(&a);
+            if (a.shot_state == SHOT_DONE || a.shot_state == SHOT_FAIL)
+                g_quit = 1;
+        } else if (a.script.drain_exit && !script_busy(&a) && !a.console_open &&
+                   a.exec_fd < 0 && now_sec() >= a.script.next_at) {
             if (drain_at == 0) drain_at = now_sec();
             bool settled = !a.loading && now_sec() - a.last_draw > 0.5;
             if (settled || now_sec() - drain_at > 3.0) g_quit = 1;
@@ -2164,6 +2333,9 @@ int main(int argc, char **argv) {
     // shell back the way it found it.
     term_log("%u frames drawn, %u duplicates skipped", a.frames, a.skipped);
     int rc = a.script.failures ? 1 : 0;
+    // A run asked for a picture and quit without one - the browser went away
+    // under it, or the terminal did - has failed whatever the script did.
+    if (a.shot_path && a.shot_state != SHOT_DONE) rc = 1;
     script_free(&a);
     return rc;
 }

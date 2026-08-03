@@ -204,6 +204,7 @@ trade every keyboard-driven browser has to make somewhere.
 --step      wait for a key between those lines
 --timeout S how long a line waits before giving up (default 5)
 --json      script output as one JSON object per value
+--screenshot F   write the page to F as a png and exit; "-" is stdout
 --login     open a window to sign in with, on the same profile
 --keep      leave Chrome running on exit so the next start is instant, and
             keep it for every other window too
@@ -220,6 +221,41 @@ milliseconds for everything else. `--keep` leaves the browser holding the
 profile when `web` exits, and the next run adopts it instead of paying for that
 again. The cost is a headless Chrome sitting in the process table until you
 kill it.
+
+## Screenshots
+
+`--screenshot` writes the page to a PNG and exits:
+
+```sh
+./web --screenshot shot.png example.com
+./web --screenshot - example.com | pngtopam        # "-" is stdout
+```
+
+The shot is what the run waits for, and it waits for the page: the load event,
+then anything piped in on stdin, then the fonts the page asked for and the two
+frames after them. A webfont swaps in *after* the load event and a first paint
+can still be on its way, and either one photographs as a page that is not the
+page. Nothing waits forever — a page that never finishes is shot as it stands
+after thirty seconds, because a picture of half a page beats a run that does
+not come back.
+
+So a shot can be of the page after a script has had its way with it:
+
+```sh
+echo 'document.querySelector("#accept").click()' |
+    ./web --screenshot shot.png example.com
+```
+
+With the picture going to stdout the values that script produces go to stderr
+instead: a line of text in front of a PNG is a PNG nothing will open.
+
+Out of a pipeline, with no terminal to draw into, the viewport is a plain
+1280x800 and `--scale` is the pixel ratio — `--scale 2` gives a 2560x1600 shot
+of the same layout. Run where there *is* a terminal it photographs the window
+you are looking at instead, at the size it is on screen.
+
+The exit status says whether the file was written, so a shot that failed fails
+the script around it.
 
 ## Driving it
 

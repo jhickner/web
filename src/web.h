@@ -25,6 +25,9 @@ double now_sec(void);
 int    writeall(int fd, const char *p, size_t n);
 void   mkdirs(const char *path);
 
+// Bytes written. dst needs room for three per four of src.
+size_t base64_decode(const char *src, size_t n, char *dst);
+
 // ---------------------------------------------------------------- json
 
 // Minimal readers for the handful of CDP fields we consume. The buffer must be
@@ -208,12 +211,22 @@ typedef struct {
 // issued with, so the kind has to be remembered alongside it.
 enum {
     RQ_NONE, RQ_TITLE, RQ_URL, RQ_COPY, RQ_FIT, RQ_SCRIPT,
-    RQ_SELECTOR, RQ_RECORD, RQ_PDF
+    RQ_SELECTOR, RQ_RECORD, RQ_PDF, RQ_SHOT_READY, RQ_SHOT
 };
 
 #define REQ_MAX 8
 
 typedef struct { int id, kind; } Req;
+
+// Where --screenshot is between being asked for and being on disk.
+enum {
+    SHOT_NONE,     // none was asked for
+    SHOT_LOAD,     // waiting for the page, and for any script run against it
+    SHOT_SETTLE,   // waiting for the fonts and the paint after them
+    SHOT_SENT,     // the capture is out at the browser
+    SHOT_DONE,
+    SHOT_FAIL,
+};
 
 // ---------------------------------------------------------------- script
 
@@ -333,6 +346,13 @@ typedef struct {
     int     exec_fd;           // --exec: the child's output, -1 when none
     pid_t   exec_pid;
     Buf     exec_buf;          // what has arrived of the line being read
+
+    // --screenshot. The picture is the whole point of such a run, so it is
+    // what the exit waits for rather than something taken on the way past.
+    const char *shot_path;     // where the png goes; "-" is stdout
+    bool    shot_stdout;       // and when it does, fd 1 is the picture's
+    int     shot_state;        // SHOT_*
+    double  shot_deadline;     // give up on the step in flight here
 
     Buf     status, status_last;
 
