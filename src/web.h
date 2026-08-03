@@ -91,6 +91,7 @@ typedef struct {
     bool tmux;
     int  x, y, cols, rows;   // 1-based cell rect the page occupies
     bool grid_dirty;
+    unsigned gen;            // which name the picture is going up under
     Buf  out;
 } Kitty;
 
@@ -98,6 +99,12 @@ void kitty_init(Kitty *k, int ttyfd, bool tmux);
 void kitty_set_rect(Kitty *k, int x, int y, int cols, int rows);
 int  kitty_draw_png(Kitty *k, const char *b64, size_t len);
 void kitty_clear(Kitty *k);
+
+// Take the picture down and come back under a new name. For when the cells it
+// was drawn into are still somewhere on the screen but no longer somewhere we
+// can address - after a resize, where the terminal has moved them and only it
+// knows to where. They go on naming the old image, which is now gone.
+void kitty_renew(Kitty *k);
 void kitty_abort(Kitty *k);    // close an escape a dropped frame left open
 void kitty_free(Kitty *k);
 

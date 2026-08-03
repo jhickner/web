@@ -20,12 +20,23 @@
 // the three-distinct-bytes rule above is really asking for. That leaves about
 // fourteen bits of the pid, so two runs sharing an id is a one-in-sixteen-
 // thousand event rather than a one-in-256 one.
-#define IMAGE_ID_BASE 0x0A0000
-static unsigned image_id(void) {
+// The top byte carries a generation instead of a constant, because a name is
+// how the picture is taken away as well as how it is put up. The cells naming
+// an image are ordinary text: the terminal keeps them wherever a resize leaves
+// them, and they are not ours to erase once we have lost track of where that
+// was. Re-placing the image would light every one of them, which is the same
+// picture in two places. Coming back under a new name leaves them behind,
+// naming an image that no longer exists, and they draw nothing.
+//
+// Kept even so it can never collide with the two odd bytes below, and stepped
+// by two so it stays that way; the modulo keeps it clear of zero, which would
+// cost the id the third distinct byte it needs.
+#define IMAGE_ID_BASE(gen) ((0x0Au + 2u * ((gen) % 100u)) << 16)
+static unsigned image_id_for(unsigned gen) {
     unsigned pid = (unsigned)getpid();
     unsigned hi = ((pid >> 8) & 0xff) | 1;
     unsigned lo = (pid & 0xff) | 1;
-    return IMAGE_ID_BASE | (hi << 8) | lo;
+    return IMAGE_ID_BASE(gen) | (hi << 8) | lo;
 }
 #define PLACEMENT  1
 #define CHUNK      4096
@@ -146,7 +157,7 @@ static void draw_grid(Kitty *k) {
     char enc[8], cell[8];
     size_t celln = utf8_encode(PLACEHOLDER_CP, cell);
 
-    unsigned id = image_id();
+    unsigned id = image_id_for(k->gen);
     buf_addf(&k->out, "\x1b[38;2;%u;%u;%um", (id >> 16) & 0xff,
              (id >> 8) & 0xff, id & 0xff);
     for (int r = 0; r < rows; r++) {
@@ -181,7 +192,7 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
         int hn;
         if (first)
             hn = snprintf(hdr, sizeof hdr, "\x1b_Ga=t,f=100,t=d,i=%u,q=2,m=%d;",
-                          image_id(), more);
+                          image_id_for(k->gen), more);
         else
             hn = snprintf(hdr, sizeof hdr, "\x1b_Gm=%d;", more);
 
@@ -200,7 +211,7 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
     char place[128];
     int pn = snprintf(place, sizeof place,
                       "\x1b_Ga=p,U=1,i=%u,p=%d,c=%d,r=%d,q=2\x1b\\",
-                      image_id(), PLACEMENT, k->cols, k->rows);
+                      image_id_for(k->gen), PLACEMENT, k->cols, k->rows);
     emit_esc(k, place, (size_t)pn);
 
     if (k->grid_dirty) {
@@ -224,10 +235,16 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
 void kitty_clear(Kitty *k) {
     k->out.len = 0;
     char seq[64];
-    int n = snprintf(seq, sizeof seq, "\x1b_Ga=d,d=I,i=%u,q=2\x1b\\", image_id());
+    int n = snprintf(seq, sizeof seq, "\x1b_Ga=d,d=I,i=%u,q=2\x1b\\", image_id_for(k->gen));
     emit_esc(k, seq, (size_t)n);
     writeall(k->ttyfd, k->out.p, k->out.len);
     k->out.len = 0;
+    k->grid_dirty = true;
+}
+
+void kitty_renew(Kitty *k) {
+    kitty_clear(k);      // takes down the image those cells still name
+    k->gen++;
     k->grid_dirty = true;
 }
 

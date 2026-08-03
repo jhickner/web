@@ -2085,7 +2085,20 @@ int main(int argc, char **argv) {
             g_resized = 0;
             if (a.inline_mode) {
                 term_size(&a.term);
-                a.term.inline_origin = a.term.rows - a.term.inline_rows + 1;
+                // The block stays on the rows it was already on: a terminal
+                // keeps what is on its screen where it is, and a pane that
+                // grew has only put empty rows underneath. Pinning it to the
+                // bottom of the new size instead sent it to the foot of the
+                // screen on every resize, away from the command it belongs
+                // under. relayout pulls it back up if it no longer fits, which
+                // is the only case where it has really moved.
+                //
+                // Its old cells are still up there whatever it does, wherever
+                // the terminal has put them, and they name the image. Placing
+                // it again would light those too, and the same page would be
+                // up in two places. It comes back under a name they do not
+                // know instead.
+                kitty_renew(&a.kitty);
             } else {
                 writeall(a.term.fd, "\x1b[2J", 4);
                 // The clear took the placeholder cells with it, and a resize
@@ -2093,7 +2106,17 @@ int main(int argc, char **argv) {
                 a.kitty.grid_dirty = true;
             }
             a.status_last.len = 0;      // the screen it was on is gone
+            // Inline, a resize leaves the page the size it was, so the frame
+            // that follows is the one already drawn and would be hash-skipped
+            // - and the picture, just taken down, would not come back until
+            // something on the page moved.
+            a.last_hash = 0;
             relayout(&a);
+            // relayout may have taken rows off the box to fit it, and the
+            // count of what the block owns is what erases it on the way out.
+            if (a.inline_mode)
+                a.term.inline_rows = a.img_rows +
+                                     (a.status_open ? 1 : 0) + a.repl_rows;
         }
 
         struct pollfd fds[2] = {{0}};   // poll leaves revents alone on EINTR

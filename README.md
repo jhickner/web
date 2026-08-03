@@ -610,6 +610,21 @@ are ordinary text, so tmux moves and repaints them like any other characters
 and the terminal substitutes pixels underneath. Every graphics escape is
 wrapped in a tmux passthrough sequence with its own ESCs doubled.
 
+A resize leaves the block on the rows it was already on. A terminal keeps what
+is on its screen where it is — a pane that grew has only put empty rows
+underneath it — so the window stays under the command it belongs to rather than
+dropping to the foot of the screen every time a pane is zoomed. It is pulled
+back up only when it no longer fits.
+
+Which is also the one hazard in the scheme: a cell shows the picture because it
+*names* it, and a name outlives the layout that drew it. A resize — a tmux pane
+zoomed, a window dragged — moves those cells somewhere only the terminal knows,
+and placing the image again lights every one of them, so the same page comes up
+twice. So an inline resize retires the name: the image is deleted and the next
+frame goes up under a new id, leaving the abandoned cells naming an image that
+no longer exists, which draws nothing. The id's top byte is that generation,
+kept even so it can never collide with the two odd bytes of the pid below it.
+
 The browser profile lives in `~/.cache/web/profile`, not `~/.config`: it is
 bulk cache with cookies in it, and it grows. Logins persist between runs. A run
 that dies without cleaning up leaves Chrome holding that profile, so the next
