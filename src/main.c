@@ -738,12 +738,6 @@ static void load_state(App *a) {
             if (c >= BOX_MIN_COLS && c <= 2000) a->want_cols = c;
         } else if (!strncmp(line, "ua=", 3) && line[3]) {
             snprintf(a->ua, sizeof a->ua, "%s", line + 3);
-        } else if (!strncmp(line, "recolor=", 8)) {
-            int m = recolor_mode_from_name(line + 8);
-            if (m >= 0) a->recolor = m;
-        } else if (!strncmp(line, "recolor_strength=", 17)) {
-            double s = atof(line + 17);
-            if (s >= 0.0 && s <= 1.0) a->recolor_strength = s;
         } else if (!strncmp(line, "pause_on_blur=", 14)) {
             a->pause_cfg = a->pause_on_blur = atoi(line + 14) != 0;
         } else if (!strncmp(line, "blur_cpu_rate=", 14)) {
@@ -771,8 +765,6 @@ static void save_state(App *a) {
     // is not the one the number came from.
     int cols = a->box_cols > 0 ? a->box_cols : a->want_cols;
     if (cols > 0) fprintf(f, "cols=%d\n", cols);
-    fprintf(f, "recolor=%s\n", recolor_mode_name(a->recolor));
-    fprintf(f, "recolor_strength=%.2f\n", a->recolor_strength);
     // What the file said, not what this run is doing: --no-pause is for one
     // session, and a flag that quietly rewrote the setting would outlive it.
     fprintf(f, "pause_on_blur=%d\n", a->pause_cfg ? 1 : 0);
@@ -897,76 +889,6 @@ void run_js(App *a, const char *js) {
     char esc[2048];
     json_escape(esc, sizeof esc, js);
     app_cdp(a, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
-}
-
-// ----------------------------------------------------------------- recolor
-
-// The terminal's own colours, read once and only when something wants them: a
-// terminal that never answers costs a wait, and most runs never ask.
-static void ensure_theme(App *a) {
-    if (a->theme_ready) return;
-    a->theme_ready = true;
-    if (!a->has_tty || term_theme(&a->term, &a->theme) < 0)
-        term_log("terminal did not report its colours; using the fallback");
-}
-
-static int luma255(const uint8_t c[3]) {
-    return (2126 * c[0] + 7152 * c[1] + 722 * c[2]) / 10000;
-}
-
-// Chrome does the recolouring, on the page, rather than us doing it to the
-// frames on their way out: a filter there is one more step in a composite it
-// was going to do anyway, where remapping every pixel here would be paid for
-// on every frame of a live screencast, and would mean decoding and re-encoding
-// a PNG to get at them at all.
-static void apply_recolor(App *a) {
-    ensure_theme(a);
-
-    // The old script goes first. Left in place, every change would add another
-    // copy to be run at the top of every document from then on.
-    if (a->recolor_script_id[0]) {
-        app_cdp(a, "Page.removeScriptToEvaluateOnNewDocument",
-                 "\"identifier\":\"%s\"", a->recolor_script_id);
-        a->recolor_script_id[0] = 0;
-    }
-
-    Buf js = {0}, esc = {0};
-    recolor_script(&js, a->recolor, a->recolor_strength, &a->theme);
-    size_t cap = js.len * 2 + 16;
-    buf_reserve(&esc, cap);
-    json_escape(esc.p, cap, js.p);
-
-    // Registered for every future document, and run against the one on screen:
-    // between them the filter is there before the first paint of a new page and
-    // arrives immediately on this one.
-    if (a->recolor != RECOLOR_OFF)
-        app_req_note(a, app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
-                                "\"source\":\"%s\"", esc.p), RQ_RECOLOR);
-    app_cdp(a, "Runtime.evaluate", "\"expression\":\"%s\"", esc.p);
-    buf_free(&js);
-    buf_free(&esc);
-
-    // The ramp runs from the terminal's background up to its foreground, so a
-    // page that has a dark theme of its own already lands the right way up in a
-    // dark terminal. Asking for that theme is free, and beats inverting one
-    // that does not have it.
-    bool dark = a->recolor != RECOLOR_OFF &&
-                luma255(a->theme.bg) < luma255(a->theme.fg);
-    app_cdp(a, "Emulation.setEmulatedMedia",
-             dark ? "\"features\":[{\"name\":\"prefers-color-scheme\","
-                    "\"value\":\"dark\"}]"
-                  : "\"features\":[]");
-}
-
-static void cycle_recolor(App *a) {
-    a->recolor = (a->recolor + 1) % RECOLOR_COUNT;
-    apply_recolor(a);
-    save_state(a);
-
-    char m[96];
-    snprintf(m, sizeof m, "recolor %s%s", recolor_mode_name(a->recolor),
-             a->theme.from_terminal ? "" : " - terminal did not say its colours");
-    notify(a, m);
 }
 
 // One jump, landed on immediately. The scroller under the point is the one that
@@ -1283,10 +1205,6 @@ static void handle_key(App *a, Event *ev) {
         return;                 // anything else is the terminal's business
     }
 
-    // Ahead of the reading keys and outside the insert check, so the palette
-    // can be changed while a form has the keyboard.
-    if (ev->key == KEY_F8 && !ev->mods) { cycle_recolor(a); return; }
-
     if (ev->mods == MOD_CTRL) {
         switch (ev->key) {
         case 'q': case 'c': term_log("QUIT via ^%c", ev->key); g_quit = 1; return;
@@ -1594,18 +1512,6 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         return;
     }
 
-    // Kept so the next change can withdraw this script before adding its
-    // replacement; Chrome names it in the reply and nowhere else.
-    case RQ_RECOLOR: {
-        size_t n;
-        const char *v = json_str(msg, "identifier", &n);
-        if (v && n && n < sizeof a->recolor_script_id) {
-            memcpy(a->recolor_script_id, v, n);
-            a->recolor_script_id[n] = 0;
-        }
-        return;
-    }
-
     case RQ_COPY: {
         size_t n;
         const char *v = json_eval_str(msg, &n);
@@ -1689,9 +1595,6 @@ static void usage(void) {
         "  --step      wait for a key between those lines\n"
         "  --timeout S how long a line waits before giving up (default 5)\n"
         "  --json      script output as one JSON object per value\n"
-        "  --recolor M map the page onto your terminal's colours:\n"
-        "              off | hue | duotone | tint\n"
-        "  --recolor-strength F   how far towards it, 0..1 (default 1)\n"
         "  --login     open a window to sign in with, on the same profile\n"
         "  --keep      leave chrome running on exit so the next start is instant\n"
         "  --endpoint  print every running window as JSON and exit\n"
@@ -1733,7 +1636,6 @@ static void session_init(App *a) {
                  "\"source\":\"%s\"", esc);
         app_cdp(a, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
     }
-    if (a->recolor != RECOLOR_OFF) apply_recolor(a);
 }
 
 // Where a browser we did not navigate already is. Nothing loaded, so no event
@@ -1805,7 +1707,6 @@ int app_attach(App *a, int port, char *msg, size_t cap) {
     // Everything below belonged to the browser that just went away: ids start
     // again from one, so a stale request would be claimed by an unrelated reply.
     memset(a->reqs, 0, sizeof a->reqs);
-    a->recolor_script_id[0] = 0;
     a->pend.kind = PEND_NONE;
     a->title[0] = 0;
     a->loading = false;
@@ -1844,11 +1745,9 @@ int main(int argc, char **argv) {
     App a = {0};
     a.want_scale = 1;
     a.zoom = 1.0;
-    a.recolor_strength = 1.0;
     a.pause_on_blur = a.pause_cfg = true;
     a.blur_cpu_rate = 20;
     a.exec_fd = -1;
-    theme_fallback(&a.theme);
     load_state(&a);                   // --zoom below still wins over it
     a.fit_width = true;
     a.inline_mode = true;             // a window in the shell, unless --full
@@ -1896,18 +1795,6 @@ int main(int argc, char **argv) {
             exec_cmd = argv[++i];
         } else if (!strcmp(argv[i], "--mute")) {
             a.mute = true;
-        } else if (!strcmp(argv[i], "--recolor") && i + 1 < argc) {
-            int m = recolor_mode_from_name(argv[++i]);
-            if (m < 0) {
-                fprintf(stderr, "web: unknown recolor mode '%s'\n"
-                                "     off | hue | duotone | tint\n", argv[i]);
-                return 1;
-            }
-            a.recolor = m;
-        } else if (!strcmp(argv[i], "--recolor-strength") && i + 1 < argc) {
-            a.recolor_strength = atof(argv[++i]);
-            if (a.recolor_strength < 0.0) a.recolor_strength = 0.0;
-            if (a.recolor_strength > 1.0) a.recolor_strength = 1.0;
         } else if (!strcmp(argv[i], "--eval") && i + 1 < argc) {
             eval_js = argv[++i];
         } else if (!strcmp(argv[i], "--delay") && i + 1 < argc) {

@@ -124,25 +124,6 @@ void kitty_renew(Kitty *k);
 void kitty_abort(Kitty *k);    // close an escape a dropped frame left open
 void kitty_free(Kitty *k);
 
-// ---------------------------------------------------------------- recolor
-
-// The terminal's own colours, as it reports them.
-typedef struct {
-    uint8_t fg[3], bg[3];
-    bool    from_terminal;    // false means the fallback below is in use
-} Theme;
-
-void theme_fallback(Theme *t);
-
-enum { RECOLOR_OFF, RECOLOR_HUE, RECOLOR_DUOTONE, RECOLOR_TINT, RECOLOR_COUNT };
-
-const char *recolor_mode_name(int mode);
-int         recolor_mode_from_name(const char *s);
-
-// The document-start script that installs (or, for RECOLOR_OFF, withdraws) the
-// filter. Appended to out, which the caller escapes and hands to Chrome.
-void        recolor_script(Buf *out, int mode, double strength, const Theme *t);
-
 // ---------------------------------------------------------------- terminal
 
 enum {
@@ -193,7 +174,6 @@ void term_clear_inline(Term *t);              // blank the rows the block owns
 void term_restore(Term *t, bool clear_inline);  // erase the block on the way out
 void term_size(Term *t);
 int  term_read(Term *t);                  // pull available bytes
-int  term_theme(Term *t, Theme *th);      // OSC 10/11; 0 if the terminal answered
 void term_log(const char *fmt, ...);      // WEB_DEBUG input trace
 int  term_next(Term *t, Event *ev);       // 1 = event decoded
 
@@ -227,7 +207,7 @@ typedef struct {
 // What an outstanding CDP call was for. Replies carry only the id they were
 // issued with, so the kind has to be remembered alongside it.
 enum {
-    RQ_NONE, RQ_TITLE, RQ_URL, RQ_COPY, RQ_FIT, RQ_RECOLOR, RQ_SCRIPT,
+    RQ_NONE, RQ_TITLE, RQ_URL, RQ_COPY, RQ_FIT, RQ_SCRIPT,
     RQ_SELECTOR, RQ_RECORD, RQ_PDF
 };
 
@@ -354,11 +334,6 @@ typedef struct {
     pid_t   exec_pid;
     Buf     exec_buf;          // what has arrived of the line being read
 
-    int     recolor;           // RECOLOR_*
-    double  recolor_strength;  // how far towards it, 0..1
-    Theme   theme;             // the terminal's own colours
-    bool    theme_ready;       // it has been asked for them
-    char    recolor_script_id[32];   // the document-start script now installed
     Buf     status, status_last;
 
     Script  script;
