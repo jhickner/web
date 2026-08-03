@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -93,9 +94,9 @@ static void pump_input(void) {
     term_read(&g_app->term);
     for (size_t i = 0; i < g_app->term.in.len; i++) {
         unsigned char c = (unsigned char)g_app->term.in.p[i];
-        // ^C is the editor's clear-line while the pane holds the keyboard, and
+        // ^C is the editor's clear-line while the console holds the keyboard, and
         // this runs mid-frame where that distinction cannot be made later.
-        if (c == 0x11 || (c == 0x03 && !g_app->repl_focus)) {
+        if (c == 0x11 || (c == 0x03 && !g_app->console_focus)) {
             term_log("QUIT via pump byte %02x", c);
             g_quit = 1;
             return;
@@ -178,7 +179,7 @@ void notify(App *a, const char *s) {
 
 // A recorded line goes where a script value goes: to fd 1 when that is not the
 // terminal the page is drawn on, which makes `web --record url > flow.web` the
-// whole of the workflow, and into the pane - or across the status line - when
+// whole of the workflow, and into the console - or across the status line - when
 // it is.
 static void record_emit(App *a, const char *line) {
     // A file named on the command line is where it goes; otherwise it follows
@@ -188,11 +189,11 @@ static void record_emit(App *a, const char *line) {
         writeall(fd, line, strlen(line));
         writeall(fd, "\n", 1);
     }
-    // Into the pane whether or not it is open: a recording is worth reading
+    // Into the console whether or not it is open: a recording is worth reading
     // back afterwards, and worth recalling with the up arrow to run again.
-    repl_pane_log(a, line);
-    repl_pane_history_add(a, line);
-    if (!a->repl_open) notify(a, line);
+    console_log(a, line);
+    console_history_add(a, line);
+    if (!a->console_open) notify(a, line);
     a->record_last_at = now_sec();
 }
 
@@ -313,7 +314,7 @@ void relayout(App *a) {
     term_size(t);
 
     int status = a->status_open ? 1 : 0;
-    int below = status + a->repl_rows;      // everything under the picture
+    int below = status + a->console_rows;      // everything under the picture
     int rect_cols;
     if (a->inline_mode) {
         // The terminal may have shrunk under the box since it was last sized.
@@ -336,9 +337,9 @@ void relayout(App *a) {
         if (a->img_rows < 1) a->img_rows = 1;
         rect_cols = t->cols;
         kitty_set_rect(&a->kitty, 1, 1, rect_cols, a->img_rows);
-        a->status_row = t->rows - a->repl_rows;
+        a->status_row = t->rows - a->console_rows;
     }
-    a->repl_row = a->status_row + status;
+    a->console_row = a->status_row + status;
 
     // The pixels the picture will actually occupy. Everything below works back
     // from these: whatever the terminal is handed gets resampled to this size,
@@ -395,18 +396,186 @@ void relayout(App *a) {
     screencast_start(a);
 }
 
+// ----------------------------------------------------------------- session
+
+// What it takes to drive this window from outside. The port alone used to say
+// it, but a window per run means the browser has several pages and the port no
+// longer picks one out - so the id of ours is the part that matters. One file
+// per run, named for the pid, which is also what says the file is not a
+// leftover from a window that died without tidying up.
+static void session_file(App *a, char *out, size_t cap) {
+    snprintf(out, cap, "%s/sessions/%d.json", a->chrome.profile, (int)getpid());
+}
+
+static void session_write(App *a) {
+    if (!a->chrome.profile[0] || a->chrome.port <= 0 || !a->chrome.target[0])
+        return;
+    char dir[600], path[700];
+    snprintf(dir, sizeof dir, "%s/sessions", a->chrome.profile);
+    mkdirs(dir);
+    session_file(a, path, sizeof path);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    char url[2100], title[600];
+    json_escape(url, sizeof url, a->url);
+    json_escape(title, sizeof title, a->title);
+    fprintf(f, "{\"pid\":%d,\"port\":%d,\"cdp\":\"http://127.0.0.1:%d\","
+               "\"target\":\"%s\",\"url\":\"%s\",\"title\":\"%s\"}\n",
+            (int)getpid(), a->chrome.port, a->chrome.port,
+            a->chrome.target, url, title);
+    fclose(f);
+}
+
+static void session_forget(App *a) {
+    if (!a->chrome.profile[0]) return;
+    char path[700];
+    session_file(a, path, sizeof path);
+    unlink(path);
+}
+
+// Every window running now, one JSON object to a line. Nothing else tidies the
+// files up, so a pid that has gone takes its own with it here.
+static int print_sessions(void) {
+    char profile[512], dir[600];
+    chrome_profile_path(profile, sizeof profile);
+    snprintf(dir, sizeof dir, "%s/sessions", profile);
+    DIR *d = opendir(dir);
+    int found = 0;
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            int pid = atoi(e->d_name);
+            if (pid <= 0) continue;
+            char path[800];
+            snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+            if (kill((pid_t)pid, 0) != 0 && errno == ESRCH) {
+                unlink(path);
+                continue;
+            }
+            FILE *f = fopen(path, "r");
+            if (!f) continue;
+            char line[4096];
+            if (fgets(line, sizeof line, f)) {
+                fputs(line, stdout);
+                found++;
+            }
+            fclose(f);
+        }
+        closedir(d);
+    }
+    if (!found) fprintf(stderr, "web: no window is running\n");
+    return found ? 0 : 1;
+}
+
+// -------------------------------------------------------------------- exec
+
+// Run a program against this window. It is handed the devtools endpoint and the
+// id of our page, which together are the whole of what an outside driver needs:
+// with them a playwright script attaches to the page on screen rather than
+// guessing among the browser's tabs. Its output goes to the console, which
+// is where everything else this window has to say already goes.
+static void exec_start(App *a, const char *cmd) {
+    int fds[2];
+    if (pipe(fds) < 0) return;
+
+    pid_t pid = fork();
+    if (pid < 0) { close(fds[0]); close(fds[1]); return; }
+    if (pid == 0) {
+        // Both streams into the pipe: a script's diagnostics are as much a part
+        // of watching it run as what it prints, and there is nowhere else for
+        // them to go - stderr here is the middle of the picture.
+        dup2(fds[1], STDOUT_FILENO);
+        dup2(fds[1], STDERR_FILENO);
+        close(fds[0]);
+        if (fds[1] > 2) close(fds[1]);
+        int null = open("/dev/null", O_RDONLY);
+        if (null >= 0) {
+            dup2(null, STDIN_FILENO);
+            if (null > 2) close(null);
+        }
+        char url[64], port[16];
+        snprintf(url, sizeof url, "http://127.0.0.1:%d", a->chrome.port);
+        snprintf(port, sizeof port, "%d", a->chrome.port);
+        setenv("WEB_CDP_URL", url, 1);
+        setenv("WEB_CDP_PORT", port, 1);
+        setenv("WEB_TARGET_ID", a->chrome.target, 1);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+
+    close(fds[1]);
+    int fl = fcntl(fds[0], F_GETFL, 0);
+    fcntl(fds[0], F_SETFL, fl | O_NONBLOCK);
+    a->exec_fd = fds[0];
+    a->exec_pid = pid;
+    // Somewhere to watch it from. Opened without the keyboard: the page is what
+    // is being watched, and a console that took the keys would stop the window
+    // being usable while the script runs. With no terminal there is nothing to
+    // open and nobody to watch, and an open console would only keep a draining
+    // script from ever reaching its end.
+    if (a->has_tty && !a->console_open) a->console_open = true;
+    console_log(a, "");
+    char m[300];
+    snprintf(m, sizeof m, "$ %.280s", cmd);
+    console_log(a, m);
+}
+
+static void exec_done(App *a) {
+    close(a->exec_fd);
+    a->exec_fd = -1;
+    int st = 0;
+    char m[64];
+    if (waitpid(a->exec_pid, &st, 0) == a->exec_pid && WIFEXITED(st))
+        snprintf(m, sizeof m, "[exit %d]", WEXITSTATUS(st));
+    else
+        snprintf(m, sizeof m, "[stopped]");
+    a->exec_pid = 0;
+    console_log(a, m);
+}
+
+// Whole lines only: the console's transcript is a list of lines, and half of one
+// would be a line in it that the rest of the output could never join.
+static void exec_pump(App *a) {
+    if (a->exec_fd < 0) return;
+    bool eof = false;
+    for (;;) {
+        char tmp[4096];
+        ssize_t r = read(a->exec_fd, tmp, sizeof tmp);
+        if (r > 0) { buf_add(&a->exec_buf, tmp, (size_t)r); continue; }
+        if (r == 0) { eof = true; break; }
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        eof = true;
+        break;
+    }
+
+    while (a->exec_buf.len) {
+        char *nl = memchr(a->exec_buf.p, '\n', a->exec_buf.len);
+        size_t len = nl ? (size_t)(nl - a->exec_buf.p) : a->exec_buf.len;
+        if (!nl && !eof) break;                 // the rest of it is still coming
+        char line[512];
+        size_t n = len < sizeof line - 1 ? len : sizeof line - 1;
+        memcpy(line, a->exec_buf.p, n);
+        line[n] = 0;
+        for (char *p = line; *p; p++) if (*p == '\r' || *p == '\t') *p = ' ';
+        console_log(a, line);
+        buf_consume(&a->exec_buf, nl ? len + 1 : len);
+    }
+    if (eof) exec_done(a);
+}
+
 // ------------------------------------------------------------------ status
 
 // The address bar and the find prompt are drawn on the status line, so a line
 // that has been hidden comes back for as long as one of them is open.
 static void status_sync(App *a) {
     bool want = !a->hide_status || a->editing;
-    int  rows = repl_pane_rows(a);
-    if (want == a->status_open && rows == a->repl_rows) return;
+    int  rows = console_rows(a);
+    if (want == a->status_open && rows == a->console_rows) return;
     a->status_open = want;
-    a->repl_rows = rows;
+    a->console_rows = rows;
     a->status_last.len = 0;
-    a->repl_last.len = 0;
+    a->console_last.len = 0;
     kitty_clear(&a->kitty);          // the rows it lived on change hands
     // Inline, the page itself is not resized by this, so the frame that comes
     // back is the one already on screen - and a duplicate is normally dropped,
@@ -502,7 +671,7 @@ static void draw_status(App *a) {
 
 static void draw_panes(App *a) {
     draw_status(a);
-    repl_pane_paint(a);
+    console_paint(a);
 }
 
 // ------------------------------------------------------------------ input
@@ -1139,7 +1308,7 @@ static void handle_focus(App *a, bool focused) {
 }
 
 static void handle_mouse(App *a, Event *ev) {
-    if (repl_pane_mouse(a, ev)) return;
+    if (console_mouse(a, ev)) return;
     Kitty *k = &a->kitty;
     bool inside = ev->mx >= k->x && ev->mx < k->x + k->cols &&
                   ev->my >= k->y && ev->my < k->y + k->rows;
@@ -1151,12 +1320,12 @@ static void handle_mouse(App *a, Event *ev) {
     // starting a new one.
     if (!inside && !a->mouse_down) return;
 
-    // Pointing at the page is asking for the page. The pane holds the keyboard
+    // Pointing at the page is asking for the page. The console holds the keyboard
     // from the moment it is opened until something else is clicked, which is
     // what lets a click into a form field be followed by typing into it. A
     // wheel is not a claim on anything: scrolling what you are reading should
     // not take the keyboard away from a half typed command.
-    if (ev->press && !ev->motion && ev->button < 3) a->repl_focus = false;
+    if (ev->press && !ev->motion && ev->button < 3) a->console_focus = false;
 
     // Aim at the middle of the cell: the terminal only tells us which cell was
     // clicked, so the center is the least wrong point inside it. A drag that
@@ -1257,14 +1426,14 @@ static void copy_selection(App *a) {
 }
 
 static void handle_key(App *a, Event *ev) {
-    // Ahead of everything: a focused pane is where the keyboard is, and ^Q is
+    // Ahead of everything: a focused console is where the keyboard is, and ^Q is
     // the one key that still means what it always did.
-    if (a->repl_focus) {
+    if (a->console_focus) {
         if (ev->mods == MOD_CTRL && ev->key == 'q') { g_quit = 1; return; }
-        // And ^X, or the key that opens the pane cannot put it away from
+        // And ^X, or the key that opens the console cannot put it away from
         // inside it: the editor swallows every control key it does not use.
-        if (ev->mods == MOD_CTRL && ev->key == 'x') { repl_pane_toggle(a); return; }
-        if (repl_pane_key(a, ev)) return;
+        if (ev->mods == MOD_CTRL && ev->key == 'x') { console_toggle(a); return; }
+        if (console_key(a, ev)) return;
     }
     if (a->editing) {
         if (ev->key == KEY_ENTER) {
@@ -1326,7 +1495,7 @@ static void handle_key(App *a, Event *ev) {
             a->hide_status = !a->hide_status;
             return;
         case 'y': copy_selection(a); return;
-        case 'x': repl_pane_toggle(a); return;
+        case 'x': console_toggle(a); return;
         case 'r':
             app_cdp(a, "Page.reload", "\"ignoreCache\":false");
             a->loading = true;
@@ -1419,7 +1588,7 @@ static void handle_key(App *a, Event *ev) {
             notify(a, "insert mode - esc to leave");
             return;
         case ':':
-            repl_pane_toggle(a);
+            console_toggle(a);
             return;
         }
     }
@@ -1536,6 +1705,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
             a->url[n] = 0;
             a->title[0] = 0;
             a->fit_w = 0;              // measured per page
+            session_write(a);          // what anything attaching would look for
         }
         return;
     }
@@ -1712,10 +1882,10 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         char selector[2048];
         size_t len = (v && n) ? json_unescape(selector, sizeof selector, v, n) : 0;
         if (len) {
-            repl_pane_log(a, selector);
-            notify(a, "selector sent to command pane");
+            console_log(a, selector);
+            notify(a, "selector sent to console");
         } else {
-            repl_pane_log(a, "error: no element at that point");
+            console_log(a, "error: no element at that point");
         }
         return;
     }
@@ -1726,6 +1896,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         if (v && n && n < sizeof a->title) {
             memcpy(a->title, v, n);
             a->title[n] = 0;
+            session_write(a);
         }
         return;
     }
@@ -1738,6 +1909,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         if (v && n && n < sizeof a->url) {
             memcpy(a->url, v, n);
             a->url[n] = 0;
+            session_write(a);
         }
         return;
     }
@@ -1769,6 +1941,8 @@ static void usage(void) {
         "  --recolor-strength F   how far towards it, 0..1 (default 1)\n"
         "  --login     open a window to sign in with, on the same profile\n"
         "  --keep      leave chrome running on exit so the next start is instant\n"
+        "  --endpoint  print every running window as JSON and exit\n"
+        "  --exec CMD  run CMD against this window, its output in the console\n"
         "  --port N    fix chrome's devtools port so playwright can find it\n"
         "  --no-pause  keep drawing while the terminal is not focused\n"
         "  --record[=F] write what you do to the page out as commands\n"
@@ -1928,12 +2102,15 @@ int main(int argc, char **argv) {
     a.recolor_strength = 1.0;
     a.pause_on_blur = a.pause_cfg = true;
     a.blur_cpu_rate = 20;
+    a.exec_fd = -1;
     theme_fallback(&a.theme);
     load_state(&a);                   // --zoom below still wins over it
     a.fit_width = true;
     a.inline_mode = true;             // a window in the shell, unless --full
     a.clear_exit = true;              // the window goes away, unless --no-clear
     bool show = false, login = false, url_given = false, record = false;
+    bool endpoint_only = false;
+    const char *exec_cmd = NULL;
     double drain_at = 0;              // when the queue first ran out
     const char *record_path = NULL;
     int port = 0;                     // 0 = let chrome pick a free one
@@ -1971,6 +2148,10 @@ int main(int argc, char **argv) {
             show = true;
         } else if (!strcmp(argv[i], "--keep")) {
             a.keep = true;
+        } else if (!strcmp(argv[i], "--endpoint")) {
+            endpoint_only = true;
+        } else if (!strcmp(argv[i], "--exec") && i + 1 < argc) {
+            exec_cmd = argv[++i];
         } else if (!strcmp(argv[i], "--mute")) {
             a.mute = true;
         } else if (!strcmp(argv[i], "--recolor") && i + 1 < argc) {
@@ -2031,6 +2212,10 @@ int main(int argc, char **argv) {
             url_given = true;
         }
     }
+    // A question about the windows already running, answered without starting
+    // anything of our own.
+    if (endpoint_only) return print_sessions();
+
     // Opened before Chrome is, so a path that cannot be written costs nothing
     // but the message.
     if (record_path) {
@@ -2123,6 +2308,7 @@ int main(int argc, char **argv) {
     // one already knows the browser has been asked to stay. Somebody else's is
     // never ours to mark: we do not shut it down either way.
     if (a.keep && !a.chrome.foreign) chrome_mark_kept(&a.chrome);
+    session_write(&a);          // findable from the moment there is a page
 
     // Ask the browser what it is calling itself and keep the corrected answer
     // for next time. The launch flag above needs the string before there is a
@@ -2170,6 +2356,11 @@ int main(int argc, char **argv) {
     relayout(&a);
     draw_panes(&a);
 
+    // Started once the page is on its way and the window has a shape, so a
+    // script that attaches immediately finds the viewport it will be driving
+    // rather than the one this run began with.
+    if (exec_cmd) exec_start(&a, exec_cmd);
+
     // A script named on the command line, or one piped in. Reading stdin only
     // when it is not a terminal is what keeps `web url` interactive.
 
@@ -2209,16 +2400,18 @@ int main(int argc, char **argv) {
             // count of what the block owns is what erases it on the way out.
             if (a.inline_mode)
                 a.term.inline_rows = a.img_rows +
-                                     (a.status_open ? 1 : 0) + a.repl_rows;
+                                     (a.status_open ? 1 : 0) + a.console_rows;
         }
 
-        struct pollfd fds[2] = {{0}};   // poll leaves revents alone on EINTR
+        struct pollfd fds[3] = {{0}};   // poll leaves revents alone on EINTR
         // Without a terminal, term.fd fell back to stdin - which in that case is
         // a script rather than keystrokes. poll ignores a negative fd.
         fds[0].fd = a.has_tty ? a.term.fd : -1;
         fds[0].events = POLLIN;
         fds[1].fd = a.chrome.ws.fd;
         fds[1].events = POLLIN;
+        fds[2].fd = a.exec_fd;
+        fds[2].events = POLLIN;
 
         // Nothing here is on a timer except an undecided ESC and an expiring
         // notice, so the loop sleeps until something actually happens.
@@ -2229,8 +2422,13 @@ int main(int argc, char **argv) {
                     a.expect_frame > 0 || a.record_scroll || draining) ? 20 : -1;
         int sw = script_wait_ms(&a);
         if (sw >= 0 && (wait < 0 || sw < wait)) wait = sw;
-        int rc = poll(fds, 2, wait);
+        int rc = poll(fds, 3, wait);
         if (rc < 0 && !g_resized) continue;
+
+        if (fds[2].revents & (POLLIN | POLLHUP)) {
+            exec_pump(&a);
+            draw_panes(&a);
+        }
 
         if (fds[0].revents & POLLIN) {
             term_read(&a.term);
@@ -2242,7 +2440,7 @@ int main(int argc, char **argv) {
                 else if (ev.type == EV_MOUSE) handle_mouse(&a, &ev);
                 else if (ev.type == EV_FOCUS) handle_focus(&a, ev.press);
                 else if (ev.type == EV_PASTE) {
-                    if (!repl_pane_key(&a, &ev))
+                    if (!console_key(&a, &ev))
                         handle_paste(&a, a.term.paste.p, a.term.paste.len);
                 }
                 if (g_quit) break;
@@ -2296,8 +2494,11 @@ int main(int argc, char **argv) {
         // there" is the picture: nothing loading, and no frame that differs
         // from the one on screen for half a second. Capped, because a page with
         // something animating on it never goes quiet at all.
-        if (a.script.drain_exit && !script_busy(&a) && !a.repl_open &&
-            now_sec() >= a.script.next_at) {
+        // Not while --exec is still running either: the script it was given may
+        // be the whole reason this window exists, and leaving mid-sentence
+        // would take the page out from under it.
+        if (a.script.drain_exit && !script_busy(&a) && !a.console_open &&
+            a.exec_fd < 0 && now_sec() >= a.script.next_at) {
             if (drain_at == 0) drain_at = now_sec();
             bool settled = !a.loading && now_sec() - a.last_draw > 0.5;
             if (settled || now_sec() - drain_at > 3.0) g_quit = 1;
@@ -2329,11 +2530,21 @@ int main(int argc, char **argv) {
         kitty_free(&a.kitty);
         term_restore(&a.term, a.clear_exit);
     }
+    session_forget(&a);
+    // The child is driving the page we are about to take away, so it goes
+    // first; anything it still had to say goes to a terminal being handed back.
+    if (a.exec_pid > 0) {
+        kill(a.exec_pid, SIGTERM);
+        waitpid(a.exec_pid, NULL, 0);
+        a.exec_pid = 0;
+    }
+    if (a.exec_fd >= 0) close(a.exec_fd);
+    buf_free(&a.exec_buf);
     buf_free(&a.status);
     buf_free(&a.status_last);
     if (a.recording) record_set(&a, 0);      // the last pause, and the tail
     if (a.record_fd >= 0) close(a.record_fd);
-    repl_pane_free(&a);
+    console_free(&a);
     // Most of a cold start is Chrome coming up. Left running, it holds the
     // profile and the next run adopts it instead of paying for that again. A
     // browser we only attached to is not ours to close at all.

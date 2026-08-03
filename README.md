@@ -42,7 +42,7 @@ set -g allow-passthrough all
 | `alt+f` | fit-to-width on/off |
 | `cmd+c` | copy the page selection (needs one line of terminal config, below) |
 | `cmd+v` | paste into the page, or into the address bar when it is open |
-| `^X` | open or close the command pane |
+| `^X` | open or close the console |
 | mouse | click, drag to select, wheel to scroll |
 
 While reading:
@@ -62,7 +62,7 @@ While reading:
 | `t` | frame transport: png, then two jpeg settings that only time it |
 | `/` | find in page, then `n` / `N` for next and previous |
 | `i` | hand the keyboard to the page |
-| `:` | open the command pane |
+| `:` | open the console |
 | `esc` | take it back |
 
 Page up and down and tab always go to the page, as do all four arrows once the
@@ -209,6 +209,8 @@ trade every keyboard-driven browser has to make somewhere.
 --login     open a window to sign in with, on the same profile
 --keep      leave Chrome running on exit so the next start is instant, and
             keep it for every other window too
+--endpoint  print every running window as JSON and exit
+--exec CMD  run CMD against this window, its output in the console
 --port N    fix Chrome's devtools port instead of letting it pick one
 --no-pause  keep drawing while the terminal is not focused
 --record[=F] write what you do to the page out as commands
@@ -262,9 +264,10 @@ and the process exits non-zero, so a script fails like any other program.
 | `scroll N` \| `top` \| `bottom` | scroll |
 | `text S` / `html S` / `attr S N` / `count S` | read the page |
 | `url` `title` | where we are |
-| `eval JS` | the escape hatch |
+| `eval JS` | the value of one expression |
+| `js JS` | javascript, statements and all — the console's default reading |
 | `echo TEXT` | a literal line |
-| `help` | list every command in the command pane |
+| `help` | list every command in the console |
 | `pick` | toggle click-to-copy selectors |
 | `record on` \| `off` | echo what you do as commands |
 | `attach N` | drive the Chrome on devtools port N instead |
@@ -301,21 +304,39 @@ Clicks are dispatched as real mouse events at the element's centre rather than
 `element.click()`. They are trusted, they leave the hover and focus states a
 click leaves - and those are what make the run visible in the picture.
 
-### The command pane
+### The console
 
 `:` while reading, or `^X` at any time, opens a line editor under the page —
 and either one puts it away again. It has history, `^R` search, emacs kill
 bindings and a completion dropdown: type `/` to see every verb with its help.
-`esc` is the narrower move, handing the keyboard back with the pane still up —
-as does clicking the page, so a click into a form field can be typed into.
+`esc` is the narrower move, handing the keyboard back with the console still
+up — as does clicking the page, so a click into a form field can be typed into.
+
+It is a **javascript** console before it is a command line. A line that does not
+open with one of the commands above goes to the page, the way it would in
+devtools — statements included, since it is the page's own `eval` that runs it
+and the completion value is what comes back:
+
+```
+> document.querySelectorAll('a').length
+42
+> let seen = new Set(); for (const a of document.links) seen.add(a.host); [...seen]
+news.ycombinator.com,github.com
+> goto example.com
+```
+
+A leading `:` forces the command reading and `=` forces the javascript, for the
+handful of words that could be either. What a *file* says is never in question:
+scripts and recordings are commands only, so a typo there is still an error
+rather than a page throwing.
 
 Lines typed there join the same queue a script uses, so one can be dropped in
 behind a run already in progress and it simply happens in turn. `stop` clears
 what is waiting.
 
-`help` prints every command in the pane. `pick` turns selector picking on and
+`help` prints every command in the console. `pick` turns selector picking on and
 off: while it is on, clicking the page writes a readable `role=...` selector
-(or a unique CSS selector) to the pane instead of activating the element.
+(or a unique CSS selector) to the console instead of activating the element.
 Use Shift+Enter for another input line, Page Up/Page Down or the mouse wheel to
 scroll the transcript, and Enter to run the whole multiline command.
 
@@ -323,7 +344,7 @@ scroll the transcript, and Enter to run the whole multiline command.
 
 The command language read backwards: browse by hand and `web` writes down the
 commands that would do it again. `--record` starts a session recording, and
-`record on` / `record off` turns it on and off from the pane at any point.
+`record on` / `record off` turns it on and off from the console at any point.
 
 ```sh
 ./web --record=flow.web            # starts blank; browse, then ^Q
@@ -334,7 +355,7 @@ commands that would do it again. `--record` starts a session recording, and
 The file comes attached to the flag rather than after it, so `web --record
 example.com` stays a recording *of* example.com. Without one, recorded lines go
 where script values go — to stdout when that is not the terminal the page is on,
-and into the pane when it is — so `./web --record > flow.web` works too.
+and into the console when it is — so `./web --record > flow.web` works too.
 
 `--replay` runs one back — `--script` under the name that pairs with `--record`;
 `--delay MS` and `--step` slow it to a watchable pace.
@@ -350,7 +371,7 @@ a slow page gets what it needs and a quick one is not held up.
 To *assert* an outcome rather than wait for one, say what it should be —
 `wait-for "Bad login"` fails the replay if that text never turns up, and it is
 the line to add by hand when a recording is meant to be a test. Recorded lines also
-land in the pane's transcript and history even while it is closed, so `^X` after
+land in the console's transcript and history even while it is closed, so `^X` after
 a session shows what was written down, and the up arrow brings a line back to
 edit and run again.
 
@@ -417,13 +438,62 @@ is the thing its own headed mode does badly over ssh. `^G` shows the port on the
 status line, so the one Chrome picked for itself is there when you did not name
 one.
 
+But the port names the browser, and the browser has a page per window, so on its
+own it no longer says which page is the one you are looking at. `--endpoint`
+answers that — every running window, one JSON object to a line, no browser
+started to find out:
+
+```console
+$ web --endpoint
+{"pid":4123,"port":9222,"cdp":"http://127.0.0.1:9222","target":"0A32…","url":"https://example.com/","title":"Example Domain"}
+```
+
+`target` is the part that matters. Playwright has no accessor for a target id,
+so the way to spend it is to ask each page for its own:
+
+```js
+const browser = await chromium.connectOverCDP(cdp);
+const ctx = browser.contexts()[0];
+for (const page of ctx.pages()) {
+  const s = await ctx.newCDPSession(page);
+  const { targetInfo } = await s.send('Target.getTargetInfo');
+  if (targetInfo.targetId === target) { /* the page on screen */ }
+}
+```
+
+`examples/attach.mjs` is that loop, written out and ready to import.
+
+Playwright is not required to drive the window, though — CDP is a websocket that
+takes JSON, and Node has had `WebSocket` and `fetch` built in since 22.
+`examples/cdp.mjs` is that connection, standard library only, and
+`examples/drive.mjs` is a demo written against it that fits on a screen:
+
+```sh
+node examples/drive.mjs                 # against the one window running
+web --exec 'node examples/drive.mjs' news.ycombinator.com
+```
+
+### Running a script against the window
+
+`--exec` starts a program with the endpoint already in its environment, and puts
+its output in the console while the page stays live above it:
+
+```sh
+web --exec 'node examples/attach.mjs' example.com
+```
+
+The child gets `WEB_CDP_URL`, `WEB_CDP_PORT` and `WEB_TARGET_ID`, so it never
+has to go looking. Quitting the window ends it; it ending leaves the window.
+Both streams go to the console, because stderr has nowhere else to be — the middle
+of the picture is not a good place for a stack trace.
+
 The other direction is the `attach` command. Start the browser from Playwright:
 
 ```js
 const browser = await chromium.launch({args: ['--remote-debugging-port=9222']});
 ```
 
-and take a look at it with `attach 9222`, typed in the command pane or run from
+and take a look at it with `attach 9222`, typed in the console or run from
 a script. Three things follow from it:
 
 - the browser `web` started is shut down, unless `--keep` said otherwise, and

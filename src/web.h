@@ -74,6 +74,7 @@ typedef struct {
 int  chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
                    bool mute, const char *user_agent, bool debug, int port);
 int  chrome_attach(Chrome *c);
+void chrome_profile_path(char *out, size_t cap);
 
 // 0 when a devtools endpoint answers there, so a port can be checked before
 // anything is given up for it.
@@ -360,6 +361,10 @@ typedef struct {
     bool    has_tty;           // a real terminal to draw into
     bool    stdout_tty;        // fd 1 is that terminal, so data must not go there
 
+    int     exec_fd;           // --exec: the child's output, -1 when none
+    pid_t   exec_pid;
+    Buf     exec_buf;          // what has arrived of the line being read
+
     int     recolor;           // RECOLOR_*
     double  recolor_strength;  // how far towards it, 0..1
     Theme   theme;             // the terminal's own colours
@@ -371,8 +376,8 @@ typedef struct {
 
     // The command pane. The editor itself lives in replpane.c: it is a
     // singleton, and keeping it there saves including its header everywhere.
-    bool    repl_open;         // drawn below the page
-    bool    repl_focus;        // and holding the keyboard
+    bool    console_open;         // drawn below the page
+    bool    console_focus;        // and holding the keyboard
     bool    selector_pick;     // clicks report selectors instead of reaching the page
 
     // Codegen: what is being done to the page, written out as the commands
@@ -386,9 +391,9 @@ typedef struct {
     double  record_last_at;        // when the last line was written down
     double  record_load_at;        // when the page that is up now finished
     bool    record_navigated;      // and whether that was since the last line
-    int     repl_rows;         // how many rows it occupies
-    int     repl_row;          // 1-based row it starts on
-    Buf     repl_buf, repl_last;
+    int     console_rows;         // how many rows it occupies
+    int     console_row;          // 1-based row it starts on
+    Buf     console_buf, console_last;
 } App;
 
 // Note an outstanding call so its reply can be recognised, and claim the reply.
@@ -432,6 +437,10 @@ void script_push(App *a, const char *line);
 int  script_load(App *a, const char *path);   // "-" or NULL reads stdin
 bool script_busy(const App *a);
 
+// True when a line opens with a word the command language knows, which is how
+// the pane tells a command from the javascript it otherwise assumes.
+bool script_is_verb_line(const char *line);
+
 // Called once per pass of the main loop; drives the command in flight.
 void script_step(App *a);
 
@@ -448,15 +457,15 @@ const char *script_verb_help(int i);
 
 // ---------------------------------------------------------------- repl pane
 
-void repl_pane_init(App *a);
-void repl_pane_free(App *a);
-void repl_pane_toggle(App *a);          // open and focus, or unfocus
-int  repl_pane_rows(App *a);            // rows it wants right now
-bool repl_pane_key(App *a, Event *ev);  // true when the pane consumed it
-bool repl_pane_mouse(App *a, Event *ev);// transcript wheel/click handling
-void repl_pane_paint(App *a);
-void repl_pane_log(App *a, const char *line);
-void repl_pane_history_add(App *a, const char *line);
-void repl_pane_help(App *a);
+void console_init(App *a);
+void console_free(App *a);
+void console_toggle(App *a);          // open and focus, or unfocus
+int  console_rows(App *a);            // rows it wants right now
+bool console_key(App *a, Event *ev);  // true when the pane consumed it
+bool console_mouse(App *a, Event *ev);// transcript wheel/click handling
+void console_paint(App *a);
+void console_log(App *a, const char *line);
+void console_history_add(App *a, const char *line);
+void console_help(App *a);
 
 #endif

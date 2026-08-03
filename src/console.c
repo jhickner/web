@@ -6,12 +6,12 @@
 #define REPL_IMPLEMENTATION
 #include "../vendor/repl.h"
 
-// The command pane: repl.h's editor drawn under the page, with what it emits
+// The console: repl.h's editor drawn under the page, with what it emits
 // turned into the same kind of single buffered write draw_status does. The
 // editor owns no terminal state of its own, which is why it fits here at all -
 // it hands back cells and this decides what a cell is.
 
-#define PANE_ROWS 12         // stable height: typing never restarts the screencast
+#define CONSOLE_ROWS 12         // stable height: typing never restarts the screencast
 #define LOG_MAX 200
 #define LOG_COLS 512
 #define INPUT_ROWS 4
@@ -33,7 +33,7 @@ static int    g_clip_y0, g_clip_y1;
 
 // ------------------------------------------------------------------- setup
 
-void repl_pane_init(App *a) {
+void console_init(App *a) {
     if (g_ready) return;
     // repl.h opens its dropdown for a token starting with '/', so the names go
     // in with one. A bare `goto x` still runs - the slash is stripped on the way
@@ -52,16 +52,16 @@ void repl_pane_init(App *a) {
     g_ready = true;
 }
 
-void repl_pane_free(App *a) {
+void console_free(App *a) {
     if (g_ready) repl_free(&g_repl);
     g_ready = false;
     free(g_grid);
     g_grid = NULL;
-    buf_free(&a->repl_buf);
-    buf_free(&a->repl_last);
+    buf_free(&a->console_buf);
+    buf_free(&a->console_last);
 }
 
-static int pane_width(App *a) {
+static int console_width(App *a) {
     int w = a->kitty.cols > 0 ? a->kitty.cols : a->term.cols;
     if (w > a->term.cols) w = a->term.cols;
     if (w < 4) w = 4;
@@ -72,42 +72,42 @@ static int pane_width(App *a) {
 
 // Fixed on purpose. Changing height as output arrives or completion filters
 // would restart the screencast on almost every keystroke.
-int repl_pane_rows(App *a) {
-    if (!a->repl_open) return 0;
-    repl_pane_init(a);
-    int rows = PANE_ROWS;
+int console_rows(App *a) {
+    if (!a->console_open) return 0;
+    console_init(a);
+    int rows = CONSOLE_ROWS;
     int max = a->term.rows - (a->status_open ? 1 : 0) - 2;
     if (rows > max) rows = max;
     if (rows < 3) rows = 3;
     return rows;
 }
 
-// Open and focused, or gone: the key that opens the pane is the key that puts
+// Open and focused, or gone: the key that opens the console is the key that puts
 // it away, whether or not it currently holds the keyboard. `esc` is the
 // narrower move, handing the keyboard back with the transcript still up.
-void repl_pane_toggle(App *a) {
-    repl_pane_init(a);
-    if (a->repl_open) {
-        a->repl_open = false;
-        a->repl_focus = false;
+void console_toggle(App *a) {
+    console_init(a);
+    if (a->console_open) {
+        a->console_open = false;
+        a->console_focus = false;
     } else {
-        a->repl_open = true;
-        a->repl_focus = true;
+        a->console_open = true;
+        a->console_focus = true;
     }
 }
 
 // ---------------------------------------------------------------- transcript
 
-// A line the pane did not run, but that belongs in what it can recall: a
+// A line the console did not run, but that belongs in what it can recall: a
 // recorded command is one you often want back to edit or run again, and it has
-// to be there whether or not the pane was ever opened while it was written.
-void repl_pane_history_add(App *a, const char *line) {
+// to be there whether or not the console was ever opened while it was written.
+void console_history_add(App *a, const char *line) {
     if (!line || !*line) return;
-    repl_pane_init(a);
+    console_init(a);
     repl_history_add(&g_repl, line);
 }
 
-void repl_pane_log(App *a, const char *line) {
+void console_log(App *a, const char *line) {
     const char *p = line ? line : "";
     do {
         const char *nl = strchr(p, '\n');
@@ -126,12 +126,12 @@ void repl_pane_log(App *a, const char *line) {
     g_log_scroll = 0;                // new output follows the tail, like a shell
 }
 
-void repl_pane_help(App *a) {
+void console_help(App *a) {
     for (int i = 0; i < script_verb_count(); i++) {
         char row[160];
         snprintf(row, sizeof row, "%-10s %s",
                  script_verb_name(i), script_verb_help(i));
-        repl_pane_log(a, row);
+        console_log(a, row);
     }
 }
 
@@ -168,11 +168,11 @@ static size_t utf8_put(uint32_t cp, char *out) {
     return 4;
 }
 
-void repl_pane_paint(App *a) {
-    if (!a->has_tty || !a->repl_open || a->repl_rows < 1) return;
-    repl_pane_init(a);
+void console_paint(App *a) {
+    if (!a->has_tty || !a->console_open || a->console_rows < 1) return;
+    console_init(a);
 
-    int w = pane_width(a), h = a->repl_rows;
+    int w = console_width(a), h = a->console_rows;
     if (w != g_gw || h != g_gh || !g_grid) {
         RCell *ng = realloc(g_grid, sizeof(RCell) * (size_t)w * (size_t)h);
         if (!ng) return;
@@ -189,7 +189,7 @@ void repl_pane_paint(App *a) {
     if (iw < 1 || ih < 1) return;
     int in_all = repl_input_rows(&g_repl, iw);
     int in_show = in_all > INPUT_ROWS ? INPUT_ROWS : in_all;
-    int drop = a->repl_focus ? repl_dropdown_rows(&g_repl) : 0;
+    int drop = a->console_focus ? repl_dropdown_rows(&g_repl) : 0;
     if (drop > ih - in_show) drop = ih - in_show;
     if (drop < 0) drop = 0;
     int log_rows = ih - in_show - drop;
@@ -229,14 +229,14 @@ void repl_pane_paint(App *a) {
     int input_y = 1 + log_rows;
     g_clip_y0 = input_y;
     g_clip_y1 = h - 1;
-    repl_render(&g_repl, 1, input_y - first_input, iw, a->repl_focus, cell, a);
+    repl_render(&g_repl, 1, input_y - first_input, iw, a->console_focus, cell, a);
     g_clip_y0 = 0; g_clip_y1 = h;
 
-    Buf b = a->repl_buf;
+    Buf b = a->console_buf;
     b.len = 0;
     int sx = a->kitty.x > 0 ? a->kitty.x : 1;
     for (int r = 0; r < g_gh; r++) {
-        buf_addf(&b, "\x1b[%d;%dH\x1b[0m", a->repl_row + r, sx);
+        buf_addf(&b, "\x1b[%d;%dH\x1b[0m", a->console_row + r, sx);
         int cur = -1;
         for (int c = 0; c < g_gw; c++) {
             RCell *k = &g_grid[r * g_gw + c];
@@ -253,25 +253,25 @@ void repl_pane_paint(App *a) {
         }
         buf_add(&b, "\x1b[0m", 4);
     }
-    a->repl_buf = b;
+    a->console_buf = b;
 
-    // The same guard draw_status uses: an unchanged pane writes nothing, so a
+    // The same guard draw_status uses: an unchanged console writes nothing, so a
     // repaint never lands in the middle of a frame going out.
-    if (b.len == a->repl_last.len &&
-        (b.len == 0 || memcmp(b.p, a->repl_last.p, b.len) == 0))
+    if (b.len == a->console_last.len &&
+        (b.len == 0 || memcmp(b.p, a->console_last.p, b.len) == 0))
         return;
     writeall(a->term.fd, b.p, b.len);
-    a->repl_last.len = 0;
-    buf_add(&a->repl_last, b.p, b.len);
+    a->console_last.len = 0;
+    buf_add(&a->console_last, b.p, b.len);
 }
 
 // ------------------------------------------------------------------- input
 
 // term_next reports a control byte as its letter plus MOD_CTRL; repl.h wants
 // the raw codepoint, because that is where its emacs bindings live.
-bool repl_pane_key(App *a, Event *ev) {
-    if (!a->repl_focus) return false;
-    repl_pane_init(a);
+bool console_key(App *a, Event *ev) {
+    if (!a->console_focus) return false;
+    console_init(a);
 
     if (ev->type == EV_PASTE) {
         repl_insert_text(&g_repl, a->term.paste.p);
@@ -280,7 +280,7 @@ bool repl_pane_key(App *a, Event *ev) {
     if (ev->type != EV_KEY) return false;
 
     if (ev->key == KEY_PGUP || ev->key == KEY_PGDN) {
-        int page = a->repl_rows > 5 ? a->repl_rows - 4 : 1;
+        int page = a->console_rows > 5 ? a->console_rows - 4 : 1;
         g_log_scroll += ev->key == KEY_PGUP ? page : -page;
         if (g_log_scroll < 0) g_log_scroll = 0;
         if (g_log_scroll > g_log_n) g_log_scroll = g_log_n;
@@ -320,16 +320,29 @@ bool repl_pane_key(App *a, Event *ev) {
 
     ReplResult rc = repl_handle_input(&g_repl, &re);
     if (rc == REPL_UNFOCUS) {
-        a->repl_focus = false;
+        a->console_focus = false;
     } else if (rc == REPL_SUBMIT) {
         const char *line = repl_line(&g_repl);
         if (line && *line) {
             repl_history_add(&g_repl, line);
             char shown[LOG_COLS];
             snprintf(shown, sizeof shown, "> %s", line);
-            repl_pane_log(a, shown);
+            console_log(a, shown);
+            // Javascript before anything else: what is typed goes to the page
+            // unless it opens with one of the commands, which is the reading
+            // devtools has trained everybody to expect. A leading : forces the
+            // command, = forces the javascript, for the handful of words that
+            // could be either.
             char command[4096];
-            snprintf(command, sizeof command, "%s", line[0] == '/' ? line + 1 : line);
+            const char *src = line[0] == '/' ? line + 1 : line;
+            if (*src == ':')
+                snprintf(command, sizeof command, "%s", src + 1);
+            else if (*src == '=')
+                snprintf(command, sizeof command, "js %s", src + 1);
+            else if (script_is_verb_line(src))
+                snprintf(command, sizeof command, "%s", src);
+            else
+                snprintf(command, sizeof command, "js %s", src);
             // Shift+Enter is an editing newline. The command language treats
             // it as whitespace when the whole input is finally submitted.
             for (char *p = command; *p; p++)
@@ -341,16 +354,16 @@ bool repl_pane_key(App *a, Event *ev) {
     return true;
 }
 
-bool repl_pane_mouse(App *a, Event *ev) {
-    if (!a->repl_open || ev->type != EV_MOUSE ||
-        ev->my < a->repl_row || ev->my >= a->repl_row + a->repl_rows)
+bool console_mouse(App *a, Event *ev) {
+    if (!a->console_open || ev->type != EV_MOUSE ||
+        ev->my < a->console_row || ev->my >= a->console_row + a->console_rows)
         return false;
     if (ev->button == 3 || ev->button == 4) {
         g_log_scroll += ev->button == 3 ? 3 : -3;
         if (g_log_scroll < 0) g_log_scroll = 0;
         if (g_log_scroll > g_log_n) g_log_scroll = g_log_n;
     } else if (ev->button == 0 && ev->press) {
-        a->repl_focus = true;
+        a->console_focus = true;
     }
     return true;
 }

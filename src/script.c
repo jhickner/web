@@ -36,6 +36,7 @@ enum { A_NONE, A_ONE, A_TWO, A_REST, A_NUM };
     X("url",      VB_URL,     A_NONE, "print the current url")                 \
     X("title",    VB_TITLE,   A_NONE, "print the page title")                  \
     X("eval",     VB_EVAL,    A_REST, "print the result of a JS expression")   \
+    X("js",       VB_JS,      A_REST, "run javascript, statements and all")    \
     X("echo",     VB_ECHO,    A_REST, "print a literal line")                  \
     X("help",     VB_HELP,    A_NONE, "show every command")                    \
     X("pick",     VB_PICK,    A_NONE, "toggle click-to-copy selectors")        \
@@ -58,7 +59,7 @@ static const Verb VTAB[] = { VERBS(X_ROW) };
 #undef X_ROW
 
 // The verb table, for the REPL's completion dropdown. Handed over a field at a
-// time so the pane does not need this file's types nor this file the pane's.
+// time so the console does not need this file's types nor this file the console's.
 int script_verb_count(void) { return (int)(sizeof VTAB / sizeof *VTAB); }
 const char *script_verb_name(int i) { return VTAB[i].name; }
 const char *script_verb_help(int i) { return VTAB[i].help; }
@@ -84,7 +85,7 @@ static void out_line(App *a, const char *payload) {
         buf_add(&b, "\n", 1);
     }
     if (!a->stdout_tty) writeall(STDOUT_FILENO, b.p, b.len);
-    if (a->repl_open) repl_pane_log(a, payload);
+    if (a->console_open) console_log(a, payload);
     else if (a->stdout_tty) notify(a, payload);
     buf_free(&b);
 }
@@ -93,7 +94,7 @@ static void fail(App *a, const char *why) {
     Script *s = &a->script;
     char msg[4608];
     snprintf(msg, sizeof msg, "error: %s: %s", s->line, why);
-    if (a->repl_open) repl_pane_log(a, msg);
+    if (a->console_open) console_log(a, msg);
     else fprintf(stderr, "web: line %d: %s: %s\n", s->lineno, s->line, why);
     s->failures++;
     s->state = SC_IDLE;
@@ -121,6 +122,21 @@ void script_free(App *a) {
 bool script_busy(const App *a) {
     return a->script.acting || a->script.state != SC_IDLE ||
            a->script.queue.len > 0;
+}
+
+// Whether what was typed opens with a word the command language knows. The console
+// asks before deciding a line is javascript: what a file says is a command is
+// not up for question, but what somebody types mostly is not one.
+bool script_is_verb_line(const char *line) {
+    while (*line == ' ' || *line == '\t') line++;
+    const char *word = line;
+    while (*line && *line != ' ' && *line != '\t') line++;
+    size_t n = (size_t)(line - word);
+    if (!n) return false;
+    for (size_t i = 0; i < sizeof VTAB / sizeof *VTAB; i++)
+        if (strlen(VTAB[i].name) == n && !strncmp(VTAB[i].name, word, n))
+            return true;
+    return false;
 }
 
 void script_push(App *a, const char *line) {
@@ -441,8 +457,8 @@ static void start(App *a) {
 
     switch (VTAB[s->verb].id) {
     case VB_HELP:
-        repl_pane_help(a);
-        if (!a->repl_open)
+        console_help(a);
+        if (!a->console_open)
             for (int i = 0; i < script_verb_count(); i++) {
                 char row[160];
                 snprintf(row, sizeof row, "%-10s %s", VTAB[i].name, VTAB[i].help);
@@ -578,6 +594,21 @@ static void start(App *a) {
         buf_free(&e);
         return;
     }
+
+    case VB_JS: {
+        // Handed to the page's own eval rather than sent as the expression
+        // itself, because a console line is not always an expression: eval
+        // answers with the completion value, so `let x = 2; x * 2` says 4 the
+        // way it would in devtools. The inner quoting is what makes the line a
+        // string to eval; probe quotes the whole thing again for the wire.
+        Buf e = {0};
+        buf_add(&e, "String(eval(\"", 13);
+        json_escape_buf(&e, s->sel);
+        buf_add(&e, "\"))", 3);
+        probe(a, e.p);
+        buf_free(&e);
+        return;
+    }
     }
     fail(a, "not implemented");
 }
@@ -590,7 +621,23 @@ void script_reply(App *a, const char *msg) {
 
     size_t n = 0;
     const char *v = json_eval_str(msg, &n);
-    if (!v) { fail(a, "the page threw"); return; }
+    if (!v) {
+        // A console wants the reason, not the fact. An exception reply carries
+        // the message and the stack under description; the first line of it is
+        // the message, and the rest is where in the page it happened.
+        size_t dn = 0;
+        const char *d = json_str(msg, "description", &dn);
+        char why[400] = "the page threw";
+        if (d && dn) {
+            char raw[400];
+            json_unescape(raw, sizeof raw, d, dn);
+            char *nl = strchr(raw, '\n');
+            if (nl) *nl = 0;
+            snprintf(why, sizeof why, "%s", raw);
+        }
+        fail(a, why);
+        return;
+    }
 
     Buf out = {0};
     buf_reserve(&out, n + 4);
@@ -600,7 +647,7 @@ void script_reply(App *a, const char *msg) {
 
     // eval and the two page properties answer with the value itself; everything
     // that went through the resolver answers with the OK/MISS/ERR grammar.
-    if (id == VB_EVAL || id == VB_URL || id == VB_TITLE) {
+    if (id == VB_EVAL || id == VB_JS || id == VB_URL || id == VB_TITLE) {
         out_line(a, out.p);
         done(a);
         buf_free(&out);

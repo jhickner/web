@@ -87,6 +87,16 @@ int chrome_probe(int port) {
     return ok ? 0 : -1;
 }
 
+// The browser profile is bulk cache, not configuration, so it stays out of
+// ~/.config (which is often a synced dotfiles directory). Worked out without a
+// browser, so that anything wanting to look in there can find it too.
+void chrome_profile_path(char *out, size_t cap) {
+    const char *home = getenv("HOME");
+    const char *cache = getenv("XDG_CACHE_HOME");
+    if (cache && *cache) snprintf(out, cap, "%s/web/profile", cache);
+    else snprintf(out, cap, "%s/.cache/web/profile", home ? home : "/tmp");
+}
+
 static bool pid_alive(pid_t p) {
     if (p <= 0) return false;
     return kill(p, 0) == 0 || errno != ESRCH;
@@ -204,15 +214,7 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
         return -1;
     }
 
-    // The browser profile is bulk cache, not configuration, so it stays out of
-    // ~/.config (which is often a synced dotfiles directory).
-    const char *home = getenv("HOME");
-    const char *cache = getenv("XDG_CACHE_HOME");
-    if (cache && *cache)
-        snprintf(c->profile, sizeof c->profile, "%s/web/profile", cache);
-    else
-        snprintf(c->profile, sizeof c->profile, "%s/.cache/web/profile",
-                 home ? home : "/tmp");
+    chrome_profile_path(c->profile, sizeof c->profile);
     mkdirs(c->profile);
 
     // Only worth adopting a browser we could actually drive. A login window is
