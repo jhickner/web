@@ -63,6 +63,7 @@ typedef struct {
     bool  adopted;      // took over a browser left behind by an earlier run
     bool  foreign;      // attached to one we never started: leave it running
     char  profile[512];
+    char  target[96];   // the page we are driving, so the others stay theirs
     WS    ws;
     int   next_id;
 } Chrome;
@@ -79,6 +80,15 @@ int  chrome_attach(Chrome *c);
 int  chrome_probe(int port);
 int  chrome_user_agent(Chrome *c, char *out, size_t cap);
 void chrome_kill(Chrome *c);
+void chrome_kill_bg(Chrome *c);
+
+// How many page targets belong to somebody else - another `web` sharing this
+// browser, or a window the user opened in it.
+int  chrome_other_pages(Chrome *c);
+void chrome_close_target(Chrome *c);
+
+// Leave a tab behind that holds the browser open for the next run to adopt.
+void chrome_park(Chrome *c);
 
 // Fire-and-forget CDP call; params is a JSON object body without braces.
 int  cdp_call(Chrome *c, const char *method, const char *params_fmt, ...);
@@ -334,7 +344,7 @@ typedef struct {
     char    ua[512];           // chrome's own user agent, headless marker gone
     bool    ua_patch_req;      // this browser predates the flag and needs fixing
     bool    mute;              // start chrome with its audio switched off
-    bool    clear_exit;        // erase the inline block on the way out
+    bool    clear_exit;        // erase the inline block on the way out (default)
     bool    keep;              // leave chrome running so the next start adopts it
 
     // Where a picture can go, and where data can. They are not the same fd, and

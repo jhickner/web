@@ -1693,7 +1693,7 @@ static void usage(void) {
         "  --full      take over the whole terminal instead of drawing a window\n"
         "  --rows N    how many cell rows the window gets\n"
         "  --no-status start with the status line hidden (^S toggles it)\n"
-        "  --clear     erase the window on exit instead of leaving it behind\n"
+        "  --no-clear  leave the window on screen on exit instead of erasing it\n"
         "  --mute      start with the page's audio switched off\n"
         "  --script F  run a command script; - reads stdin\n"
         "  --delay MS  pause between script commands\n"
@@ -1762,6 +1762,28 @@ static void ask_where(App *a) {
         "\"expression\":\"document.title\",\"returnByValue\":true"), RQ_TITLE);
 }
 
+// Let go of the browser. It is ours to shut down unless it was someone else's
+// to begin with or --keep asked for it to outlive us - and unless another run
+// is sharing it, in which case only the tab is ours and the browser goes away
+// with the last of us. Left running and undrivable it would hold the profile
+// and its memory for nothing.
+static void leave_browser(App *a) {
+    Chrome *c = &a->chrome;
+    if (c->foreign) {                    // never ours, not even the tab
+        if (c->ws.fd > 0) ws_close(&c->ws);
+        return;
+    }
+
+    int others = chrome_other_pages(c);
+    if (a->keep) chrome_park(c);          // something for the next run to find
+    if (a->keep || others > 0) {
+        chrome_close_target(c);
+        if (c->ws.fd > 0) ws_close(&c->ws);
+        return;
+    }
+    chrome_kill_bg(c);
+}
+
 // Move onto a browser something else is driving - Playwright's, say - and carry
 // on drawing it. The new one is checked before the old one is let go, so a port
 // with nothing on it costs nothing but the message.
@@ -1780,14 +1802,7 @@ int app_attach(App *a, int port, char *msg, size_t cap) {
         return -1;
     }
 
-    // The browser being left behind is ours to shut down, unless it was someone
-    // else's to begin with or --keep asked for it to outlive us. Left running
-    // and undrivable it would hold the profile and its memory for nothing.
-    if (c->foreign || a->keep) {
-        if (c->ws.fd > 0) ws_close(&c->ws);
-    } else {
-        chrome_kill(c);
-    }
+    leave_browser(a);
 
     c->pid = 0;
     c->adopted = false;
@@ -1850,6 +1865,7 @@ int main(int argc, char **argv) {
     load_state(&a);                   // --zoom below still wins over it
     a.fit_width = true;
     a.inline_mode = true;             // a window in the shell, unless --full
+    a.clear_exit = true;              // the window goes away, unless --no-clear
     bool show = false, login = false, url_given = false, record = false;
     double drain_at = 0;              // when the queue first ran out
     const char *record_path = NULL;
@@ -1879,7 +1895,9 @@ int main(int argc, char **argv) {
             a.want_rows = atoi(argv[++i]);
             a.inline_mode = true;
         } else if (!strcmp(argv[i], "--clear")) {
-            a.clear_exit = true;
+            a.clear_exit = true;       // the default; kept so scripts still work
+        } else if (!strcmp(argv[i], "--no-clear")) {
+            a.clear_exit = false;
         } else if (!strcmp(argv[i], "--no-status")) {
             a.hide_status = true;
         } else if (!strcmp(argv[i], "--show")) {
@@ -2218,6 +2236,7 @@ int main(int argc, char **argv) {
             else if (ev.type == EV_FOCUS) handle_focus(&a, ev.press);
             else if (ev.type == EV_PASTE)
                 handle_paste(&a, a.term.paste.p, a.term.paste.len);
+            if (g_quit) break;      // no frame, and nothing to tell the page
             flush_pending(&a);
             draw_panes(&a);
         }
@@ -2243,8 +2262,7 @@ int main(int argc, char **argv) {
     // Most of a cold start is Chrome coming up. Left running, it holds the
     // profile and the next run adopts it instead of paying for that again. A
     // browser we only attached to is not ours to close at all.
-    if (a.keep || a.chrome.foreign) ws_close(&a.chrome.ws);
-    else chrome_kill(&a.chrome);
+    leave_browser(&a);
     // Into the debug log rather than the terminal: quitting should hand the
     // shell back the way it found it.
     term_log("%u frames drawn, %u duplicates skipped", a.frames, a.skipped);

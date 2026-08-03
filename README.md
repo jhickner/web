@@ -194,7 +194,7 @@ trade every keyboard-driven browser has to make somewhere.
 --zoom F    page magnification (default 1.0)
 --rows N    how many cell rows the window gets
 --no-status start with the status line hidden (^S toggles it)
---clear     erase the window on exit instead of leaving it behind
+--no-clear  leave the window on screen on exit instead of erasing it
 --full      take over the whole terminal instead of drawing a window
 --show      also open a real Chrome window, for debugging
 --mute      start with the page's audio switched off
@@ -425,7 +425,9 @@ and take a look at it with `attach 9222`, typed in the command pane or run from
 a script. Three things follow from it:
 
 - the browser `web` started is shut down, unless `--keep` said otherwise, and
-  the one it attached to is never shut down — quitting leaves it running.
+  the one it attached to is never shut down — quitting leaves it running. The
+  shutdown is polite, so it takes a moment; it is waited out by a background
+  process rather than by the one holding your prompt.
 - the picture needs the frames to match the cells they are drawn into, so the
   device metrics override goes on their page too. Playwright sees that viewport.
 - `--port N` with a browser already answering there takes it over rather than
@@ -438,10 +440,10 @@ By default `web` opens a window where the cursor already is — right under the
 command you ran — and draws there, leaving the shell's screen and scrollback
 intact. Whether that takes any scrolling depends on how far down the screen you
 were, which only the terminal knows, so it is asked rather than assumed.
-Quitting leaves the page behind: the placeholder cells are ordinary text, so the
-picture scrolls up with everything else and stays in your history. `--clear`
-takes it away instead — the block is erased and the prompt comes back on the row
-the command was run from, as though nothing had been drawn.
+Quitting takes the window away again: the block is erased and the prompt comes
+back on the row the command was run from, as though nothing had been drawn.
+`--no-clear` leaves the page behind instead — the placeholder cells are ordinary
+text, so the picture scrolls up with everything else and stays in your history.
 
 ```sh
 ./web --rows 20 news.ycombinator.com
@@ -630,6 +632,16 @@ bulk cache with cookies in it, and it grows. Logins persist between runs. A run
 that dies without cleaning up leaves Chrome holding that profile, so the next
 start adopts the running browser instead of failing — which also makes startup
 after the first almost instant.
+
+Two runs at once share that one browser, so each takes a tab of its own rather
+than the one already open: a shared tab would mean the address typed in one
+window driving the other's screen. The tab gets a browser window of its own as
+well, which is what makes it drawable — Chrome only paints the tab in front, so
+a second tab in the same window screencasts nothing and arrives as a title with
+no picture under it. Quitting closes that tab, and the browser goes with the
+last run to leave. A run started in the moment before the first
+one's Chrome has written down its port waits for it rather than starting a
+second browser on the same profile, which neither of them would survive.
 
 ## Debugging
 

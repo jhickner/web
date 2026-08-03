@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +14,7 @@
 #include <unistd.h>
 #include "web.h"
 
+static int http_req(int port, const char *method, const char *path, Buf *out);
 static int http_get(int port, const char *path, Buf *out);
 
 #define TRACE(...) do { \
@@ -117,6 +119,19 @@ static int adopt_running(Chrome *c) {
     return 0;
 }
 
+// Chrome records "<hostname>-<pid>" in the lock symlink: the process holding
+// this profile, if there still is one.
+static pid_t singleton_pid(const char *profile) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/SingletonLock", profile);
+    char link[256];
+    ssize_t n = readlink(path, link, sizeof link - 1);
+    if (n <= 0) return 0;
+    link[n] = 0;
+    char *dash = strrchr(link, '-');
+    return dash ? (pid_t)atoi(dash + 1) : 0;
+}
+
 int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
                   bool mute, const char *user_agent, bool debug, int port) {
     const char *bin = find_chrome();
@@ -155,16 +170,32 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
         return -1;
     }
 
-    if (debug && adopt_running(c) == 0) {
-        // A pinned port is a promise to whatever is going to connect to it, and
-        // the browser already holding this profile is listening somewhere else.
-        if (port > 0 && c->port != port) {
-            fprintf(stderr, "web: chrome from an earlier run is on port %d, not %d.\n"
-                            "     quit it, or start with --port %d\n",
-                    c->port, port, c->port);
-            return -1;
+    // Two runs started together race for the profile: the first one's Chrome
+    // holds the lock from the moment it starts but writes its port a moment
+    // later, and a second browser started on the same directory in that gap
+    // takes the profile out from under it. A lock with something alive behind
+    // it is worth waiting on rather than breaking.
+    if (debug) {
+        pid_t holder = singleton_pid(c->profile);
+        bool live = holder > 0 && kill(holder, 0) == 0;
+        double deadline = now_sec() + (live ? 3.0 : 0.0);
+        for (;;) {
+            if (adopt_running(c) == 0) {
+                // A pinned port is a promise to whatever is going to connect to
+                // it, and the browser already holding this profile is listening
+                // somewhere else.
+                if (port > 0 && c->port != port) {
+                    fprintf(stderr, "web: chrome from an earlier run is on port %d, not %d.\n"
+                                    "     quit it, or start with --port %d\n",
+                            c->port, port, c->port);
+                    return -1;
+                }
+                return 0;                           // caller navigates it to `url`
+            }
+            if (now_sec() >= deadline) break;
+            struct timespec ts = {0, 20 * 1000000};
+            nanosleep(&ts, NULL);
         }
-        return 0;                                   // caller navigates it to `url`
     }
 
     // A stale port file would be read as this run's port, and a lock left by a
@@ -280,7 +311,7 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
 // One blocking HTTP GET against the debug endpoint. The DevTools server holds
 // the connection open regardless of what we ask for, so the body has to be
 // measured by Content-Length rather than by waiting for EOF.
-static int http_get(int port, const char *path, Buf *out) {
+static int http_req(int port, const char *method, const char *path, Buf *out) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     struct sockaddr_in sa = {0};
@@ -296,8 +327,8 @@ static int http_get(int port, const char *path, Buf *out) {
 
     char req[512];
     int n = snprintf(req, sizeof req,
-                     "GET %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
-                     "Connection: close\r\n\r\n", path, port);
+                     "%s %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                     "Connection: close\r\n\r\n", method, path, port);
     if (writeall(fd, req, (size_t)n) < 0) { close(fd); return -1; }
 
     char tmp[8192];
@@ -321,6 +352,10 @@ static int http_get(int port, const char *path, Buf *out) {
 
     if (header_end) buf_consume(out, header_end);
     return out->len ? 0 : -1;
+}
+
+static int http_get(int port, const char *path, Buf *out) {
+    return http_req(port, "GET", path, out);
 }
 
 // Chrome's own user agent, with the one word that gives it away taken out.
@@ -359,10 +394,99 @@ int chrome_user_agent(Chrome *c, char *out, size_t cap) {
     return patched;      // 1 = this browser is still announcing itself headless
 }
 
+// The path part of the first ws:// debugger URL at or after p.
+static bool ws_path_at(const char *p, char *out, size_t cap) {
+    const char *ws = p ? strstr(p, "ws://") : NULL;
+    if (!ws) return false;
+    const char *slash = strchr(ws + 5, '/');
+    if (!slash) return false;
+    const char *end = strchr(slash, '"');
+    size_t n = end ? (size_t)(end - slash) : strlen(slash);
+    if (n >= cap) return false;
+    memcpy(out, slash, n);
+    out[n] = 0;
+    return true;
+}
+
+// One request on the browser-wide endpoint, answered before we return. Only
+// worth it for the calls that have to happen before there is a page session to
+// make them on.
+static int browser_call(Chrome *c, const char *method, const char *params,
+                        Buf *reply) {
+    Buf resp = {0};
+    char path[256];
+    bool have = http_get(c->port, "/json/version", &resp) == 0 &&
+                ws_path_at(resp.p, path, sizeof path);
+    buf_free(&resp);
+    if (!have) return -1;
+
+    int fd = ws_connect("127.0.0.1", c->port, path);
+    if (fd < 0) return -1;
+    WS ws = {0};
+    ws.fd = fd;
+
+    Buf req = {0};
+    buf_addf(&req, "{\"id\":1,\"method\":\"%s\",\"params\":{%s}}", method, params);
+    int rc = ws_send_text(&ws, req.p, req.len);
+    buf_free(&req);
+
+    double deadline = now_sec() + 5.0;
+    while (rc == 0 && now_sec() < deadline) {
+        struct pollfd p = {ws.fd, POLLIN, 0};
+        if (poll(&p, 1, 50) > 0 && ws_fill(&ws) < 0) break;
+        char *msg;
+        size_t len;
+        if (ws_next(&ws, &msg, &len) != 1) {
+            if (ws.closed) break;
+            continue;
+        }
+        if (json_num(msg, "id", 0) != 1) { ws.msg.len = 0; continue; }
+        buf_add(reply, msg, len);
+        buf_add(reply, "", 1);
+        reply->len--;                       // callers read it as a C string
+        ws_close(&ws);
+        return 0;
+    }
+    ws_close(&ws);
+    return -1;
+}
+
+// A tab of our own, in a window of its own. Two runs share one browser - the
+// second adopts the one the first left listening - and a shared tab means one
+// window's address bar driving the other's screen, and the first quit taking
+// the page out from under both. The separate window is what makes it drawable:
+// Chrome only paints the tab in front, so a second tab in the same window
+// screencasts nothing at all - a title, and no picture under it.
+static int chrome_new_target(Chrome *c, char *out, size_t cap) {
+    Buf reply = {0};
+    int rc = browser_call(c, "Target.createTarget",
+                          "\"url\":\"about:blank\",\"newWindow\":true", &reply);
+    size_t n = 0;
+    const char *id = rc == 0 ? json_str(reply.p, "targetId", &n) : NULL;
+    if (id && n && n + 16 < cap)
+        snprintf(out, cap, "/devtools/page/%.*s", (int)n, id);
+    else
+        id = NULL;
+    buf_free(&reply);
+    if (id) return 0;
+
+    // No window of our own, then, but still a tab of our own: sharing one is
+    // the worse of the two. Everything after the ? is the address, and since
+    // Chrome 111 /json/new answers nothing but PUT.
+    Buf resp = {0};
+    bool ok = http_req(c->port, "PUT", "/json/new?about:blank", &resp) == 0 &&
+              ws_path_at(resp.p, out, cap);
+    buf_free(&resp);
+    return ok ? 0 : -1;
+}
+
 int chrome_attach(Chrome *c) {
     TRACE("attaching on port %d", c->port);
     Buf resp = {0};
     char ws_path[256] = {0};
+
+    if (c->adopted && chrome_new_target(c, ws_path, sizeof ws_path) != 0)
+        TRACE("no tab of our own; sharing the browser's");
 
     double deadline = now_sec() + 10.0;
     while (now_sec() < deadline && !ws_path[0]) {
@@ -371,18 +495,7 @@ int chrome_attach(Chrome *c) {
             // URL of a "page" entry is the next ws:// after its type field.
             const char *p = strstr(resp.p, "\"type\": \"page\"");
             if (!p) p = strstr(resp.p, "\"type\":\"page\"");
-            const char *ws = p ? strstr(p, "ws://") : NULL;
-            if (ws) {
-                const char *slash = strchr(ws + 5, '/');
-                if (slash) {
-                    const char *end = strchr(slash, '"');
-                    size_t n = end ? (size_t)(end - slash) : strlen(slash);
-                    if (n < sizeof ws_path) {
-                        memcpy(ws_path, slash, n);
-                        ws_path[n] = 0;
-                    }
-                }
-            }
+            ws_path_at(p, ws_path, sizeof ws_path);
         }
         if (!ws_path[0]) {
             struct timespec ts = {0, 5 * 1000000};
@@ -395,6 +508,8 @@ int chrome_attach(Chrome *c) {
         return -1;
     }
     TRACE("page target %s", ws_path);
+    const char *id = strrchr(ws_path, '/');
+    snprintf(c->target, sizeof c->target, "%s", id ? id + 1 : "");
 
     int fd = ws_connect("127.0.0.1", c->port, ws_path);
     if (fd < 0) {
@@ -405,6 +520,56 @@ int chrome_attach(Chrome *c) {
     c->ws.fd = fd;
     c->next_id = 1;
     return 0;
+}
+
+// A tab left behind by --keep, holding the browser open for the next run. The
+// address is the marker: a live run is never sitting on it, so a later run can
+// tell a parked browser from one somebody is using.
+#define PARKED_URL   "about:blank#web-parked"
+#define PARKED_QUERY "/json/new?about:blank%23web-parked"
+
+// Page targets that are not ours: another run sharing this browser, or a window
+// the user opened in it. A parked tab belongs to nobody and does not count.
+// Neither does a browser that will not answer, which is the reply that lets the
+// caller go on to shut it down.
+int chrome_other_pages(Chrome *c) {
+    if (c->port <= 0) return 0;
+    Buf resp = {0};
+    if (http_get(c->port, "/json/list", &resp) != 0) { buf_free(&resp); return 0; }
+
+    int n = 0;
+    for (const char *p = resp.p; (p = strstr(p, "\"type\"")) != NULL; p++) {
+        const char *q = p + 6;
+        while (*q == ' ' || *q == ':') q++;
+        if (!strncmp(q, "\"page\"", 6)) n++;   // and not background_page
+    }
+    if (c->target[0] && strstr(resp.p, c->target)) n--;   // ours is in there too
+    for (const char *p = resp.p; (p = strstr(p, PARKED_URL)) != NULL; p++) n--;
+    buf_free(&resp);
+    return n > 0 ? n : 0;
+}
+
+void chrome_park(Chrome *c) {
+    if (c->port <= 0) return;
+    Buf list = {0};
+    bool have = http_get(c->port, "/json/list", &list) == 0 &&
+                strstr(list.p, PARKED_URL) != NULL;
+    buf_free(&list);
+    if (have) return;                         // one is already holding it open
+
+    Buf resp = {0};
+    http_req(c->port, "PUT", PARKED_QUERY, &resp);
+    buf_free(&resp);
+}
+
+void chrome_close_target(Chrome *c) {
+    if (c->port <= 0 || !c->target[0]) return;
+    char path[160];
+    snprintf(path, sizeof path, "/json/close/%s", c->target);
+    Buf resp = {0};
+    http_get(c->port, path, &resp);
+    buf_free(&resp);
+    c->target[0] = 0;
 }
 
 // True until the browser is really gone. An adopted browser is not our child,
@@ -438,7 +603,7 @@ void chrome_kill(Chrome *c) {
         // cookie store. The group only gets involved as a last resort below.
         kill(c->pid, SIGTERM);
         for (int i = 0; i < 40; i++) {
-            if (waitpid(c->pid, NULL, WNOHANG) == c->pid) { c->pid = 0; break; }
+            if (!chrome_alive(c)) { c->pid = 0; break; }
             struct timespec ts = {0, 25 * 1000000};
             nanosleep(&ts, NULL);
         }
@@ -449,6 +614,45 @@ void chrome_kill(Chrome *c) {
         }
     }
     if (c->ws.fd > 0) ws_close(&c->ws);
+}
+
+// The same shutdown, waited out by a forked child instead of by us. A polite
+// close is seconds of nothing happening on screen, and by this point the
+// terminal already belongs to the shell again - the only thing those seconds
+// cost is the prompt coming back.
+void chrome_kill_bg(Chrome *c) {
+    if (c->pid <= 0) {
+        chrome_kill(c);                 // nothing to wait for; just the socket
+        return;
+    }
+
+    // A browser on its way out must not be adopted by the next run, which
+    // would then have this one's killer come for it a few seconds later.
+    char path[600];
+    snprintf(path, sizeof path, "%s/DevToolsActivePort", c->profile);
+    unlink(path);
+
+    pid_t pid = fork();
+    if (pid < 0) { chrome_kill(c); return; }
+    if (pid == 0) {
+        // Detached from the terminal and from the shell's pipeline: anything
+        // still held open here is something downstream is waiting on.
+        setsid();
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > 2) close(devnull);
+        }
+        chrome_kill(c);
+        _exit(0);
+    }
+
+    // Ours is only a copy of the socket; the child is holding the one that
+    // carries the close request.
+    if (c->ws.fd > 0) ws_close(&c->ws);
+    c->pid = 0;
 }
 
 int cdp_vcall(Chrome *c, const char *method, const char *params_fmt, va_list ap) {
