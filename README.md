@@ -56,6 +56,7 @@ While reading:
 | `space` / `b` | a screen |
 | `gg` / `G` | top / bottom of the page |
 | `[` / `]` | zoom out / in — or resize the window, inline |
+| `shift`+`↑↓←→` | drag the window's bottom right corner (`U`/`D`/`L`/`R` too) |
 | `w` / `W` | step the width the page is told it has |
 | `s` | render scale: 1x, 2x, 3x |
 | `t` | frame transport: png, then two jpeg settings that only time it |
@@ -468,9 +469,21 @@ the top edge where it is and simply owns fewer rows, so the history above never
 moves. The height you settle on is kept for the next run, and comes back down if
 that one is in a shorter terminal. `alt+=` and `alt+-` still zoom either way.
 
+Shift and an arrow take the two edges separately, which is the same corner
+dragged by hand: `shift+↓` and `shift+→` let the window out, `shift+↑` and
+`shift+←` take it back. The top left stays where it is, so the window only ever
+grows down and to the right, and the shell's history above it never moves. A
+column is a smaller step than a row — cells are about twice as tall as they are
+wide — so the sideways keys move two at a time. Until one of them is pressed the
+width follows the height at the proportion above; after that it is yours, and
+the height keys stop changing it. `U`, `D`, `L` and `R` do the same thing, for
+terminals that keep the shifted arrows for themselves. Both numbers are kept for
+the next run.
+
 `--full` gives up the window and takes the whole terminal on the alternate
 screen instead, restoring it on the way out. There is no box to resize there, so
-`[` and `]` go back to zooming.
+`[` and `]` go back to zooming, and the corner keys say so rather than doing
+nothing.
 
 ## Zoom
 

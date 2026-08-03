@@ -171,6 +171,18 @@ void term_reserve_inline(Term *t, int rows) {
     t->inline_rows = rows;
 }
 
+// Blank every row the block owns. The placeholder cells are ordinary text, so
+// a window that narrows leaves its old right-hand edge behind until something
+// writes over it - and nothing else will.
+void term_clear_inline(Term *t) {
+    if (!t->inline_mode || t->inline_rows < 1) return;
+    char buf[32];
+    for (int i = 0; i < t->inline_rows; i++) {
+        int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[2K", t->inline_origin + i);
+        writeall(t->fd, buf, (size_t)n);
+    }
+}
+
 // Regrow or shrink the reserved block in place. The caller drops the image
 // first: the rows it lives on are about to mean something else, and a picture
 // left addressed to them survives as a smear the terminal will not clean up.
@@ -180,11 +192,8 @@ void term_resize_inline(Term *t, int rows) {
     if (t->inline_rows < 1) { term_reserve_inline(t, rows); return; }
     if (rows == t->inline_rows) return;
 
+    term_clear_inline(t);
     char buf[32];
-    for (int i = 0; i < t->inline_rows; i++) {
-        int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[2K", t->inline_origin + i);
-        writeall(t->fd, buf, (size_t)n);
-    }
 
     // Shrinking keeps the origin and simply owns fewer rows. Scrolling the
     // difference away instead would drag the shell's history up with it.

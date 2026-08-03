@@ -271,13 +271,29 @@ void record_line(App *a, const char *fmt, ...) {
 // own rather than the terminal's. Cells are taller than they are wide, so the
 // proportion has to be struck in pixels or the box comes out square.
 #define BOX_ASPECT (16.0 / 10.0)
+#define BOX_MIN_COLS 10
+
+// A cell is about twice as tall as it is wide, so a column is a smaller step
+// than a row. Two of them move the edge about as far as one row moves the
+// bottom, which is what makes the two directions feel like the same key.
+#define BOX_COL_STEP 2
 
 static int box_cols_for(App *a, int rows) {
     Term *t = &a->term;
     int want = (int)((double)(rows * t->cell_h) * BOX_ASPECT / t->cell_w + 0.5);
     if (want > t->cols) want = t->cols;
-    if (want < 10) want = 10;
+    if (want < BOX_MIN_COLS) want = BOX_MIN_COLS;
     return want;
+}
+
+// The width the window is actually drawn at: whatever was asked for sideways,
+// or the proportion a window opens with until something asks.
+static int box_cols_now(App *a, int rows) {
+    if (a->box_cols <= 0) return box_cols_for(a, rows);
+    int cols = a->box_cols;
+    if (cols > a->term.cols) cols = a->term.cols;   // the terminal may have shrunk
+    if (cols < BOX_MIN_COLS) cols = BOX_MIN_COLS;
+    return cols;
 }
 
 // Asking again is what makes Chrome hand over a fresh frame, so this is how
@@ -305,7 +321,7 @@ void relayout(App *a) {
         if (a->box_rows > max_rows) a->box_rows = max_rows;
         if (a->box_rows < 2) a->box_rows = 2;
         a->img_rows = a->box_rows;
-        rect_cols = box_cols_for(a, a->img_rows);
+        rect_cols = box_cols_now(a, a->img_rows);
         // Keep the whole block, status line included, on the screen. A block
         // whose last row falls past the bottom scrolls the terminal as it is
         // drawn, which lands half the picture at the top and half at the
@@ -644,6 +660,9 @@ static void load_state(App *a) {
         } else if (!strncmp(line, "rows=", 5)) {
             int r = atoi(line + 5);
             if (r >= 2 && r <= 500) a->want_rows = r;
+        } else if (!strncmp(line, "cols=", 5)) {
+            int c = atoi(line + 5);
+            if (c >= BOX_MIN_COLS && c <= 2000) a->want_cols = c;
         } else if (!strncmp(line, "ua=", 3) && line[3]) {
             snprintf(a->ua, sizeof a->ua, "%s", line + 3);
         } else if (!strncmp(line, "recolor=", 8)) {
@@ -674,6 +693,11 @@ static void save_state(App *a) {
     // the inline one through rather than dropping it.
     int rows = a->box_rows > 0 ? a->box_rows : a->want_rows;
     if (rows > 0) fprintf(f, "rows=%d\n", rows);
+    // Only a width that was asked for. Left out, the window opens at the
+    // proportion it always has, which is the right answer for a terminal that
+    // is not the one the number came from.
+    int cols = a->box_cols > 0 ? a->box_cols : a->want_cols;
+    if (cols > 0) fprintf(f, "cols=%d\n", cols);
     fprintf(f, "recolor=%s\n", recolor_mode_name(a->recolor));
     fprintf(f, "recolor_strength=%.2f\n", a->recolor_strength);
     // What the file said, not what this run is doing: --no-pause is for one
@@ -716,18 +740,41 @@ static void cycle_width(App *a, int step) {
 
 // Resize the inline window. The page is told about the new size the same way it
 // would be told about a dragged window corner: the box sets the cell rect, the
-// cell rect sets the viewport, and the layout follows from there.
-static void resize_box(App *a, int delta) {
+// cell rect sets the viewport, and the layout follows from there. The corner
+// being dragged is the bottom right one - the window keeps the row it opened
+// on, and grows down and to the right from there.
+static void resize_box(App *a, int drows, int dcols) {
+    if (!a->inline_mode) {
+        notify(a, "--full has no window to resize");
+        return;
+    }
+    Term *t = &a->term;
     int status = a->status_open ? 1 : 0;
-    int want = a->box_rows + delta;
-    if (want < 2) want = 2;
-    if (want > a->term.rows - status) want = a->term.rows - status;
-    if (want == a->box_rows) return;
 
-    a->box_rows = want;
-    kitty_clear(&a->kitty);            // the rows underneath are about to move
-    term_resize_inline(&a->term, want + status);   // the status line sits below
+    int rows = a->box_rows + drows;
+    if (rows < 2) rows = 2;
+    if (rows > t->rows - status) rows = t->rows - status;
+
+    int was_cols = box_cols_now(a, a->box_rows);
+    int cols = box_cols_now(a, rows) + dcols;
+    if (cols < BOX_MIN_COLS) cols = BOX_MIN_COLS;
+    if (cols > t->cols) cols = t->cols;
+    if (rows == a->box_rows && cols == was_cols) return;
+
+    a->box_rows = rows;
+    // Only a sideways nudge pins the width. Until one arrives the window keeps
+    // its proportion as it grows, which is what makes the height key alone
+    // behave the way it always has.
+    if (dcols) a->box_cols = cols;
+
+    kitty_clear(&a->kitty);            // the image those cells named is going
+    term_clear_inline(t);              // and so are the cells that named it
+    term_resize_inline(t, rows + status);   // the status line sits below
     a->status_last.len = 0;
+    // The cells were just blanked, so the next frame has to land whatever it
+    // looks like: a page that resizes to the same picture would otherwise be
+    // dropped as a duplicate and leave the window empty until it moved.
+    a->last_hash = 0;
     relayout(a);
     save_state(a);
 
@@ -1300,6 +1347,18 @@ static void handle_key(App *a, Event *ev) {
 
         if (a->pending_g && ev->key != 'g') a->pending_g = false;
 
+        // Shift and an arrow drag the window's bottom right corner: down and
+        // right let it out, up and left take it back. Taken before the table
+        // below, where the same arrows without shift scroll and go back.
+        if (ev->mods & MOD_SHIFT) {
+            switch (ev->key) {
+            case KEY_DOWN:  resize_box(a, +1, 0); return;
+            case KEY_UP:    resize_box(a, -1, 0); return;
+            case KEY_RIGHT: resize_box(a, 0, +BOX_COL_STEP); return;
+            case KEY_LEFT:  resize_box(a, 0, -BOX_COL_STEP); return;
+            }
+        }
+
         switch (ev->key) {
         // Chrome moves 40 CSS pixels per arrow press; matching it means a page
         // scrolls here at the speed it does in a window.
@@ -1335,11 +1394,16 @@ static void handle_key(App *a, Event *ev) {
         // screen there is no window to resize and they zoom instead. alt+= and
         // alt+- zoom either way.
         case '[':
-            if (a->inline_mode) resize_box(a, -1); else zoom_by(a, 1.0 / 1.25);
+            if (a->inline_mode) resize_box(a, -1, 0); else zoom_by(a, 1.0 / 1.25);
             return;
         case ']':
-            if (a->inline_mode) resize_box(a, +1); else zoom_by(a, 1.25);
+            if (a->inline_mode) resize_box(a, +1, 0); else zoom_by(a, 1.25);
             return;
+        // The same four, for a terminal that keeps the shifted arrows to itself.
+        case 'D': resize_box(a, +1, 0); return;
+        case 'U': resize_box(a, -1, 0); return;
+        case 'R': resize_box(a, 0, +BOX_COL_STEP); return;
+        case 'L': resize_box(a, 0, -BOX_COL_STEP); return;
         case 'w': cycle_width(a, +1); return;
         case 'W': cycle_width(a, -1); return;
         case 's': cycle_scale(a);     return;
@@ -2085,6 +2149,10 @@ int main(int argc, char **argv) {
         if (rows < 4) rows = 4;
         term_reserve_inline(&a.term, rows);
         a.box_rows = rows - status;
+        // A width narrower than this terminal, or nothing at all and the
+        // proportion decides. Either way it is the same rule the resize keys
+        // work under, so relayout is left to apply it.
+        if (a.want_cols > 0) a.box_cols = a.want_cols;
     }
     g_app = &a;
     g_input_pump = pump_input;
