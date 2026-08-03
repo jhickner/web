@@ -61,6 +61,7 @@ While reading:
 | `s` | render scale: 1x, 2x, 3x |
 | `t` | frame transport: png, then two jpeg settings that only time it |
 | `/` | find in page, then `n` / `N` for next and previous |
+| `P` | picking: click the page for a CSS selector, into the console |
 | `i` | hand the keyboard to the page |
 | `:` | open the console |
 | `esc` | take it back |
@@ -199,10 +200,10 @@ trade every keyboard-driven browser has to make somewhere.
 --full      take over the whole terminal instead of drawing a window
 --show      also open a real Chrome window, for debugging
 --mute      start with the page's audio switched off
---script F  run a command script; `-` reads stdin
---delay MS  pause between script commands
---step      wait for a key between script commands
---timeout S how long a command waits before giving up (default 5)
+--eval JS   run javascript in the page and print what it answers
+--delay MS  pause between lines of piped javascript
+--step      wait for a key between those lines
+--timeout S how long a line waits before giving up (default 5)
 --json      script output as one JSON object per value
 --recolor M map the page onto your terminal's colours: off, hue, duotone, tint
 --recolor-strength F   how far towards it, 0..1 (default 1)
@@ -213,12 +214,9 @@ trade every keyboard-driven browser has to make somewhere.
 --exec CMD  run CMD against this window, its output in the console
 --port N    fix Chrome's devtools port instead of letting it pick one
 --no-pause  keep drawing while the terminal is not focused
---record[=F] write what you do to the page out as commands
---replay F  run a recording back; `-` reads stdin
 ```
 
-With no address `web` starts blank, so a session can begin from nothing —
-which is where a recording usually wants to start.
+With no address `web` starts blank, so a session can begin from nothing.
 
 Most of a start is Chrome coming up: about half a second, against thirty
 milliseconds for everything else. `--keep` leaves the browser holding the
@@ -228,195 +226,71 @@ kill it.
 
 ## Driving it
 
-`web` reads a small command language, so a browser you were watching can also be
-one you script. The picture keeps drawing the whole way through - the script is
-its own demonstration, which is the thing headed automation does badly over ssh.
+The console and `--eval` are the same runner, and what they run is JavaScript
+against the page:
 
 ```sh
-./web --script login.web
-printf 'goto example.com\ntext h1\n' | ./web        # stdin, when it is not a tty
+./web --eval 'document.title' example.com
+./web example.com < check.js                     # a file needs no flag
+echo 'document.links.length' | ./web --json example.com
 ```
 
-```
-goto duckduckgo.com
-wait-for "input[name=q]"
-fill "input[name=q]" terminal web browser
-press Enter
-wait 2000
-text "role=heading"
-```
+Piped stdin is read a line at a time whenever it is not a terminal, so a file of
+javascript is just a redirect and there is no script flag to remember.
 
-Values go to **stdout**, one per line, while the page goes to the terminal - so
-the two never collide and `./web --script s.web | jq` works. `--json` wraps each
-value in an object instead. A command that cannot be satisfied writes to stderr
-and the process exits non-zero, so a script fails like any other program.
-
-| | |
-|---|---|
-| `goto U` | navigate; a bare phrase becomes a search, a real path becomes a file |
-| `back` `forward` `reload` | history |
-| `wait N` | pause N ms |
-| `wait-for S` / `wait-gone S` | until a selector is there, or is not |
-| `click S` | click the first visible match |
-| `fill S TEXT` | focus a field and replace its contents |
-| `type TEXT` | type into whatever has focus |
-| `press K` | `Enter`, `Tab`, `ArrowDown`, `ctrl+a` |
-| `scroll N` \| `top` \| `bottom` | scroll |
-| `text S` / `html S` / `attr S N` / `count S` | read the page |
-| `url` `title` | where we are |
-| `eval JS` | the value of one expression |
-| `js JS` | javascript, statements and all — the console's default reading |
-| `echo TEXT` | a literal line |
-| `help` | list every command in the console |
-| `pick` | toggle click-to-copy selectors |
-| `record on` \| `off` | echo what you do as commands |
-| `attach N` | drive the Chrome on devtools port N instead |
-| `stop` | throw away whatever is queued |
-
-`--delay MS` slows the run down to watch it, and `--step` waits for a key
-between commands.
-
-### Selectors
-
-Playwright's shape, small enough to hold in your head, resolved by one script
-injected with every call:
+Each line goes to the page's own `eval`, so it does not have to be an
+expression — the completion value is the answer, the way it is in devtools:
 
 ```
-click "Sign in"                     a bare phrase is matched as text
-click "button.primary"              anything that parses as CSS is CSS
-click "text=Learn more"             explicit, and case-insensitive
-click 'text="Learn more"'           quoted means exactly that
-click "role=button[name=Submit]"    by role and accessible name
-click ".row >> nth=2 >> a"          chained, and indexed
+document.title
+let n = document.links.length; n * 2
+location.href = "https://example.org"
+document.querySelector("h1").textContent
 ```
 
-`text=` matches the *deepest* element containing the phrase, so it lands on the
-link rather than on the `<body>` that also contains it. `role=` reads an
-explicit `role` attribute first and falls back to the implicit one for the tags
-that have one.
+Values go to **stdout**, one per line, while the page goes to the terminal — so
+the two never collide and `./web example.com < s.js | jq` works. `--json` wraps each
+value in an object with the line that produced it. A line that throws prints the
+exception to stderr and the process exits non-zero, so a script fails like any
+other program. `--delay MS` slows the run down to watch it, `--step` waits for a
+key between lines, and `--timeout S` is how long one line may take.
 
-Every verb that names an element waits for it, the way Playwright does: a
-selector that is not there yet, is not visible yet, or has something on top of
-it is asked again until `--timeout` runs out. Most of the flakiness of driving a
-browser lives in that gap.
+A line that starts a navigation is not over until the page has arrived: the next
+line would otherwise run against a document on its way out.
 
-Clicks are dispatched as real mouse events at the element's centre rather than
-`element.click()`. They are trusted, they leave the hover and focus states a
-click leaves - and those are what make the run visible in the picture.
+There is deliberately **no command language**. Selectors, waiting and real input
+events are a real problem, and things that already solve it are one flag away:
+`--exec` hands this window to a program with the endpoint in its environment,
+`examples/cdp.mjs` does the job in standard library, and Playwright does it
+properly. Those are the two sections below.
 
 ### The console
 
 `:` while reading, or `^X` at any time, opens a line editor under the page —
-and either one puts it away again. It has history, `^R` search, emacs kill
-bindings and a completion dropdown: type `/` to see every verb with its help.
-`esc` is the narrower move, handing the keyboard back with the console still
-up — as does clicking the page, so a click into a form field can be typed into.
+and either one puts it away again. It has history, `^R` search and emacs kill
+bindings. `esc` is the narrower move, handing the keyboard back with the console
+still up — as does clicking the page, so a click into a form field can be typed
+into.
 
-It is a **javascript** console before it is a command line. A line that does not
-open with one of the commands above goes to the page, the way it would in
-devtools — statements included, since it is the page's own `eval` that runs it
-and the completion value is what comes back:
+What you type is JavaScript, evaluated in the page. There is nothing else it
+could be:
 
 ```
 > document.querySelectorAll('a').length
 42
 > let seen = new Set(); for (const a of document.links) seen.add(a.host); [...seen]
 news.ycombinator.com,github.com
-> goto example.com
+> location.href = 'https://example.com'
 ```
 
-A leading `:` forces the command reading and `=` forces the javascript, for the
-handful of words that could be either. What a *file* says is never in question:
-scripts and recordings are commands only, so a typo there is still an error
-rather than a page throwing.
+Lines join the same queue `--eval` uses, so one can be dropped in behind a run
+already in progress and it simply happens in turn.
 
-Lines typed there join the same queue a script uses, so one can be dropped in
-behind a run already in progress and it simply happens in turn. `stop` clears
-what is waiting.
-
-`help` prints every command in the console. `pick` turns selector picking on and
-off: while it is on, clicking the page writes a readable `role=...` selector
-(or a unique CSS selector) to the console instead of activating the element.
-Use Shift+Enter for another input line, Page Up/Page Down or the mouse wheel to
-scroll the transcript, and Enter to run the whole multiline command.
-
-### Recording what you do
-
-The command language read backwards: browse by hand and `web` writes down the
-commands that would do it again. `--record` starts a session recording, and
-`record on` / `record off` turns it on and off from the console at any point.
-
-```sh
-./web --record=flow.web            # starts blank; browse, then ^Q
-./web --record=flow.web example.com
-./web --replay flow.web            # and watch it happen again
-```
-
-The file comes attached to the flag rather than after it, so `web --record
-example.com` stays a recording *of* example.com. Without one, recorded lines go
-where script values go — to stdout when that is not the terminal the page is on,
-and into the console when it is — so `./web --record > flow.web` works too.
-
-`--replay` runs one back — `--script` under the name that pairs with `--record`;
-`--delay MS` and `--step` slow it to a watchable pace.
-
-A script does not exit the moment its last command returns. The last thing a
-recording does is usually the thing worth seeing, and leaving on the load event
-means leaving before the frame carrying it has been drawn. So the exit waits for
-the page to settle: nothing loading, and no frame that differs from the one on
-screen for half a second. That is capped at three, because a page with something
-animating on it never goes quiet at all. Nothing is timed against the clock, so
-a slow page gets what it needs and a quick one is not held up.
-
-To *assert* an outcome rather than wait for one, say what it should be —
-`wait-for "Bad login"` fails the replay if that text never turns up, and it is
-the line to add by hand when a recording is meant to be a test. Recorded lines also
-land in the console's transcript and history even while it is closed, so `^X` after
-a session shows what was written down, and the up arrow brings a line back to
-edit and run again.
-
-```
-goto file:///tmp/signin.html
-wait-for "role=link[name=Sign in]"
-click "role=link[name=Sign in]"
-wait-for "#q"
-fill "#q" hello
-press Enter
-wait 4400
-scroll 183
-```
-
-What gets written down:
-
-- **clicks**, as the selector the picker would have given you. A click into a
-  text field is not one: `fill` focuses the field itself, so recording both
-  would click it twice.
-- **edits**, as one `fill` at the end of the edit rather than a `type` per
-  keystroke. The pending edit goes out before any `press`, because the Enter
-  that submits a form arrives before the form has gone anywhere.
-- **keys** that are not typing — `press Enter`, `press Tab`, `press ctrl+a`.
-- **addresses you asked for**, from the address bar or `goto`, plus `back`,
-  `forward` and `reload`. A page the site moves to on its own is not recorded:
-  it is already the consequence of the click above it, and writing it down
-  would make the replay jump straight there without ever doing the click.
-- **scrolls**, added up per burst — a wheel is a stream of notches, and a line
-  per notch is not a recording of anything.
-- **pauses**, as `wait MS`. A gap long enough to have been a decision — a
-  second or more — is part of what happened, and a replay that skips it is not
-  the same run. Rounded to a tenth of a second and capped at ten, so walking
-  away does not become a `wait 400000`.
-- **page loads**, as `wait-for` on the selector the next action is about to
-  use. That is the deterministic version of a wait: the replay holds until the
-  element is really there, however long the load takes *this* time, instead of
-  waiting out a guess made on the day it was recorded. It stands in for the
-  pause, so no blind `wait` goes out beside it. When the next thing is not an
-  element — a scroll, a key — the measured pause is kept instead, however short.
-
-A `<select>` comes out as a `#` comment: nothing in the command language sets a
-dropdown, so the line says what happened without pretending to replay it.
-Anything the script runner is doing is left out — it came from a script
-already — so `record` and a running script do not talk over each other, and
-recording a replay gives you an empty file rather than a copy.
+`P` while reading turns **picking** on and off. While it is on, clicking the
+page writes a CSS selector for whatever you hit into the console instead of
+activating it — shortest thing that finds it again, ready to paste into a
+`document.querySelector`. Use Shift+Enter for another input line, Page
+Up/Page Down or the mouse wheel to scroll the transcript, and Enter to run.
 
 ### Sharing the browser with Playwright
 

@@ -241,37 +241,26 @@ typedef struct { int id, kind; } Req;
 // one command at a time and at most one CDP call, so this is the whole of it.
 enum {
     SC_IDLE,      // nothing running; the queue may still have lines in it
-    SC_PROBE,     // about to ask the page a question
-    SC_WAIT,      // that question is out; the reply drives what happens next
-    SC_ACT,       // the answer came back; dispatch the real input now
-    SC_NAV,       // waiting for the page to finish loading
-    SC_SETTLE,    // input dispatched; give the page a moment before moving on
+    SC_WAIT,      // a line is out at the page; its reply is the value
+    SC_NAV,       // that line started a load, and the next one waits for it
 };
 
 typedef struct {
-    Buf      queue;         // pending command lines, '\n' separated, FIFO
-    char     line[4096];    // the one running now, for error messages
+    Buf      queue;         // pending lines of javascript, '\n' separated, FIFO
+    char     line[4096];    // the one running now, for errors and --json
     int      lineno;
 
-    int      verb;
-    char     sel[1024];     // first argument: selector, url, key name
-    char     txt[4096];     // second argument: text, attribute name
-    double   num;
-
-    char     act[16];       // what the resolver was last asked to do
-    int      px, py;        // where it said to click, in CSS pixels
-
     int      state;
-    bool     acting;        // a line is being dispatched right now
-    double   deadline;      // give up on the whole command here
-    double   next_at;       // re-probe, or the settle expires
-    unsigned nav_seq;       // load_seq when a navigation verb started
+    double   deadline;      // give up on the line in flight here
+    double   next_at;       // when the delay after the last one expires
+    unsigned nav_seq;       // load_seq when the line that is loading started
 
     double   timeout;       // --timeout, seconds
     double   delay;         // --delay between commands, seconds
     bool     step;          // --step: a key between commands
     bool     stepping;      // parked on that key now
     bool     json;          // --json output
+    bool     from_file;     // --script, so a failure stops the rest of it
     bool     drain_exit;    // a script was the only source: exit when it runs out
     int      failures;
 } Script;
@@ -378,19 +367,7 @@ typedef struct {
     // singleton, and keeping it there saves including its header everywhere.
     bool    console_open;         // drawn below the page
     bool    console_focus;        // and holding the keyboard
-    bool    selector_pick;     // clicks report selectors instead of reaching the page
-
-    // Codegen: what is being done to the page, written out as the commands
-    // that would do it again.
-    bool    recording;
-    int     record_fd;             // --record=FILE, or -1 for stdout and the pane
-    char    record_script_id[32];  // the document-start recorder now installed
-    int     record_scroll;         // notches waiting to go out as one step
-    double  record_scroll_at;      // when the last of them arrived
-    double  record_scroll_from;    // and when the burst started
-    double  record_last_at;        // when the last line was written down
-    double  record_load_at;        // when the page that is up now finished
-    bool    record_navigated;      // and whether that was since the last line
+    bool    selector_pick;        // clicks report a selector instead of reaching the page
     int     console_rows;         // how many rows it occupies
     int     console_row;          // 1-based row it starts on
     Buf     console_buf, console_last;
@@ -410,12 +387,6 @@ void notify(App *a, const char *s);
 // write what happened into msg. 0 = attached.
 int  app_attach(App *a, int port, char *msg, size_t cap);
 
-// Recording. mode: 1 on, 0 off, -1 toggle. record_line writes one command out
-// the way script values go out; record_tick lets a held-back scroll expire.
-void record_set(App *a, int mode);
-void record_line(App *a, const char *fmt, ...);
-void record_tick(App *a);
-
 void navigate(App *a, const char *raw);
 void run_js(App *a, const char *js);
 void relayout(App *a);
@@ -430,18 +401,14 @@ bool special_key(App *a, int key, int mods);
 void script_init(App *a);
 void script_free(App *a);
 
-// Queue one line. The source does not matter: a file, a pipe and the REPL all
-// arrive here, which is what lets a typed command fall in behind a running
-// script without either end knowing about the other.
+// Queue one line of javascript. The source does not matter: a file, a pipe and
+// the console all arrive here, which is what lets a typed line fall in behind a
+// running script without either end knowing about the other.
 void script_push(App *a, const char *line);
 int  script_load(App *a, const char *path);   // "-" or NULL reads stdin
 bool script_busy(const App *a);
 
-// True when a line opens with a word the command language knows, which is how
-// the pane tells a command from the javascript it otherwise assumes.
-bool script_is_verb_line(const char *line);
-
-// Called once per pass of the main loop; drives the command in flight.
+// Called once per pass of the main loop; drives the line in flight.
 void script_step(App *a);
 
 // How long the loop may sleep, in ms, or -1 when the runner wants nothing.
@@ -450,12 +417,7 @@ int  script_wait_ms(const App *a);
 // A reply the runner asked for.
 void script_reply(App *a, const char *msg);
 
-// The verb table, for the pane's completion dropdown.
-int         script_verb_count(void);
-const char *script_verb_name(int i);
-const char *script_verb_help(int i);
-
-// ---------------------------------------------------------------- repl pane
+// ---------------------------------------------------------------- console
 
 void console_init(App *a);
 void console_free(App *a);
@@ -466,6 +428,5 @@ bool console_mouse(App *a, Event *ev);// transcript wheel/click handling
 void console_paint(App *a);
 void console_log(App *a, const char *line);
 void console_history_add(App *a, const char *line);
-void console_help(App *a);
 
 #endif

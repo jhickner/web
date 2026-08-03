@@ -19,8 +19,6 @@
 typedef struct { uint32_t cp; uint8_t style; } RCell;
 
 static Repl        g_repl;
-static ReplCommand g_cmds[64];
-static int         g_ncmds;
 static bool        g_ready;
 
 static char   g_log[LOG_MAX][LOG_COLS];
@@ -35,20 +33,9 @@ static int    g_clip_y0, g_clip_y1;
 
 void console_init(App *a) {
     if (g_ready) return;
-    // repl.h opens its dropdown for a token starting with '/', so the names go
-    // in with one. A bare `goto x` still runs - the slash is stripped on the way
-    // to the queue - so '/' simply means "show me what there is".
-    static char names[64][24];
-    int n = script_verb_count();
-    if (n > (int)(sizeof g_cmds / sizeof *g_cmds)) n = (int)(sizeof g_cmds / sizeof *g_cmds);
-    for (int i = 0; i < n; i++) {
-        snprintf(names[i], sizeof names[i], "/%s", script_verb_name(i));
-        g_cmds[i].name = names[i];
-        g_cmds[i].desc = script_verb_help(i);
-        g_cmds[i].args = NULL;
-    }
-    g_ncmds = n;
-    repl_init(&g_repl, g_cmds, g_ncmds);
+    // Nothing to complete: what is typed here is javascript, and the page's own
+    // names are not ours to know without asking it about every keystroke.
+    repl_init(&g_repl, NULL, 0);
     g_ready = true;
 }
 
@@ -126,15 +113,6 @@ void console_log(App *a, const char *line) {
     g_log_scroll = 0;                // new output follows the tail, like a shell
 }
 
-void console_help(App *a) {
-    for (int i = 0; i < script_verb_count(); i++) {
-        char row[160];
-        snprintf(row, sizeof row, "%-10s %s",
-                 script_verb_name(i), script_verb_help(i));
-        console_log(a, row);
-    }
-}
-
 // ------------------------------------------------------------------- paint
 
 static void cell(void *ctx, int x, int y, uint32_t cp, ReplStyle st) {
@@ -207,7 +185,7 @@ void console_paint(App *a) {
         cell(a, 0, y, 0x2502, REPL_STYLE_DIM);
         cell(a, w - 1, y, 0x2502, REPL_STYLE_DIM);
     }
-    const char *title = a->selector_pick ? " REPL - PICKING " : " REPL ";
+    static const char title[] = " CONSOLE ";
     for (int x = 0; title[x] && x + 2 < w - 1; x++)
         cell(a, x + 2, 0, (unsigned char)title[x], REPL_STYLE_PROMPT);
 
@@ -328,21 +306,9 @@ bool console_key(App *a, Event *ev) {
             char shown[LOG_COLS];
             snprintf(shown, sizeof shown, "> %s", line);
             console_log(a, shown);
-            // Javascript before anything else: what is typed goes to the page
-            // unless it opens with one of the commands, which is the reading
-            // devtools has trained everybody to expect. A leading : forces the
-            // command, = forces the javascript, for the handful of words that
-            // could be either.
+            // Javascript, whatever it is. There is nothing else it could be.
             char command[4096];
-            const char *src = line[0] == '/' ? line + 1 : line;
-            if (*src == ':')
-                snprintf(command, sizeof command, "%s", src + 1);
-            else if (*src == '=')
-                snprintf(command, sizeof command, "js %s", src + 1);
-            else if (script_is_verb_line(src))
-                snprintf(command, sizeof command, "%s", src);
-            else
-                snprintf(command, sizeof command, "js %s", src);
+            snprintf(command, sizeof command, "%s", line);
             // Shift+Enter is an editing newline. The command language treats
             // it as whitespace when the whole input is finally submitted.
             for (char *p = command; *p; p++)
