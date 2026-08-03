@@ -239,7 +239,7 @@ void relayout(App *a) {
         a->css_h = SHOT_CSS_H;
         a->scale = a->want_scale;
         app_cdp(a, "Emulation.setDeviceMetricsOverride",
-                 "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":%d,"
+                 "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":%.6f,"
                  "\"mobile\":false",
                  a->css_w, a->css_h, a->scale);
         return;
@@ -304,9 +304,15 @@ void relayout(App *a) {
     // Every frame crosses the terminal as base64, so the pixel count sets the
     // cost of everything: Chrome's encode, the write, and how long a keypress
     // waits behind it. A 2x ratio quadruples that, so cap it on wide panes.
+    // Only ever downwards, and never past 1: below that the ratio is already
+    // costing less than the cells it lands in, which is what somebody asking
+    // for it wanted.
     a->scale = a->want_scale;
-    if (!a->scale_locked)
-        while (a->scale > 1 && (long)rect_w * a->scale > 1920) a->scale--;
+    if (!a->scale_locked && a->scale > 1.0) {
+        double fits = 1920.0 / rect_w;
+        if (fits < 1.0) fits = 1.0;
+        if (a->scale > fits) a->scale = fits;
+    }
 
     // The ratio that turns the viewport into those pixels. Zoom and fit-width
     // both make it fractional, and it is Chrome's job rather than the
@@ -323,8 +329,12 @@ void relayout(App *a) {
     app_cdp(a, "Emulation.setDeviceMetricsOverride",
              "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":%.6f,\"mobile\":false",
              a->css_w, a->css_h, dsf);
-    a->cast_w = rect_w * a->scale;
-    a->cast_h = rect_h * a->scale;
+    // Whole pixels, and at least one of them: a ratio below 1 shrinks the frame
+    // Chrome is asked for, and a pane narrow enough would otherwise ask for none.
+    a->cast_w = (int)((double)rect_w * a->scale + 0.5);
+    a->cast_h = (int)((double)rect_h * a->scale + 0.5);
+    if (a->cast_w < 1) a->cast_w = 1;
+    if (a->cast_h < 1) a->cast_h = 1;
     screencast_start(a);
 }
 
@@ -659,7 +669,7 @@ static void draw_status(App *a) {
             // The port leads: it is the one number here that something outside
             // this process needs, and it is how playwright finds the browser.
             snprintf(stats, sizeof stats,
-                     "cdp:%d  %zuKB %.0fms %.1ffps  %dx%d@%dx z%.0f%%",
+                     "cdp:%d  %zuKB %.0fms %.1ffps  %dx%d@%gx z%.0f%%",
                      a->chrome.port,
                      a->last_bytes / 1024, a->last_write_ms, a->fps,
                      a->css_w, a->css_h, a->scale,
@@ -974,12 +984,14 @@ static void resize_box(App *a, int drows, int dcols) {
 // is supersampling: the page is drawn larger and comes down to the cell rect,
 // which is the only way to get detail past what the cells can hold. It costs
 // the square of itself in bytes across the terminal, so it is a choice.
+// The key steps whole ratios whatever --scale started at: it is a quick look at
+// more detail or less, not a way to land on a fraction.
 static void cycle_scale(App *a) {
-    a->want_scale = a->want_scale >= 3 ? 1 : a->want_scale + 1;
+    a->want_scale = a->want_scale >= 3.0 ? 1.0 : (double)((int)a->want_scale + 1);
     a->scale_locked = true;         // an explicit ask outranks the width cap
     relayout(a);
     char m[48];
-    snprintf(m, sizeof m, "render %dx", a->want_scale);
+    snprintf(m, sizeof m, "render %gx", a->want_scale);
     notify(a, m);
 }
 
@@ -1713,7 +1725,8 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
 static void usage(void) {
     fprintf(stderr,
         "usage: web [options] <url>\n"
-        "  --scale N   device pixel ratio (default 1; 2 is sharper but 4x the data)\n"
+        "  --scale F   device pixel ratio (default 1; 2 is sharper but 4x the\n"
+        "              data, and 0.5 is a quarter of it and blurrier)\n"
         "  --show      run Chrome with a visible window too\n"
         "  --zoom F    page magnification (default 1.0)\n"
         "  --full      take over the whole terminal instead of drawing a window\n"
@@ -1881,7 +1894,7 @@ static void first_size(App *a, int *w, int *h) {
 int main(int argc, char **argv) {
     setlocale(LC_CTYPE, "");
     App a = {0};
-    a.want_scale = 1;
+    a.want_scale = 1.0;
     a.zoom = 1.0;
     a.pause_on_blur = a.pause_cfg = true;
     a.blur_cpu_rate = 20;
@@ -1903,9 +1916,12 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--scale") && i + 1 < argc) {
-            a.want_scale = atoi(argv[++i]);
-            if (a.want_scale < 1) a.want_scale = 1;
-            if (a.want_scale > 3) a.want_scale = 3;
+            a.want_scale = atof(argv[++i]);
+            // Below 1 the page is rendered smaller than the pixels it is shown
+            // in, which is a way to ask for a cheaper frame or a smaller
+            // screenshot. The floor is where a viewport stops being a viewport.
+            if (a.want_scale < 0.1) a.want_scale = 0.1;
+            if (a.want_scale > 3.0) a.want_scale = 3.0;
         } else if (!strcmp(argv[i], "--zoom") && i + 1 < argc) {
             a.zoom = atof(argv[++i]);
             if (a.zoom < 0.5) a.zoom = 0.5;

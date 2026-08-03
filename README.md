@@ -162,7 +162,10 @@ the page is *told* it has — 800, 1024, 1280, 1440, 1600, 1920, then back to
 whatever the cells work out to — which is what decides where a layout breaks.
 `s` sets how many pixels Chrome renders per pixel the terminal shows: above 1x
 it draws larger and comes back down, which is the only way to get detail finer
-than the cells, at the square of the cost in bytes.
+than the cells, at the square of the cost in bytes. The key steps whole ratios,
+but `--scale` takes a fraction: below 1 the page is rendered *smaller* than the
+cells it lands in and the terminal stretches it, which trades sharpness for
+bytes — worth having on a slow link, and the way to ask for a small screenshot.
 
 `cmd+v` needs nothing: the terminal turns it into a bracketed paste, which is
 ordinary input. `cmd+c` is the other way around — the terminal keeps that one
@@ -191,7 +194,8 @@ trade every keyboard-driven browser has to make somewhere.
 ## Options
 
 ```
---scale N   device pixel ratio (default 1; 2 is sharper but 4x the data)
+--scale F   device pixel ratio (default 1; 2 is sharper at 4x the data,
+            0.5 is blurrier at a quarter of it)
 --zoom F    page magnification (default 1.0)
 --rows N    how many cell rows the window gets
 --no-status start with the status line hidden (^S toggles it)
@@ -251,7 +255,7 @@ instead: a line of text in front of a PNG is a PNG nothing will open.
 
 Out of a pipeline, with no terminal to draw into, the viewport is a plain
 1280x800 and `--scale` is the pixel ratio — `--scale 2` gives a 2560x1600 shot
-of the same layout. Run where there *is* a terminal it photographs the window
+of the same layout, `--scale 0.5` a 640x400 one. Run where there *is* a terminal it photographs the window
 you are looking at instead, at the size it is on screen.
 
 The exit status says whether the file was written, so a shot that failed fails

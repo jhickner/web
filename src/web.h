@@ -268,8 +268,8 @@ typedef struct {
 
     int     css_w, css_h;      // page viewport in CSS pixels
     int     cast_w, cast_h;    // pixel size the screencast was last asked for
-    int     scale;             // device pixel ratio actually in use
-    int     want_scale;        // what was asked for on the command line
+    double  scale;             // device pixel ratio actually in use
+    double  want_scale;        // what was asked for on the command line
     int     img_rows;          // cell rows the page occupies
 
     char    url[1024];
