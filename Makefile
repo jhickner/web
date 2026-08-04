@@ -19,14 +19,7 @@ install: $(BIN)
 	install -d $(PREFIX)/bin
 	install -m 755 $(BIN) $(PREFIX)/bin/$(BIN)
 
-TOOLS := tools/ptycap tools/gquery tools/ttytest
-
-tools: $(TOOLS)
-
-tools/%: tools/%.c
-	$(CC) $(CFLAGS) -o $@ $<
-
 clean:
-	rm -f $(OBJ) $(BIN) $(TOOLS)
+	rm -f $(OBJ) $(BIN)
 
-.PHONY: all install clean tools
+.PHONY: all install clean

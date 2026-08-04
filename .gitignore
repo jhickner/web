@@ -1,10 +1,4 @@
 *.o
 /web
 /TODO.md
-/tools/ptycap
-/tools/gquery
-/tools/ttytest
-/tools/placespike
-/tools/readspike
-/tools/renderspike
-/tools/typespike
+/tools/

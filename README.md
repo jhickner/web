@@ -26,13 +26,23 @@ make
 ./web news.ycombinator.com
 ```
 
-No libraries to install: the whole thing is libc and about 2,000 lines of C.
+No libraries to install: the whole thing is libc and about 8,000 lines of C.
 
 Inside tmux, the graphics escapes need forwarding. Once, in `~/.tmux.conf`:
 
 ```sh
 set -g allow-passthrough all
 ```
+
+## Logins
+
+Headless chrome is usually prevented from logging in. Open a normal browser
+using web's profile like this:
+```
+web --login
+```
+Then log in to whatever sites you want `web` to have access to.
+
 
 ## Keys
 
