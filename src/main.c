@@ -2426,9 +2426,15 @@ int main(int argc, char **argv) {
             relayout(&a);
             // relayout may have taken rows off the box to fit it, and the
             // count of what the block owns is what erases it on the way out.
-            if (a.inline_mode)
+            if (a.inline_mode) {
                 a.term.inline_rows = a.img_rows +
                                      (a.status_open ? 1 : 0) + a.console_rows;
+                // Now that the block has settled, sweep whatever is under it.
+                // A status line pushed off the bottom by a shrink is in the
+                // terminal's history by the time we hear about the resize, and
+                // growing the pane again brings it back below the new one.
+                term_clear_below(&a.term);
+            }
         }
 
         struct pollfd fds[3] = {{0}};   // poll leaves revents alone on EINTR

@@ -196,6 +196,21 @@ void term_clear_inline(Term *t) {
     }
 }
 
+// Erase from the foot of the block to the end of the screen. Inline, the block
+// is the last thing on it, so whatever is under it is either nothing or
+// something we drew before it moved - an old status line, most often, left by a
+// pane that shrank far enough to push it past the bottom and then grew again to
+// bring it back. Those rows cannot be cleared as they go: by the time the
+// resize is known they are already in the terminal's history.
+void term_clear_below(Term *t) {
+    if (!t->inline_mode || t->inline_rows < 1) return;
+    int row = t->inline_origin + t->inline_rows;
+    if (row > t->rows) return;
+    char buf[32];
+    int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[J", row);
+    writeall(t->fd, buf, (size_t)n);
+}
+
 // Regrow or shrink the reserved block in place. The caller drops the image
 // first: the rows it lives on are about to mean something else, and a picture
 // left addressed to them survives as a smear the terminal will not clean up.

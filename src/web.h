@@ -174,6 +174,7 @@ void term_enter(Term *t, bool inline_mode); // raw mode, alt screen, mouse
 void term_reserve_inline(Term *t, int rows);
 void term_resize_inline(Term *t, int rows);   // caller drops the image first
 void term_clear_inline(Term *t);              // blank the rows the block owns
+void term_clear_below(Term *t);               // and anything left under them
 void term_restore(Term *t, bool clear_inline);  // erase the block on the way out
 void term_size(Term *t);
 int  term_read(Term *t);                  // pull available bytes
