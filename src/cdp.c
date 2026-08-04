@@ -184,22 +184,64 @@ static void forget_browser(Chrome *c) {
     unlink(path);
 }
 
-// A previous run that died without cleaning up leaves a live Chrome holding
-// the profile lock, which would make every later launch abort. If that browser
-// still answers on its recorded port, take it over instead.
-static int adopt_running(Chrome *c) {
+int chrome_adoptable(const char *profile, pid_t *pid) {
     char path[600];
-    snprintf(path, sizeof path, "%s/DevToolsActivePort", c->profile);
+    snprintf(path, sizeof path, "%s/DevToolsActivePort", profile);
     int port = 0;
     FILE *f = fopen(path, "r");
     if (f) {
         if (fscanf(f, "%d", &port) != 1) port = 0;
         fclose(f);
     }
-    if (port <= 0 || chrome_probe(port) != 0) port = noted_browser(c->profile, NULL);
+    if (port <= 0 || chrome_probe(port) != 0) port = noted_browser(profile, NULL);
     if (port <= 0 || chrome_probe(port) != 0) return -1;
+    if (pid) *pid = singleton_pid(profile);
+    return port;
+}
 
-    c->pid = singleton_pid(c->profile);
+// Every browser process on the profile. The helpers all carry --type=; the
+// browser itself is the one without, which is what picks it out of a family of
+// a dozen. Asked of ps rather than of the system directly: the answer is a
+// command line, and there is no portable way to read another process's.
+int chrome_running(const char *profile, ChromeProc *out, int cap) {
+    char match[700];
+    int mlen = snprintf(match, sizeof match, "--user-data-dir=%s", profile);
+    if (mlen < 0 || mlen >= (int)sizeof match) return 0;
+
+    FILE *p = popen("ps -axww -o pid=,etime=,command= 2>/dev/null", "r");
+    if (!p) return 0;
+
+    int n = 0;
+    char line[8192];
+    while (n < cap && fgets(line, sizeof line, p)) {
+        const char *hit = strstr(line, match);
+        // The whole directory, not a prefix of it: a sibling profile whose name
+        // starts the same way is a different browser.
+        if (!hit) continue;
+        char after = hit[mlen];
+        if (after && after != ' ' && after != '\n') continue;
+        if (strstr(line, "--type=")) continue;      // a helper, not the browser
+
+        int pid = 0;
+        char age[24] = {0};
+        if (sscanf(line, "%d %23s", &pid, age) != 2 || pid <= 0) continue;
+        out[n].pid = (pid_t)pid;
+        snprintf(out[n].age, sizeof out[n].age, "%s", age);
+        n++;
+    }
+    pclose(p);
+    return n;
+}
+
+// A previous run that died without cleaning up leaves a live Chrome holding
+// the profile lock, which would make every later launch abort. If that browser
+// still answers on its recorded port, take it over instead.
+static int adopt_running(Chrome *c) {
+    pid_t pid = 0;
+    int port = chrome_adoptable(c->profile, &pid);
+    if (port < 0) return -1;
+
+    c->pid = pid;
     c->port = port;
     c->adopted = true;
     TRACE("adopted running chrome on port %d (pid %d)", port, (int)c->pid);

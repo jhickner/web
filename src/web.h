@@ -82,6 +82,20 @@ void chrome_profile_path(char *out, size_t cap);
 // 0 when a devtools endpoint answers there, so a port can be checked before
 // anything is given up for it.
 int  chrome_probe(int port);
+
+// One browser process running on the profile. The age is however ps spelled
+// it, which is a thing to read rather than a number to work with.
+typedef struct { pid_t pid; char age[24]; } ChromeProc;
+
+// All of them, whoever started them. The note in the profile only ever names
+// one, and a browser that outlived the run that started it is exactly the one
+// worth finding - so this asks the process table rather than the note.
+int  chrome_running(const char *profile, ChromeProc *out, int cap);
+
+// The browser a new window would adopt: the port it answers on, or -1 when
+// there is nothing there to adopt. *pid is its process where that is knowable,
+// which it is not for one whose lock has been cleared away.
+int  chrome_adoptable(const char *profile, pid_t *pid);
 int  chrome_user_agent(Chrome *c, char *out, size_t cap);
 void chrome_kill(Chrome *c);
 void chrome_kill_bg(Chrome *c);

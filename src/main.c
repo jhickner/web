@@ -461,6 +461,232 @@ static int print_sessions(void) {
     return found ? 0 : 1;
 }
 
+// ------------------------------------------------------------------ browsers
+
+#define PROC_MAX 64
+
+// The pid of every window running now. The file is named for it, which is also
+// what says the file is not a leftover: a pid that has gone takes its own with
+// it here, the same way --endpoint tidies up.
+static int running_windows(const char *profile, pid_t *out, int cap) {
+    char dir[600];
+    snprintf(dir, sizeof dir, "%s/sessions", profile);
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    int n = 0;
+    struct dirent *e;
+    while (n < cap && (e = readdir(d)) != NULL) {
+        int pid = atoi(e->d_name);
+        if (pid <= 0 || pid == (int)getpid()) continue;
+        if (kill((pid_t)pid, 0) != 0 && errno == ESRCH) {
+            char path[800];
+            snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+            unlink(path);
+            continue;
+        }
+        out[n++] = (pid_t)pid;
+    }
+    closedir(d);
+    return n;
+}
+
+// Windows the sessions directory does not know about: one that never got as far
+// as registering, or that removed its entry and then wedged before it could
+// exit. Matched on argv[0] alone, so a url or an argument with "web" in it is
+// not a window and neither is anything else that merely mentions one.
+//
+// These are reported rather than ended. A window says which profile it belongs
+// to nowhere a process table can be asked about, so this cannot tell one
+// profile's windows from another's - and a --kill aimed at one profile that
+// reaches into another is a session somebody was using, gone without being
+// asked. The registry is what makes a window this profile's to end; anything
+// else is somebody's to look at and decide about.
+static int stuck_windows(pid_t *out, int cap, const pid_t *known, int nknown) {
+    FILE *p = popen("ps -axww -o pid=,command= 2>/dev/null", "r");
+    if (!p) return 0;
+    int n = 0;
+    char line[8192];
+    while (n < cap && fgets(line, sizeof line, p)) {
+        int pid = 0;
+        char cmd[1024] = {0};
+        if (sscanf(line, "%d %1023s", &pid, cmd) != 2 || pid <= 0) continue;
+        if (pid == (int)getpid()) continue;
+        const char *base = strrchr(cmd, '/');
+        base = base ? base + 1 : cmd;
+        if (strcmp(base, "web") != 0) continue;
+        bool seen = false;
+        for (int i = 0; i < nknown; i++) if (known[i] == (pid_t)pid) seen = true;
+        if (!seen) out[n++] = (pid_t)pid;
+    }
+    pclose(p);
+    return n;
+}
+
+static bool proc_alive(pid_t p) {
+    return kill(p, 0) == 0 || errno != ESRCH;
+}
+
+// Whether a window has finished leaving. Its session file is the last thing it
+// removes, after the terminal has been handed back, so the file going is the
+// whole of the shutdown having run. Better than its pid: a process that has
+// exited but has not yet been reaped by the shell that started it still answers
+// kill(pid, 0), and would read as one that ignored the signal.
+static bool window_gone(const char *profile, pid_t pid) {
+    char path[700];
+    snprintf(path, sizeof path, "%s/sessions/%d.json", profile, (int)pid);
+    return access(path, F_OK) != 0 || !proc_alive(pid);
+}
+
+static bool wait_windows(const char *profile, const pid_t *pids, int n,
+                         double secs) {
+    double deadline = now_sec() + secs;
+    for (;;) {
+        bool any = false;
+        for (int i = 0; i < n; i++)
+            if (!window_gone(profile, pids[i])) any = true;
+        if (!any || now_sec() >= deadline) return !any;
+        struct timespec ts = {0, 25 * 1000000};
+        nanosleep(&ts, NULL);
+    }
+}
+
+// Wait for a list of processes to go, and say whether any is left. They are
+// nobody's children here - a browser we adopted belongs to init - so there is
+// nothing to reap and asking is the only way to know.
+static bool wait_gone(const pid_t *pids, int n, double secs) {
+    double deadline = now_sec() + secs;
+    for (;;) {
+        bool any = false;
+        for (int i = 0; i < n; i++) if (pids[i] > 0 && proc_alive(pids[i])) any = true;
+        if (!any || now_sec() >= deadline) return !any;
+        struct timespec ts = {0, 25 * 1000000};
+        nanosleep(&ts, NULL);
+    }
+}
+
+// Every browser of ours that is up, and whether a new window could still find
+// it. One that cannot be found is the thing worth knowing about: it goes on
+// holding the profile, and every later start launches a second browser beside
+// it instead of adopting this one.
+static int print_browsers(void) {
+    char profile[512];
+    chrome_profile_path(profile, sizeof profile);
+
+    ChromeProc procs[PROC_MAX];
+    int n = chrome_running(profile, procs, PROC_MAX);
+    if (!n) {
+        fprintf(stderr, "web: no Chrome instances are running on this profile\n");
+        return 1;
+    }
+
+    pid_t holder = 0;
+    int port = chrome_adoptable(profile, &holder);
+    int unreachable = 0;
+    for (int i = 0; i < n; i++) {
+        // The lock names at most one browser, and only while it is there to be
+        // read. With nothing to go on, a single browser beside a live endpoint
+        // is that endpoint's - and several of them cannot all be.
+        bool adoptable = port > 0 &&
+                         (holder > 0 ? holder == procs[i].pid : n == 1);
+        if (adoptable)
+            printf("pid %-7d up %-12s port %d\n",
+                   (int)procs[i].pid, procs[i].age, port);
+        else
+            printf("pid %-7d up %-12s unreachable (no debugging endpoint)\n",
+                   (int)procs[i].pid, procs[i].age);
+        unreachable += !adoptable;
+    }
+    // The hint goes to stderr so the list stays pipeable, which means it has to
+    // wait for the list: the two streams buffer differently and it would
+    // otherwise land above the thing it is about.
+    fflush(stdout);
+    if (unreachable)
+        fprintf(stderr, "web: %d unreachable browser%s holding the profile; "
+                        "run 'web --kill' to terminate %s\n",
+                unreachable, unreachable == 1 ? "" : "s",
+                unreachable == 1 ? "it" : "them");
+    return 0;
+}
+
+// Everything this program has left running. The windows go first: each one
+// shuts its own browser down on the way out and hands its terminal back, which
+// is a tidier end than pulling the browser out from under one still drawing it.
+// Whatever browsers are left after that are the ones no window ever claimed,
+// which is what this is really for.
+static int kill_everything(void) {
+    char profile[512];
+    chrome_profile_path(profile, sizeof profile);
+
+    pid_t windows[PROC_MAX];
+    int w = running_windows(profile, windows, PROC_MAX);
+    for (int i = 0; i < w; i++) kill(windows[i], SIGTERM);
+    if (w) {
+        printf("web: asked %d window%s to quit\n", w, w == 1 ? "" : "s");
+        // A window wedged writing to a terminal that went away never gets to
+        // its own signal handler, and waiting on it forever is how this option
+        // fails to do the one thing it is for.
+        if (!wait_windows(profile, windows, w, 3.0)) {
+            for (int i = 0; i < w; i++)
+                if (!window_gone(profile, windows[i])) {
+                    printf("web: window %d would not quit; ending it\n",
+                           (int)windows[i]);
+                    kill(windows[i], SIGKILL);
+                }
+        }
+    }
+
+    // Named, not ended: which profile one of these belongs to is not a question
+    // the process table can answer, and ending one on a guess is somebody's
+    // session gone without being asked.
+    pid_t stray[PROC_MAX];
+    int s = stuck_windows(stray, PROC_MAX, windows, w);
+
+    // Re-read after the windows have gone: most browsers will have left with
+    // the window that started them, and the list is shorter for it.
+    ChromeProc procs[PROC_MAX];
+    int n = chrome_running(profile, procs, PROC_MAX);
+    pid_t pids[PROC_MAX];
+    for (int i = 0; i < n; i++) {
+        pids[i] = procs[i].pid;
+        // The browser, not its group. Chrome commits its cookie store on an
+        // orderly shutdown, and the group signal takes the helpers down first
+        // so that shutdown never runs.
+        kill(pids[i], SIGTERM);
+        printf("web: ending chrome %d\n", (int)pids[i]);
+    }
+    if (n && !wait_gone(pids, n, 5.0)) {
+        for (int i = 0; i < n; i++)
+            if (proc_alive(pids[i])) {
+                printf("web: chrome %d would not go; ending its group\n",
+                       (int)pids[i]);
+                if (kill(-pids[i], SIGKILL) < 0) kill(pids[i], SIGKILL);
+            }
+    }
+
+    if (w || n) {
+        // The notes name a browser that is not there any more. Left behind they
+        // cost the next run a probe apiece before it gives up on them.
+        char path[700];
+        snprintf(path, sizeof path, "%s/DevToolsActivePort", profile);
+        unlink(path);
+        snprintf(path, sizeof path, "%s/web-port", profile);
+        unlink(path);
+        snprintf(path, sizeof path, "%s/web-keep", profile);
+        unlink(path);
+    } else if (!s) {
+        printf("web: nothing of its own was running\n");
+    }
+
+    // Last, so it is the thing left on screen. Said rather than acted on: see
+    // stuck_windows. The pid is what somebody needs to deal with it.
+    fflush(stdout);
+    for (int i = 0; i < s; i++)
+        fprintf(stderr, "web: window %d is running but is not this profile's "
+                        "to end; kill %d if it is yours\n",
+                (int)stray[i], (int)stray[i]);
+    return 0;
+}
+
 // -------------------------------------------------------------------- exec
 
 // Run a program against this window. It is handed the devtools endpoint and the
@@ -1981,6 +2207,11 @@ static void usage(void) {
         "  --login     open a window to sign in with, on the same profile\n"
         "  --keep      leave chrome running on exit so the next start is instant\n"
         "  --endpoint  print every running window as JSON and exit\n"
+        "  --browsers  list the chrome processes web has running, with pids,\n"
+        "              and say which of them a new window could still adopt\n"
+        "  --kill      quit this profile's windows and end its browsers,\n"
+        "              including any nothing can reach any more. A window it\n"
+        "              cannot place is named rather than ended\n"
         "  --exec CMD  run CMD against this window, its output in the console\n"
         "  --port N    fix chrome's devtools port so playwright can find it\n"
         "  --no-pause  keep drawing while the terminal is not focused\n");
@@ -2160,7 +2391,7 @@ int main(int argc, char **argv) {
     a.inline_mode = true;             // a window in the shell, unless --full
     a.clear_exit = true;              // the window goes away, unless --no-clear
     bool show = false, login = false, url_given = false;
-    bool endpoint_only = false;
+    bool endpoint_only = false, browsers_only = false, kill_only = false;
     const char *exec_cmd = NULL;
     double drain_at = 0;              // when the queue first ran out
     int port = 0;                     // 0 = let chrome pick a free one
@@ -2210,6 +2441,10 @@ int main(int argc, char **argv) {
             a.keep = true;
         } else if (!strcmp(argv[i], "--endpoint")) {
             endpoint_only = true;
+        } else if (!strcmp(argv[i], "--browsers")) {
+            browsers_only = true;
+        } else if (!strcmp(argv[i], "--kill")) {
+            kill_only = true;
         } else if (!strcmp(argv[i], "--exec") && i + 1 < argc) {
             exec_cmd = argv[++i];
         } else if (!strcmp(argv[i], "--mute")) {
@@ -2252,9 +2487,11 @@ int main(int argc, char **argv) {
             url_given = true;
         }
     }
-    // A question about the windows already running, answered without starting
-    // anything of our own.
+    // Questions about, and an end to, what is already running - all answered
+    // without starting anything of our own.
     if (endpoint_only) return print_sessions();
+    if (browsers_only) return print_browsers();
+    if (kill_only)     return kill_everything();
 
     a.status_open = !a.hide_status;
 

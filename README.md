@@ -279,6 +279,10 @@ trade every keyboard-driven browser has to make somewhere.
 --keep      leave Chrome running on exit so the next start is instant, and
             keep it for every other window too
 --endpoint  print every running window as JSON and exit
+--browsers  list the Chrome processes web has running, with pids, and say
+            which of them a new window could still adopt
+--kill      quit this profile's windows and end its browsers, including any
+            nothing can reach any more
 --exec CMD  run CMD against this window, its output in the console
 --port N    fix Chrome's devtools port instead of letting it pick one
 --no-pause  keep drawing while the terminal is not focused
@@ -291,6 +295,44 @@ milliseconds for everything else. `--keep` leaves the browser holding the
 profile when `web` exits, and the next run adopts it instead of paying for that
 again. The cost is a headless Chrome sitting in the process table until you
 kill it.
+
+`--browsers` is how you see what is sitting there:
+
+```
+$ web --browsers
+pid 25495   up 04:11        port 53859
+```
+
+A browser is only worth keeping while something can still find it. The profile
+records where it is, and if that record goes while the browser does not — a
+shutdown that could not finish, a `SingletonLock` cleared away — the browser
+goes on holding the profile with nothing able to adopt it, and every later start
+launches a second one beside it. That is the difference between a start that
+takes 0.09s and one that takes 8.6s, so it is worth being able to see:
+
+```
+$ web --browsers
+pid 50596   up 26:00        stranded - nothing can reach it
+web: 1 stranded browser holding the profile; web --kill ends it
+```
+
+`--kill` clears the lot. Windows first, each asked to quit so it shuts its own
+browser down and hands its terminal back; then whatever browsers are left, which
+are the ones no window ever claimed. A window that will not answer, or a browser
+that will not go, is ended rather than waited on forever.
+
+What counts as *this profile's* window is the session file it writes on the way
+up and removes on the way down. A `web` process without one — it never got that
+far, or it wedged after removing it — is named rather than ended:
+
+```
+$ web --kill
+web: window 15902 is running but is not this profile's to end; kill 15902 if it is yours
+```
+
+Nothing in a process table says which profile a window belongs to, so ending one
+on the strength of its name alone would let a `--kill` aimed at one profile take
+out a session running under another. The pid is there to be dealt with by hand.
 
 ## Screenshots
 
