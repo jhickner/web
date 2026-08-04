@@ -1557,8 +1557,36 @@ void scroll_page_end(App *a, bool bottom) {
           "(document.scrollingElement||document.documentElement)");
 }
 
+// Through the browser's own list rather than history.back(). A page that keeps
+// the keyboard, a pdf, an about:blank left behind by a back press: the script
+// that would have to run is not always there to run, and asking the browser
+// works from all of them. The list also says when there is nowhere to go,
+// which a call into the page cannot: it returns whether it moved or not.
 void nav_history(App *a, int delta) {
-    run_js(a, delta < 0 ? "history.back()" : "history.forward()");
+    a->hist_delta = delta;
+    app_req_note(a, app_cdp(a, "Page.getNavigationHistory", ""), RQ_HISTORY);
+}
+
+// The `n`th element of the array at `arr`, or NULL when the array ends first.
+// Strings are stepped over whole, so a brace inside a url cannot be read as
+// the start of an element.
+static const char *json_array_at(const char *arr, int n) {
+    if (!arr || *arr != '[') return NULL;
+    int depth = 0, idx = -1;
+    for (const char *p = arr; *p; p++) {
+        if (*p == '"') {
+            for (p++; *p && *p != '"'; p++)
+                if (*p == '\\' && p[1]) p++;
+            if (!*p) return NULL;
+            continue;
+        }
+        if (*p == '[' || *p == '{') {
+            if (++depth == 2 && ++idx == n) return p;
+        } else if (*p == ']' || *p == '}') {
+            if (--depth == 0) return NULL;
+        }
+    }
+    return NULL;
 }
 
 static void find_next(App *a, bool backwards) {
@@ -1953,7 +1981,9 @@ static void handle_key(App *a, Event *ev) {
         case KEY_RIGHT:
             special_key(a, ev->key, ev->mods);
             return;
-        case KEY_BACKSPACE: nav_history(a, -1); return;
+        // Shift turns it round, the way a browser does: the key that goes back
+        // is the one that comes forward again.
+        case KEY_BACKSPACE: nav_history(a, ev->mods & MOD_SHIFT ? +1 : -1); return;
         case 'j': scroll_by(a, 60);    return;
         case 'k': scroll_by(a, -60);   return;
         case 'l': scroll_side(a, a->css_w / 4);  return;
@@ -2424,6 +2454,22 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
             json_unescape(a->url, sizeof a->url, v, n);
             session_write(a);
         }
+        return;
+    }
+
+    case RQ_HISTORY: {
+        const char *arr = strstr(msg, "\"entries\":");
+        if (arr) { arr += 10; while (*arr == ' ') arr++; }
+        int want = (int)json_num(msg, "currentIndex", -1) + a->hist_delta;
+        const char *e = (arr && want >= 0) ? json_array_at(arr, want) : NULL;
+        int entry = e ? (int)json_num(e, "id", -1) : -1;
+        if (entry < 0) {
+            notify(a, a->hist_delta < 0 ? "nothing to go back to"
+                                        : "nothing to go forward to");
+            return;
+        }
+        app_cdp(a, "Page.navigateToHistoryEntry", "\"entryId\":%d", entry);
+        a->loading = true;
         return;
     }
 

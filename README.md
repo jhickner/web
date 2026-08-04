@@ -56,7 +56,7 @@ While reading:
 |---|---|
 | `↓` / `↑` | down / up, a line at a time |
 | `←` / `→` | handed to the page — galleries and carousels bind these |
-| `backspace` | back (so does `^O`) |
+| `backspace` / `shift+backspace` | back / forward (so do `^O` / `^P`) |
 | `j` / `k` | down / up |
 | `h` / `l` | left / right, for a page wider than the width it was given |
 | `d` / `u` | half a screen |

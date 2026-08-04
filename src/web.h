@@ -251,7 +251,7 @@ typedef struct {
 enum {
     RQ_NONE, RQ_TITLE, RQ_URL, RQ_COPY, RQ_FIT, RQ_SCRIPT,
     RQ_SELECTOR, RQ_RECORD, RQ_PDF, RQ_SHOT_READY, RQ_SHOT, RQ_FRAME,
-    RQ_MODE
+    RQ_MODE, RQ_HISTORY
 };
 
 // The isolated world everything we inject for our own use lives in. It shares
@@ -358,6 +358,7 @@ typedef struct {
     char    title[256];
     bool    loading;
     unsigned load_seq;         // bumped on every load event, for script waits
+    int     hist_delta;        // which way the outstanding history call is going
 
     // The page's own frame, so an address change can be told from one an
     // advert in a corner made. Only the top frame is the window's address; a
