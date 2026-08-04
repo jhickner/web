@@ -436,12 +436,6 @@ typedef struct {
     bool    pause_on_blur;     // stop drawing while the terminal is not focused
     bool    paused;            // and whether that has happened
 
-    // A gif animates for as long as it is on screen, and every frame of it is
-    // a frame of ours: the picture is never still, so the window never stops
-    // encoding and writing. Held until clicked, the page costs what a page of
-    // text costs.
-    bool    click_play;
-
     // Cancel the browser's own action for a navigation key the page did not
     // want, so it is never handed back to the window system. The page still
     // gets the key; this only stops the part that happens after nobody claimed

@@ -370,7 +370,6 @@ static const struct {
     size_t      off;        // the field in App it is
 } SETTINGS[] = {
     {"pause-on-blur", S_BOOL,     offsetof(App, pause_on_blur)},
-    {"click-play",    S_BOOL,     offsetof(App, click_play)},
     {"status-line",   S_BOOL_NOT, offsetof(App, hide_status)},
     {"clear-on-exit", S_BOOL,     offsetof(App, clear_exit)},
     {"full",          S_BOOL_NOT, offsetof(App, inline_mode)},

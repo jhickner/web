@@ -1791,146 +1791,6 @@ static const char KEY_CLAIMER[] =
     "if(t&&(t.isContentEditable||n==='INPUT'||n==='TEXTAREA'||n==='SELECT'))return;"
     "e.preventDefault();},true);})()";
 
-// A gif never stops: Chrome repaints it, the screencast hands over every
-// repaint, and the terminal spends the whole session redrawing an advert in a
-// corner of a page nobody is reading. Held until it is clicked, a page of them
-// costs what a page of text costs. The click that starts one is the click the
-// page would have had, minus the one thing it was going to do with it - so a
-// gif inside a link takes two, the first to play it and the second to follow.
-//
-// What counts as a gif is settled by watching one rather than by reading its
-// address. The address is no use: a picture that animates is as likely to be a
-// webp or an avif as a gif, and the one that started this was a gif served as a
-// webp from `/_next/image?url=...&w=1920`, where the only `.gif` in it is
-// somebody else's query parameter. So a picture that has just come into view is
-// sampled into a small canvas a few times over the next couple of seconds, and
-// one whose pixels move is one that is moving. That also means a gif that only
-// ever had one frame is left alone, which reading the name could never manage.
-//
-// Sampling is the same read the still is, so it is refused for the same
-// pictures - the ones from another host that sent no cors header. There the
-// address is all there is, and only a name ending in .gif or .apng is held; the
-// rest are left to animate. The one thing worse than missing one would be a
-// grey box over a picture that was never moving in the first place.
-//
-// The still is read back off a canvas at the moment the motion is noticed, so
-// it is a frame from the first second or so rather than frame one. A picture
-// the browser will not let us read becomes a box of the same size saying what
-// it is, and is then asked for a second time with cors, which most of the hosts
-// that serve gifs allow; that answer replaces the box when it arrives.
-//
-// Video is the same cost with a simpler answer - a paused video goes on
-// showing the frame it stopped on, so nothing has to stand in for it. Only one
-// that started by itself is stopped: playing while the user has just clicked
-// something is a page doing what it was asked to, and taking that back would
-// make its own play button useless.
-//
-// This runs in WEB_WORLD like the two above, so the guard is ours alone. What
-// it leaves on the page is on the elements themselves - the address of the gif
-// has to outlive the still that replaced it, and the DOM is the one thing both
-// worlds can see. Everything else it remembers is held in maps of its own,
-// rather than written onto the page: a page of photographs would otherwise
-// collect an attribute apiece for the finding that they are photographs.
-static const char CLICK_PLAY[] =
-    "(function(){if(window.__webplay)return;window.__webplay=1;"
-    "var judged=new WeakMap(),cv=null;"
-    "function named(u){"
-    "return /^data:image\\/gif/i.test(u)||/\\.(gif|apng)([?#]|$)/i.test(u);}"
-    // One number for what the picture looks like now, off a canvas small enough
-    // that reading it back costs nothing. null is the browser refusing to let
-    // us look at all.
-    "function sample(img){try{"
-    "if(!cv){cv=document.createElement('canvas');cv.width=cv.height=64;}"
-    "var g=cv.getContext('2d',{willReadFrequently:true});"
-    "g.clearRect(0,0,64,64);g.drawImage(img,0,0,64,64);"
-    "var d=g.getImageData(0,0,64,64).data,h=0;"
-    "for(var i=0;i<d.length;i+=4)h=(h*31+d[i]+d[i+1]*3+d[i+2]*7)|0;"
-    "return h;}catch(e){return null;}}"
-    "function badge(g,w,h){if(w<64||h<32)return;"
-    "var s=Math.max(11,Math.min(w,h)/9);g.font='bold '+s+'px sans-serif';"
-    "g.textBaseline='top';var t='\\u25B6 GIF',p=s*0.4,"
-    "bw=g.measureText(t).width+p*2,bh=s*1.3+p*2;"
-    "g.fillStyle='rgba(0,0,0,0.6)';g.fillRect(p,h-bh-p,bw,bh);"
-    "g.fillStyle='#fff';g.fillText(t,p*2,h-bh);}"
-    "function still(src,w,h){try{"
-    "var c=document.createElement('canvas');c.width=w;c.height=h;"
-    "var g=c.getContext('2d');g.drawImage(src,0,0,w,h);badge(g,w,h);"
-    "return c.toDataURL('image/png');}catch(e){return null;}}"
-    // Sized to the picture it stands in for, so the page lays out as it would
-    // have: an svg carries its own width and height, which is the intrinsic
-    // size an <img> asks it for.
-    "function box(w,h){var s=Math.round(Math.max(11,Math.min(w,h)/7));"
-    "return 'data:image/svg+xml;charset=utf-8,'+encodeURIComponent("
-    "'<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"'+w+"
-    "'\" height=\"'+h+'\">'+"
-    "'<rect width=\"100%\" height=\"100%\" fill=\"#1b1b1b\"/>'+"
-    "'<text x=\"50%\" y=\"50%\" fill=\"#c8c8c8\" "
-    "font-family=\"sans-serif\" font-size=\"'+s+"
-    "'\" text-anchor=\"middle\" dominant-baseline=\"central\">"
-    "&#9654; GIF</text></svg>');}"
-    "function later(img,src,w,h){var probe=new Image();"
-    "probe.crossOrigin='anonymous';probe.onload=function(){"
-    "if(img.dataset.webGif!==src)return;"       // clicked while it was coming
-    "var s=still(probe,w,h);if(s)img.src=s;};probe.src=src;}"
-    "function hold(img,src,w,h){"
-    "if('webGif' in img.dataset)return;"
-    "judged.set(img,src);img.dataset.webGif=src;"
-    "if(img.srcset){img.dataset.webSet=img.srcset;img.srcset='';}"
-    "var s=still(img,w,h);img.src=s||box(w,h);if(!s)later(img,src,w,h);}"
-    // Whether this one moves, asked of the picture itself. Answered over the
-    // next couple of seconds rather than at once: a gif is only a gif once it
-    // has reached its second frame, and some of them take a while about it.
-    "function look(img){"
-    "if('webGif' in img.dataset)return;"
-    "var src=img.currentSrc||img.src;if(!src)return;"
-    "if(judged.get(img)===src)return;"
-    "var w=img.naturalWidth,h=img.naturalHeight;"
-    "if(w<8||h<8){judged.set(img,src);return;}"
-    "var a=sample(img);"
-    "if(a===null){"          // another host, and no way to see what it is doing
-    "if(named(src))hold(img,src,w,h);else judged.set(img,src);return;}"
-    "var n=0,t=setInterval(function(){"
-    "if((img.currentSrc||img.src)!==src||'webGif' in img.dataset)"
-    "{clearInterval(t);return;}"
-    "var b=sample(img);"
-    "if(b!==null&&b!==a){clearInterval(t);hold(img,src,w,h);return;}"
-    "if(++n>=4){clearInterval(t);judged.set(img,src);}},500);}"
-    // Only once it is on screen. An image outside the viewport is not animated
-    // by the browser at all, so watching one there would find it still and say
-    // so - and it is also not costing a frame until it arrives.
-    "var io=new IntersectionObserver(function(es){"
-    "for(var i=0;i<es.length;i++)if(es[i].isIntersecting)look(es[i].target);});"
-    "function stop(v){if('webPlay' in v.dataset)return;"
-    "v.dataset.webVid='1';v.autoplay=false;v.pause();}"
-    "function play(el){el.dataset.webPlay='1';"
-    "if(el.tagName==='VIDEO'){delete el.dataset.webVid;"
-    "var p=el.play();if(p&&p.catch)p.catch(function(){});return;}"
-    "var src=el.dataset.webGif;delete el.dataset.webGif;"
-    "judged.set(el,src);"                 // playing, and not to be held again
-    "if('webSet' in el.dataset){el.srcset=el.dataset.webSet;"
-    "delete el.dataset.webSet;}el.src=src;}"
-    // A load listener in the capture phase, rather than a walk of the document
-    // or an observer watching it: load does not bubble, but it does travel down
-    // to the image it is about, so this hears every picture the page ever
-    // fetches - including the ones an ad frame adds an hour in.
-    "document.addEventListener('load',function(e){"
-    "var t=e.target;if(t&&t.tagName==='IMG')io.observe(t);},true);"
-    "document.addEventListener('play',function(e){var v=e.target;"
-    "if(!v||v.tagName!=='VIDEO'||'webPlay' in v.dataset)return;"
-    "if(!v.autoplay&&navigator.userActivation&&navigator.userActivation.isActive)"
-    "return;stop(v);},true);"
-    "document.addEventListener('click',function(e){"
-    "var t=e.target;if(!t||!t.closest)return;"
-    "var el=t.closest('[data-web-gif],[data-web-vid]');if(!el)return;"
-    "e.preventDefault();e.stopPropagation();play(el);},true);"
-    // Everything already on screen. Nothing for a document that is only
-    // starting, and the whole of it for a tab that was switched back to.
-    "var im=document.images||[];"
-    "for(var i=0;i<im.length;i++)if(im[i].complete)io.observe(im[i]);"
-    "var vs=document.getElementsByTagName('video');"
-    "for(var j=0;j<vs.length;j++)if(!vs[j].paused)stop(vs[j]);"
-    "})()";
-
 // The shortest selector that finds the element again: its id where it has one,
 // otherwise a CSS path shortened to the first ancestor that is already unique.
 // CSS because that is what the console can spend - `document.querySelector` is
@@ -2896,12 +2756,6 @@ static void usage(void) {
         "  --exec CMD  run CMD against this window, its output in the console\n"
         "  --port N    fix chrome's devtools port so playwright can find it\n"
         "  --no-pause  keep drawing while the terminal is not focused\n"
-        "  --click-play  hold animated gifs at their first frame, and\n"
-        "              autoplaying video at whatever frame it reached, until\n"
-        "              they are clicked. A gif redraws the whole window for as\n"
-        "              long as it is on screen. `click_play=1` in\n"
-        "              ~/.config/web/state keeps it on, and --no-click-play\n"
-        "              turns that off for one run\n"
         "  --raw-keys  let a key the page did not want reach the window\n"
         "              system. On macOS that routes it through the menu bar,\n"
         "              which on some pages costs seconds of the thread every\n"
@@ -2967,15 +2821,6 @@ void session_init(App *a) {
                      "\"source\":\"%s\",\"worldName\":\"%s\","
                      "\"runImmediately\":true", esc, WEB_WORLD);
             json_escape(esc, sizeof esc, FOCUS_WATCHER);   // as the next call expects
-        }
-        // Its own buffer: this one is a script rather than a listener, and it
-        // does not fit in the one above.
-        if (a->click_play && fresh) {
-            char held[8192];
-            json_escape(held, sizeof held, CLICK_PLAY);
-            app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
-                     "\"source\":\"%s\",\"worldName\":\"%s\","
-                     "\"runImmediately\":true", held, WEB_WORLD);
         }
         // A tab switched back to has its watcher already, and no event to
         // repeat itself with, so the state comes back by asking.
@@ -3220,10 +3065,6 @@ int main(int argc, char **argv) {
             }
         } else if (!strcmp(argv[i], "--no-pause")) {
             a.pause_on_blur = false;      // this run; the file is not written back
-        } else if (!strcmp(argv[i], "--click-play")) {
-            a.click_play = true;          // likewise, both ways round
-        } else if (!strcmp(argv[i], "--no-click-play")) {
-            a.click_play = false;
         } else if (!strcmp(argv[i], "--login")) {
             login = true;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
