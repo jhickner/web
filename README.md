@@ -49,7 +49,8 @@ While reading:
 | Key | Action |
 |---|---|
 | `↓` / `↑` | down / up, a line at a time |
-| `←` / `→` | back / forward |
+| `←` / `→` | handed to the page — galleries and carousels bind these |
+| `backspace` | back (so does `^O`) |
 | `j` / `k` | down / up |
 | `h` / `l` | left / right, for a page wider than the width it was given |
 | `d` / `u` | half a screen |
@@ -66,8 +67,12 @@ While reading:
 | `:` | open the console |
 | `esc` | take it back |
 
-Page up and down and tab always go to the page, as do all four arrows once the
-page has the keyboard.
+Page up and down and tab always go to the page, as do the sideways arrows, and
+as do all four once the page has the keyboard. Sideways is where a gallery, a
+slide deck or a carousel puts its controls, and there is no other way to reach
+those from here; going back keeps `^O` and gains `backspace`, which is where a
+browser puts it anyway. Up and down stay ours and scroll, which is what they
+would have done in the page.
 
 Local files open the same way, on the command line or in the address bar:
 `./web TODO.md`, `./web ~/notes/plan.html`. A name is only read as a path if it

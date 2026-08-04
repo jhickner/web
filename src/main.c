@@ -1528,8 +1528,16 @@ static void handle_key(App *a, Event *ev) {
             if (a->pdf && a->pdf_clicked) { special_key(a, ev->key, ev->mods); return; }
             scroll_by(a, ev->key == KEY_DOWN ? 40 : -40);
             return;
-        case KEY_LEFT:  nav_history(a, -1); return;
-        case KEY_RIGHT: nav_history(a, +1); return;
+        // Handed to the page rather than kept for history. A gallery, a slide
+        // deck or a carousel binds these and there is no other way to reach
+        // them from here, while going back has ^O and backspace and does not
+        // need a third key. The vertical pair stay ours: they scroll, which is
+        // what they would have done in the page anyway.
+        case KEY_LEFT:
+        case KEY_RIGHT:
+            special_key(a, ev->key, ev->mods);
+            return;
+        case KEY_BACKSPACE: nav_history(a, -1); return;
         case 'j': scroll_by(a, 60);    return;
         case 'k': scroll_by(a, -60);   return;
         case 'l': scroll_side(a, a->css_w / 4);  return;
