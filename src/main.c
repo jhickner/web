@@ -2158,7 +2158,10 @@ int main(int argc, char **argv) {
     if (chrome_launch(&a.chrome, "about:blank", fw, fh, show, a.mute, a.ua, true,
                       port) < 0)
         return 1;
+    term_log("%.3f chrome up on port %d (%s)", now_sec(), a.chrome.port,
+             a.chrome.adopted ? "adopted" : "launched");
     if (chrome_attach(&a.chrome) < 0) { chrome_kill(&a.chrome); return 1; }
+    term_log("%.3f attached", now_sec());
     // Marked now rather than on the way out, so a window that quits before this
     // one already knows the browser has been asked to stay. Somebody else's is
     // never ours to mark: we do not shut it down either way.
@@ -2207,6 +2210,9 @@ int main(int argc, char **argv) {
     // would take it off whatever that is.
     if (a.chrome.foreign && !url_given) ask_where(&a);
     else navigate(&a, first);
+    // The first request to anywhere real leaves here, which is what the whole
+    // startup chain above is in front of. Everything after this is the page's.
+    term_log("%.3f navigate sent", now_sec());
     // Timed from here rather than from the top of main: what the picture is
     // waiting for is the page, and none of starting a browser was that.
     if (a.shot_path) {

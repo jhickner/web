@@ -50,13 +50,22 @@ void term_size(Term *t) {
         t->cell_w = cw;
         t->cell_h = ch;
     }
-    // tmux reports no pixel geometry; the page is scaled into the cell rect
-    // either way, so this only needs to be close enough to keep the aspect.
-    if (t->cell_w <= 0 || t->cell_h <= 0 ||
-        t->cell_w > 64 || t->cell_h > 64) {
+    // A terminal that reports no pixel geometry leaves nothing to measure -
+    // and so does one whose cell is too big to believe. The page is scaled into
+    // the cell rect either way, so the guess only needs to keep the aspect.
+    bool guessed = t->cell_w <= 0 || t->cell_h <= 0 ||
+                   t->cell_w > 64 || t->cell_h > 64;
+    if (guessed) {
         t->cell_w = 8;
         t->cell_h = 17;
     }
+    // Worth saying out loud, because nothing downstream can tell the two apart
+    // and every size in the program is derived from this one. The raw report is
+    // logged beside it: a cell that fell back for being too tall is a different
+    // problem from one that was never reported at all.
+    term_log("cell %dx%d (%s), winsize %dx%d px over %dx%d cells",
+             t->cell_w, t->cell_h, guessed ? "guessed" : "measured",
+             ws.ws_xpixel, ws.ws_ypixel, ws.ws_col, ws.ws_row);
 }
 
 // Measure the terminal without changing any of its state, so the viewport can
