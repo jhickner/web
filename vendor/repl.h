@@ -1,7 +1,7 @@
 /**
  * repl.h - Full-featured UTF-8 line editor with completion dropdown
  *
- * Self-contained input widget modeled on a modern shell / Claude-Code prompt:
+ * Self-contained input widget modeled on a modern shell prompt:
  * - Line editing: insert, codepoint/word cursor motion, emacs kill bindings
  * - Command history (up/down when the dropdown is closed)
  * - A completion dropdown filtered by the typed command name, navigated with
