@@ -1,7 +1,7 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -Wno-unused-parameter
 LDLIBS  ?= -lm
-PREFIX  ?= /usr/local
+PREFIX  ?= $(HOME)/.local
 
 SRC  := $(wildcard src/*.c)
 OBJ  := $(SRC:.c=.o)
