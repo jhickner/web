@@ -1207,9 +1207,6 @@ static void load_state(App *a) {
             snprintf(a->ua, sizeof a->ua, "%s", line + 3);
         } else if (!strncmp(line, "pause_on_blur=", 14)) {
             a->pause_cfg = a->pause_on_blur = atoi(line + 14) != 0;
-        } else if (!strncmp(line, "blur_cpu_rate=", 14)) {
-            int r = atoi(line + 14);
-            if (r >= 1 && r <= 100) a->blur_cpu_rate = r;
         }
     }
     fclose(f);
@@ -1239,7 +1236,6 @@ static void save_state(App *a) {
     // What the file said, not what this run is doing: --no-pause is for one
     // session, and a flag that quietly rewrote the setting would outlive it.
     fprintf(f, "pause_on_blur=%d\n", a->pause_cfg ? 1 : 0);
-    fprintf(f, "blur_cpu_rate=%d\n", a->blur_cpu_rate);
     if (a->ua[0]) fprintf(f, "ua=%s\n", a->ua);
     fclose(f);
 }
@@ -1672,27 +1668,21 @@ static void handle_focus(App *a, bool focused) {
         a->paused = true;
         a->expect_frame = 0;        // no frame is coming, and none is owed
         app_cdp(a, "Page.stopScreencast", "");
-        // Not drawing is most of it: the page goes on animating into a
-        // screencast nobody is reading, and stopping that is a real saving.
+        // Not drawing is the whole of it: the page goes on animating into a
+        // screencast nobody is reading, and stopping that is the saving.
         //
-        // The throttle underneath is not, and is off by default because of what
-        // it turns out to be. Chrome emulates a slower processor rather than
+        // Emulation.setCPUThrottlingRate is not the other half of this and must
+        // not be added back. Chrome emulates a slower processor rather than
         // asking for less work: a thread of its own interrupts the renderer's
         // main thread with a signal, and the handler busy-waits on
         // mach_absolute_time to burn away the share of the quantum the rate
-        // says it should not have had. A window left blurred at rate 20 spends
-        // a whole core doing nothing, answers no javascript and paints nothing
-        // - which is not a page that has been quietened down, it is a page
-        // indistinguishable from one that has hung. Anyone who wants it can ask
-        // for it in the config; it is a measurement tool, not a power setting.
-        if (a->blur_cpu_rate > 1)
-            app_cdp(a, "Emulation.setCPUThrottlingRate", "\"rate\":%d",
-                    a->blur_cpu_rate);
+        // says it should not have had. Throttling a blurred window that way
+        // spends a whole core doing nothing, answers no javascript and paints
+        // nothing - the opposite of what the name promises, and on this side of
+        // a blur indistinguishable from a page that has hung.
         return;
     }
     a->paused = false;
-    if (a->blur_cpu_rate > 1)
-        app_cdp(a, "Emulation.setCPUThrottlingRate", "\"rate\":1");
     // The page may not have changed while it was away, and an unchanged frame
     // is hash-skipped - which would leave the block empty until something on
     // the page moved. Ask for it as though it were new.
@@ -2474,11 +2464,7 @@ static void usage(void) {
         "  --raw-keys  let a key the page did not want reach the window\n"
         "              system. On macOS that routes it through the menu bar,\n"
         "              which on some pages costs seconds of the thread every\n"
-        "              frame and every reply comes from\n"
-        "  --no-throttle   do not slow the renderer while it is not focused,\n"
-        "              whatever the config says. Chrome's throttle burns a core\n"
-        "              busy-waiting, so a blurred window looks exactly like a\n"
-        "              hung one\n");
+        "              frame and every reply comes from\n");
 }
 
 // Everything a fresh CDP session needs before it is worth drawing: the domains
@@ -2686,7 +2672,6 @@ int main(int argc, char **argv) {
         ? MOTION_SCALE_SSH : MOTION_SCALE;
     a.zoom = 1.0;
     a.pause_on_blur = a.pause_cfg = true;
-    a.blur_cpu_rate = 1;              // see handle_focus: the throttle costs a core
     a.claim_keys = true;              // --raw-keys hands them to the window system
     a.exec_fd = -1;
     load_state(&a);                   // --zoom below still wins over it
@@ -2740,10 +2725,6 @@ int main(int argc, char **argv) {
             a.hide_status = true;
         } else if (!strcmp(argv[i], "--raw-keys")) {
             a.claim_keys = false;
-        } else if (!strcmp(argv[i], "--no-throttle")) {
-            // After load_state, so it beats a rate left in the config by an
-            // earlier run - which is the whole point of having it as a flag.
-            a.blur_cpu_rate = 1;
         } else if (!strcmp(argv[i], "--show")) {
             show = true;
         } else if (!strcmp(argv[i], "--keep")) {

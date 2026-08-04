@@ -370,7 +370,6 @@ typedef struct {
     bool    pause_on_blur;     // stop drawing while the terminal is not focused
     bool    pause_cfg;         // what the config file said, which is what it keeps
     bool    paused;            // and whether that has happened
-    int     blur_cpu_rate;     // how hard the renderer is throttled while it is
 
     // Cancel the browser's own action for a navigation key the page did not
     // want, so it is never handed back to the window system. The page still

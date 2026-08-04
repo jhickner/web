@@ -177,8 +177,10 @@ renderer's main thread with a signal, and the handler busy-waits on
 should not have had. A window left blurred at rate 20 spends a whole core doing
 nothing, answers no javascript and paints nothing — indistinguishable, from
 outside, from a page that has hung. It is a measurement tool, not a power
-setting, and it is off by default. `blur_cpu_rate=N` in `~/.config/web/state`
-turns it back on for anyone who wants it.
+setting, so it is gone rather than off: there is no `blur_cpu_rate` and no
+`--no-throttle` any more. A `blur_cpu_rate=` line left in
+`~/.config/web/state` by an older build is ignored, and dropped the next time
+the file is written.
 
 It needs the terminal to report focus, and inside tmux that means one line:
 
