@@ -17,9 +17,13 @@
 #define FILL "─"
 #define ELL  "…"
 
-// Under this there is no room for a name beside the number, and the bar falls
-// back to the numbers alone.
-#define TAB_NAMED_MIN 5
+// The widths at which the bar gives something up. With the number, a space
+// either side and an ellipsis all taken out, a field of eight is the first that
+// leaves enough letters of a title to tell it from another - below that the
+// number is worth more than three dots. Narrower still, the number goes too and
+// the title has the field to itself; narrower again, only the number fits.
+#define TAB_NUMBERED_MIN 8
+#define TAB_NAMED_MIN    5
 
 // ------------------------------------------------------------------- text
 
@@ -89,6 +93,25 @@ static int fit_cols(char *dst, size_t cap, const char *src, int cols) {
     }
     dst[o] = 0;
     return used;
+}
+
+// One column of a label, for a bar with nothing else left to give. The first
+// character that a single cell can actually hold, so a title starting with
+// something double-width is skipped past rather than drawn over its neighbour.
+// A label with no such character at all - all CJK, say - falls back to the
+// number's last digit, which at least differs from the tab beside it.
+static void first_col(const char *src, int number, char *dst, size_t cap) {
+    for (const char *s = src; *s; ) {
+        int w;
+        size_t k = utf8_step(s, &w);
+        if (w == 1 && *s > ' ' && k + 1 <= cap) {
+            memcpy(dst, s, k);
+            dst[k] = 0;
+            return;
+        }
+        s += k;
+    }
+    snprintf(dst, cap, "%d", number % 10);
 }
 
 // What to call a tab: its title, or the host out of its address until one
@@ -199,8 +222,12 @@ void tab_step(App *a, int delta) {
 }
 
 void tab_new(App *a) {
+    // Not about the bar, which copes with whatever it is given: this is the
+    // list itself running out, and every entry is a page of the browser.
     if (a->ntabs >= TAB_MAX) {
-        notify(a, "that is as many tabs as the bar can name");
+        char m[48];
+        snprintf(m, sizeof m, "%d tabs is the limit", TAB_MAX);
+        notify(a, m);
         return;
     }
     char target[96];
@@ -286,37 +313,89 @@ void tabs_paint(App *a) {
     if (sw < 8) sw = 8;
 
     int n = a->ntabs;
-    // What each tab gets between its separator and the next one, with one
-    // column left over for the separator that closes the row.
+
+    // What each tab gets, in the order the room runs out. First the width
+    // between its own separator and the next one, with a column left over for
+    // the separator closing the row. Under one column apiece the separators are
+    // what goes: a tab one letter wide is still a tab, and a row of separators
+    // is not. Nothing is ever dropped for being too narrow - a tab that cannot
+    // be named can still be pointed at, and one that has quietly vanished
+    // cannot.
     int field = (sw - 1) / n - 1;
-    bool named = field >= TAB_NAMED_MIN;
-    if (!named) field = 1;
+    bool sep = field >= 1;
+    if (!sep) field = sw / n;
+    if (field < 1) field = 1;
+
+    // Only when there are more tabs than the row has columns for, which takes
+    // both a crowded bar and a narrow window. The ones around the tab in front
+    // are shown rather than the first few: the tab you are on is the one that
+    // has to be on the screen.
+    int step = field + (sep ? 1 : 0);
+    int fits = (sep ? sw - 1 : sw) / step;
+    if (fits < 1) fits = 1;
+    int first = 0, shown_n = n;
+    if (fits < n) {
+        shown_n = fits;
+        first = a->tab - fits / 2;
+        if (first < 0) first = 0;
+        if (first > n - fits) first = n - fits;
+    }
 
     Buf b = a->tabs_buf;
     b.len = 0;
     buf_addf(&b, "\x1b[%d;1H\x1b[2K\x1b[%d;%dH\x1b[0m",
              a->tabs_row, a->tabs_row, sx);
 
+    // A tab that is not on the bar is not clickable either, and a stale cell
+    // range would hand its clicks to whoever is standing there now.
+    for (int i = 0; i < n; i++) a->tabs[i].x0 = a->tabs[i].x1 = 0;
+
     int col = 0;
-    for (int i = 0; i < n; i++) {
+    for (int i = first; i < first + shown_n; i++) {
         Tab *tb = &a->tabs[i];
-        tb->x0 = tb->x1 = 0;
-        if (col + 1 + field > sw - 1) break;   // no room for this one and the end
-        buf_addf(&b, "\x1b[0m\x1b[2m%s\x1b[0m", SEP);
-        tb->x0 = sx + col;                     // the separator is part of the target
-        col++;
+        tb->x0 = sx + col;               // the separator is part of the target
+        if (sep) {
+            buf_addf(&b, "\x1b[0m\x1b[2m%s\x1b[0m", SEP);
+            col++;
+        }
 
         buf_add(&b, i == a->tab ? "\x1b[7m" : "\x1b[2m", 4);
-        if (named) {
-            char name[512], full[600], shown[600];
+        char name[512], shown[600];
+        if (field >= TAB_NAMED_MIN) {
+            // Room for a name, with a space either side. The number leads it
+            // where there is room for both; where there is not, the title has
+            // the field to itself and position is what says which tab it is.
+            char full[600];
             tab_label(a, i, name, sizeof name);
-            snprintf(full, sizeof full, "%d %s", i + 1, name);
+            if (field >= TAB_NUMBERED_MIN) {
+                char titled[600];
+                snprintf(titled, sizeof titled, "%s", name);
+                snprintf(full, sizeof full, "%d %s", i + 1, titled);
+            } else {
+                snprintf(full, sizeof full, "%s", name);
+            }
             int used = fit_cols(shown, sizeof shown, full, field - 2);
             buf_addf(&b, " %s", shown);
             for (int p = used; p < field - 2; p++) buf_add(&b, " ", 1);
             buf_add(&b, " ", 1);
-        } else {
+        } else if (field >= 2) {
+            // Room for the number alone, which is still the thing you would
+            // reach for: it is what alt+<n> takes.
+            char num[16];
+            snprintf(num, sizeof num, "%d", i + 1);
+            int used = fit_cols(shown, sizeof shown, num, field);
+            buf_addf(&b, "%s", shown);
+            for (int p = used; p < field; p++) buf_add(&b, " ", 1);
+        } else if (i < 9) {
+            // One column, and a digit that means something: alt+<n> reaches
+            // the first nine, so for those the number is worth more than a
+            // letter of a title nobody can read anyway.
             buf_addf(&b, "%d", i + 1);
+        } else {
+            // Past those, a letter of its own name tells the tabs apart.
+            tab_label(a, i, name, sizeof name);
+            first_col(name, i + 1, shown, sizeof shown);
+            buf_addf(&b, "%s", shown);
         }
         buf_add(&b, "\x1b[0m", 4);
         col += field;
@@ -325,8 +404,13 @@ void tabs_paint(App *a) {
 
     // The row closes with a separator and runs on as a rule to the window's
     // edge, so the tabs read as sitting on something rather than floating.
-    buf_addf(&b, "\x1b[2m%s", SEP);
-    for (col++; col < sw; col++) buf_add(&b, FILL, sizeof FILL - 1);
+    if (sep) {
+        buf_addf(&b, "\x1b[2m%s", SEP);
+        col++;
+    } else {
+        buf_add(&b, "\x1b[2m", 4);
+    }
+    for (; col < sw; col++) buf_add(&b, FILL, sizeof FILL - 1);
     buf_add(&b, "\x1b[0m", 4);
 
     a->tabs_buf = b;

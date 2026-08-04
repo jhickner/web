@@ -124,6 +124,17 @@ window of its own for the same reason each `web` window is: Chrome paints only
 the tab in front of a window, so a background tab sharing one screencasts an
 empty picture.
 
+The bar gives things up rather than refusing them. A tab keeps its number and
+its title while there is room for both; below that the number goes and the
+title has the field to itself, then the title goes and the number is all that
+is left, and at one column apiece it is a digit for the first nine — the ones
+`alt+<n>` reaches — and a letter of its own name beyond them. Narrower still,
+the separators go too. Nothing is ever dropped for being too small to name: a
+tab you cannot read can still be clicked, and one that has quietly vanished
+cannot. Only when there are more tabs than the row has columns does anything
+come off it, and then it is the far ends that go, so the tab you are on stays
+on screen. Thirty-two is where the list itself stops.
+
 A link that asks for a new tab of its own still opens a page `web` does not
 know about, and the bar will not grow a tab for it. Tabs here are the ones you
 open.

@@ -295,9 +295,12 @@ typedef struct {
     int  x0, x1;        // cells the bar last drew it on, for clicks
 } Tab;
 
-// Nine, because that is how many alt+<n> can reach, and a tenth tab in a
-// terminal-sized bar would be a number with no room for a name beside it.
-#define TAB_MAX 9
+// Well past what a bar can name comfortably, because the bar's job is to cope
+// rather than to refuse: it gives up the titles, then the numbers, then the
+// separators, and a tab is still a tab when it is one letter wide. This is only
+// the point where the list itself stops, and each entry is a page of the
+// browser - a real cost - so it is not unbounded either.
+#define TAB_MAX 32
 
 typedef struct {
     Term    term;
