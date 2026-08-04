@@ -201,6 +201,12 @@ void term_restore(Term *t, bool clear_inline);  // erase the block on the way ou
 void term_size(Term *t);
 int  term_read(Term *t);                  // pull available bytes
 void term_log(const char *fmt, ...);      // WEB_DEBUG input trace
+
+// The same trace, switched on while the window is up rather than for the whole
+// run: ^D before doing the thing worth recording, ^D again after. It appends to
+// /tmp/web_input.log. -1 toggles; the answer is whether it is now on.
+bool term_trace(int on);
+bool term_tracing(void);
 int  term_next(Term *t, Event *ev);       // 1 = event decoded
 
 extern volatile sig_atomic_t g_resized;
@@ -234,8 +240,14 @@ typedef struct {
 // issued with, so the kind has to be remembered alongside it.
 enum {
     RQ_NONE, RQ_TITLE, RQ_URL, RQ_COPY, RQ_FIT, RQ_SCRIPT,
-    RQ_SELECTOR, RQ_RECORD, RQ_PDF, RQ_SHOT_READY, RQ_SHOT
+    RQ_SELECTOR, RQ_RECORD, RQ_PDF, RQ_SHOT_READY, RQ_SHOT, RQ_FRAME,
+    RQ_MODE
 };
+
+// The isolated world everything we inject for our own use lives in. It shares
+// the page's DOM and nothing else: our globals are not on the page's window,
+// and a page redefining one of the things we call cannot reach ours.
+#define WEB_WORLD "web"
 
 #define REQ_MAX 8
 
@@ -321,6 +333,11 @@ typedef struct {
     bool    loading;
     unsigned load_seq;         // bumped on every load event, for script waits
 
+    // The page's own frame, so an address change can be told from one an
+    // advert in a corner made. Only the top frame is the window's address; a
+    // frame inside it moves the same way and means nothing here.
+    char    frame[64];
+
     // Chrome draws a PDF with the viewer extension, in a frame of its own in a
     // process of its own. Nothing this document can be asked reaches it, so the
     // page is moved with real input instead of with script. Keys reach it only
@@ -339,6 +356,7 @@ typedef struct {
     double  last_metrics_fix;  // when the viewport override was last restored
     double  expect_frame;      // something was done that should redraw; deadline
     double  last_unwedge;      // when the screencast was last restarted for it
+    int     unwedge_run;       // restarts since the last frame that answered one
 
     bool    show_stats;        // ^G
     double  zoom;              // page magnification, alt+= / alt+-
@@ -353,6 +371,13 @@ typedef struct {
     bool    pause_cfg;         // what the config file said, which is what it keeps
     bool    paused;            // and whether that has happened
     int     blur_cpu_rate;     // how hard the renderer is throttled while it is
+
+    // Cancel the browser's own action for a navigation key the page did not
+    // want, so it is never handed back to the window system. The page still
+    // gets the key; this only stops the part that happens after nobody claimed
+    // it, which on macOS is a walk of the whole menu bar and, on some pages,
+    // seconds of the one thread that answers everything.
+    bool    claim_keys;
 
     bool    insert;            // a text field has focus: keys belong to the page
     bool    mouse_down;        // a button went down on the page and is still held
@@ -373,10 +398,20 @@ typedef struct {
     int     motion_run;        // quick frames in a row seen so far
     double  motion_scale;      // how far down, harder over ssh than locally
 
+    // What was asked for, and what to do when it does not turn up. Asking is
+    // all the size change ever was: a frame captured before the resize landed
+    // arrives after it, and one that is dropped on Chrome's side is never
+    // re-sent, so the picture has to be measured rather than assumed.
+    int     frame_w;           // pixel width the next frame should arrive at
+    int     resize_tries;      // asks since the last frame that came back right
+    double  resize_at;         // when to ask again, 0 = nothing owed
+
     bool    fit_width;         // widen the viewport so no page is cut off
     int     fit_w;             // width the page says it needs
     size_t  last_bytes;        // base64 size of the frame just drawn
     double  last_write_ms;     // how long it took to reach the terminal
+    size_t  total_bytes;       // and every frame's, for what a trace adds up to
+    double  worst_write_ms;    // the slowest single frame of the run
     double  fps;               // smoothed, so the number is readable
     double  bytes_per_sec;
 

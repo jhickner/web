@@ -35,6 +35,7 @@ set -g allow-passthrough all
 | `^Y` | copy the page selection, or the address if nothing is selected |
 | `^E` | open this page in the desktop's own browser |
 | `^G` | devtools port, frame size, write time, and throughput |
+| `^D` | start or stop a trace into `/tmp/web_input.log` |
 | `^S` | hide or show the status line |
 | `^Q` | quit |
 | `^T` / `^W` | new tab / close tab (the last one closes the window) |
@@ -77,6 +78,20 @@ slide deck or a carousel puts its controls, and there is no other way to reach
 those from here; going back keeps `^O` and gains `backspace`, which is where a
 browser puts it anyway. Up and down stay ours and scroll, which is what they
 would have done in the page.
+
+An arrow the page does not want is cancelled before the browser can do anything
+else with it. Not for the page's sake — every handler it registered has already
+run by then, so a viewer that pages through images on an arrow goes on doing it
+— but for what happens afterwards. A key nobody claimed is handed back to the
+browser process, and on macOS that means the menu bar: it is routed through
+`performKeyEquivalent`, which validates the whole menu before concluding that
+nothing wanted it. On some pages that validation takes seconds, and the thread
+it runs on is the one that dispatches every reply and encodes every frame — so
+a few arrow presses in an image viewer are enough to stop the window drawing
+at all, while clicking the same arrows on screen costs nothing. Cancelling the
+key is what marks it claimed, and it is the whole of the fix. What it costs is
+scrolling sideways with the arrows, which `h` and `l` do. `--raw-keys` turns it
+off; a text field is left alone either way, or the caret would stop moving.
 
 Local files open the same way, on the command line or in the address bar:
 `./web TODO.md`, `./web ~/notes/plan.html`. A name is only read as a path if it
@@ -146,18 +161,24 @@ and both are wasted on a pane that is not on screen. So `web` asks the terminal
 to report focus, and stops the screencast when it goes away — the picture comes
 straight back, redrawn, when the focus does.
 
-Not drawing is only half of it. The page goes on animating into a screencast
-nobody is reading, and on anything with a `requestAnimationFrame` loop behind it
-that is the whole cost — with no real GPU under `--headless`, the rasterising is
-software, and it lands on the CPU. So the renderer is throttled at the same
-time, twentyfold by default, which slows what it asks for and takes the raster
-behind it with it.
+Not drawing is most of it. The page goes on animating into a screencast nobody
+is reading, and on anything with a `requestAnimationFrame` loop behind it that
+is the whole cost.
 
-The page is not frozen, though. Timers and sockets keep going, audio is decoded
-off the throttled thread, and a video you switched away from to keep listening
-to keeps playing. If a heavy player does stutter, `blur_cpu_rate=1` in
-`~/.config/web/state` keeps the picture pause and drops the throttle; higher
-numbers throttle harder.
+The page is not frozen. Timers and sockets keep going, and a video you switched
+away from to keep listening to keeps playing.
+
+There used to be a CPU throttle alongside the pause — `Emulation.setCPUThrottlingRate`,
+twentyfold by default — on the reasoning that slowing the renderer would take
+the raster behind it with it. It does the opposite. Chrome emulates a slower
+processor rather than asking for less work: a thread of its own interrupts the
+renderer's main thread with a signal, and the handler busy-waits on
+`mach_absolute_time` to burn away the share of the quantum the rate says it
+should not have had. A window left blurred at rate 20 spends a whole core doing
+nothing, answers no javascript and paints nothing — indistinguishable, from
+outside, from a page that has hung. It is a measurement tool, not a power
+setting, and it is off by default. `blur_cpu_rate=N` in `~/.config/web/state`
+turns it back on for anyone who wants it.
 
 It needs the terminal to report focus, and inside tmux that means one line:
 

@@ -104,6 +104,21 @@ static void pump_input(void) {
     }
 }
 
+// How wide the frame actually is. The screencast metadata says how big the
+// page thinks the device is, in CSS pixels, which is the one number the frame
+// size does not follow - so it comes out of the picture itself. A PNG opens
+// with an 8-byte signature and an IHDR whose width sits at byte 16, and the
+// first 32 characters of base64 carry the 24 bytes that reach it.
+static int png_width(const char *b64, size_t len) {
+    if (len < 32) return 0;
+    unsigned char h[24];
+    if (base64_decode(b64, 32, (char *)h) < 24) return 0;
+    static const unsigned char sig[8] = {137, 'P', 'N', 'G', '\r', '\n', 26, '\n'};
+    if (memcmp(h, sig, 8) || memcmp(h + 12, "IHDR", 4)) return 0;
+    return (int)(((unsigned)h[16] << 24) | ((unsigned)h[17] << 16) |
+                 ((unsigned)h[18] << 8) | (unsigned)h[19]);
+}
+
 static uint64_t fnv1a(const char *p, size_t n) {
     uint64_t h = 1469598103934665603ULL;
     for (size_t i = 0; i < n; i++) {
@@ -213,6 +228,12 @@ void notify(App *a, const char *s) {
 #define MOTION_RUN   3       // quick frames in a row before it is a scroll
 #define MOTION_GAP   0.20    // a frame this soon after the last is still moving
 #define MOTION_IDLE  0.30    // and this long without one is stopped
+// A frame that comes back at the size before last is Chrome capturing on its
+// own clock rather than ours. Long enough that the frame the resize itself
+// produces gets to arrive first and cancel the ask, short enough that the
+// picture is not left soft for a beat somebody would notice.
+#define RESIZE_WAIT  0.15
+#define RESIZE_TRIES 4       // asks before the size on offer is the size taken
 
 static int box_cols_for(App *a, int rows) {
     Term *t = &a->term;
@@ -387,6 +408,16 @@ void relayout(App *a) {
     a->cast_h = (int)((double)a->css_h * a->scale * ms + 0.5);
     if (a->cast_w < 1) a->cast_w = 1;
     if (a->cast_h < 1) a->cast_h = 1;
+
+    // The width the next frame should come back at, which is the surface the
+    // metrics just asked for or the cap, whichever bites first. Kept so the
+    // frame that arrives can be measured against what was asked for: the two
+    // calls above are a request, and nothing else notices when it goes
+    // unanswered.
+    int surface_w = (int)((double)a->css_w * dsf + 0.5);
+    a->frame_w = surface_w < a->cast_w ? surface_w : a->cast_w;
+    a->resize_at = 0;          // whatever was owed, this is the ask
+
     screencast_start(a);
 }
 
@@ -1362,6 +1393,51 @@ static void cycle_scale(App *a) {
     notify(a, m);
 }
 
+// Start and stop the trace, and bracket it with what it is a trace of. The
+// figures either side are the whole point: a picture that costs a megabyte
+// thirty times a second is a window that cannot answer the keyboard, and no
+// amount of reading the frames one at a time says so as plainly as the totals
+// do. Everything between the two marks is in /tmp/web_input.log.
+static void trace_toggle(App *a) {
+    static unsigned at_frames;
+    static size_t   at_bytes;
+    static double   at_time;
+
+    if (term_tracing()) {
+        double secs = now_sec() - at_time;
+        unsigned n = a->frames - at_frames;
+        size_t bytes = a->total_bytes - at_bytes;
+        term_log("=== trace off after %.1fs: %u frames, %.1f MB base64 "
+                 "(%.1f MB/s), %.0f KB a frame, worst write %.0f ms",
+                 secs, n, bytes / 1048576.0, secs > 0 ? bytes / 1048576.0 / secs : 0,
+                 n ? bytes / 1024.0 / n : 0, a->worst_write_ms);
+        term_trace(0);
+        char m[96];
+        snprintf(m, sizeof m, "trace off - %u frames, %.1f MB, worst %.0fms",
+                 n, bytes / 1048576.0, a->worst_write_ms);
+        notify(a, m);
+        return;
+    }
+
+    if (!term_trace(1)) {
+        notify(a, "could not open /tmp/web_input.log");
+        return;
+    }
+    at_frames = a->frames;
+    at_bytes = a->total_bytes;
+    at_time = now_sec();
+    a->worst_write_ms = 0;
+    term_log("\n=== trace on at %.3f: %s", at_time, a->url);
+    term_log("=== viewport %dx%d css, cast %dx%d, scale %g, "
+             "%s, term %dx%d cells of %dx%d px%s%s",
+             a->css_w, a->css_h, a->cast_w, a->cast_h, a->scale,
+             a->in_motion ? "moving" : "still", a->term.cols, a->term.rows,
+             a->term.cell_w, a->term.cell_h,
+             a->kitty.tmux ? ", tmux" : "",
+             (getenv("SSH_CONNECTION") || getenv("SSH_TTY")) ? ", ssh" : "");
+    notify(a, "trace on - /tmp/web_input.log");
+}
+
 // Zoom is a request, not a command: the viewport narrows to magnify, and a page
 // that cannot reflow that narrow gets widened back until it fits. Zooming into
 // a wide layout would otherwise just push half of it off the screen.
@@ -1504,22 +1580,72 @@ static void find_next(App *a, bool backwards) {
     run_js(a, js);
 }
 
+// Whether the keyboard belongs to the page: the elements that swallow a
+// keystroke rather than letting it mean a command.
+#define EDITABLE_FN \
+    "function ed(e){if(!e)return false;var t=e.tagName;" \
+    "return e.isContentEditable||t==='INPUT'||t==='TEXTAREA'||t==='SELECT';}"
+
 // The page tells us when focus lands on something typable, so j and k scroll
 // when you are reading and type themselves when you are filling in a form.
 // The listeners go on once per document, whatever else happens: switching tabs
 // runs this again against a page that may already be carrying it, and a second
-// set of them would report every focus change twice. The report at the end is
-// not guarded - that one is how a session that has just arrived finds out where
-// the focus already is.
+// set of them would report every focus change twice.
+//
+// This runs in a world of its own - see WEB_WORLD - so `__webmode` and the
+// guard below are ours alone. Left in the page's world they would be globals
+// with names nothing else has, which is the whole of what a script looking for
+// automation is looking for. The DOM is shared either way, so the listeners
+// hear the same events from here.
 static const char FOCUS_WATCHER[] =
     "(function(){"
-    "function ed(e){if(!e)return false;var t=e.tagName;"
-    "return e.isContentEditable||t==='INPUT'||t==='TEXTAREA'||t==='SELECT';}"
+    EDITABLE_FN
     "function rep(){try{__webmode(ed(document.activeElement)?'1':'0');}catch(e){}}"
     "if(!window.__webwatch){window.__webwatch=1;"
     "document.addEventListener('focusin',rep,true);"
     "document.addEventListener('focusout',function(){setTimeout(rep,0);},true);}"
     "rep();})()";
+
+// The same question, asked once rather than watched for. A session that has
+// just arrived on a document that is already loaded has heard no focus event
+// and cannot wait for one. Asked of the page's own world, where it leaves
+// nothing behind: it defines no globals and the answer comes back by value.
+static const char FOCUS_READ[] =
+    "(function(){" EDITABLE_FN
+    "return ed(document.activeElement)?'1':'0';})()";
+
+// A key the page does not claim is handed back to the browser process, and on
+// macOS that means the menu bar: the keystroke is routed through
+// performKeyEquivalent, which validates the whole menu before concluding that
+// nothing wanted it. That validation can take seconds, and the thread it runs
+// on is the one that dispatches every reply and encodes every frame - so a few
+// arrow presses in an image viewer are enough to stop the window drawing at
+// all, while clicking the same arrows on screen costs nothing. preventDefault
+// is what marks a key as claimed, so this claims the ones whose default action
+// is something web does for itself anyway.
+//
+// This does not take the key away from the page. preventDefault cancels the
+// browser's own action - scrolling - and nothing else: every handler the page
+// registered still runs, so a viewer that pages through images on an arrow goes
+// on doing it.
+//
+// In the capture phase on the window, which is the first place a key can be
+// seen and the one place it cannot be taken away from. It was in the bubble
+// phase to begin with, on the reasoning that running last would let the page
+// speak first - but a modal that binds the arrows calls stopPropagation, and a
+// listener behind that never runs at all. The key then reaches nobody, which
+// is exactly the case this is here to catch.
+//
+// A text field is left alone - the editor claims those keys itself, and
+// cancelling them would stop the caret moving.
+static const char KEY_CLAIMER[] =
+    "(function(){if(window.__webkeys)return;window.__webkeys=1;"
+    "var K={ArrowLeft:1,ArrowRight:1,ArrowUp:1,ArrowDown:1};"
+    "window.addEventListener('keydown',function(e){"
+    "if(!K[e.key])return;"
+    "var t=document.activeElement,n=t&&t.tagName;"
+    "if(t&&(t.isContentEditable||n==='INPUT'||n==='TEXTAREA'||n==='SELECT'))return;"
+    "e.preventDefault();},true);})()";
 
 // The shortest selector that finds the element again: its id where it has one,
 // otherwise a CSS path shortened to the first ancestor that is already unique.
@@ -1546,11 +1672,19 @@ static void handle_focus(App *a, bool focused) {
         a->paused = true;
         a->expect_frame = 0;        // no frame is coming, and none is owed
         app_cdp(a, "Page.stopScreencast", "");
-        // Not drawing is only half of it: the page goes on animating into a
-        // screencast nobody is reading, and on a WebGL demo that is the whole
-        // cost. Throttling the renderer slows what it asks for, so the raster
-        // behind it falls away too. Audio is decoded off this thread, so
-        // something you switched away from to keep listening to keeps playing.
+        // Not drawing is most of it: the page goes on animating into a
+        // screencast nobody is reading, and stopping that is a real saving.
+        //
+        // The throttle underneath is not, and is off by default because of what
+        // it turns out to be. Chrome emulates a slower processor rather than
+        // asking for less work: a thread of its own interrupts the renderer's
+        // main thread with a signal, and the handler busy-waits on
+        // mach_absolute_time to burn away the share of the quantum the rate
+        // says it should not have had. A window left blurred at rate 20 spends
+        // a whole core doing nothing, answers no javascript and paints nothing
+        // - which is not a page that has been quietened down, it is a page
+        // indistinguishable from one that has hung. Anyone who wants it can ask
+        // for it in the config; it is a measurement tool, not a power setting.
         if (a->blur_cpu_rate > 1)
             app_cdp(a, "Emulation.setCPUThrottlingRate", "\"rate\":%d",
                     a->blur_cpu_rate);
@@ -1758,6 +1892,7 @@ static void handle_key(App *a, Event *ev) {
         case 'g':
             a->show_stats = !a->show_stats;
             return;
+        case 'd': trace_toggle(a); return;
         case 's':
             a->hide_status = !a->hide_status;
             return;
@@ -1949,7 +2084,31 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         size_t dlen = end ? (size_t)(end - data) : 0;
 
         double sid = json_num(msg, "sessionId", 0);
-        a->expect_frame = 0;      // the page is still answering
+
+        // A frame is only an answer to the last size asked for if it comes back
+        // at that size. Chrome captures on its own clock: the frame in flight
+        // when the metrics changed was rastered before them and arrives after,
+        // and the frame the resize itself produces is dropped rather than
+        // queued if it lands while too many are unacknowledged. Either way the
+        // small picture is left on screen with nothing coming for it - which is
+        // motion ending and the page never coming back sharp. Measuring it is
+        // the only way to tell, and the tolerance is wide because rounding
+        // moves a pixel or two while the motion scales move a third.
+        int pw = png_width(data, dlen);
+        bool small = pw > 0 && a->frame_w > 0 && pw * 20 < a->frame_w * 19;
+        if (!small) a->resize_tries = 0;
+        // Bounded, and the bound puts the debt down rather than leaving it
+        // owed: a page that will not come back at the size asked for is not
+        // worth a loop that never sleeps again. Any frame at the right size
+        // hands the asks back, so the next scroll starts with all of them.
+        if (!small || a->resize_tries >= RESIZE_TRIES) {
+            a->expect_frame = 0;      // the page is still answering
+            a->unwedge_run = 0;       // and the restarts start over from three
+            a->resize_at = 0;
+        } else if (a->resize_at == 0) {
+            a->resize_at = now_sec() + RESIZE_WAIT;
+        }
+
         // Taken before the hash rather than before the write: everything from
         // here on is ours, and the point of the split below is to say how much
         // of the gap between frames is us and how much is Chrome.
@@ -1974,6 +2133,9 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
                 }
                 a->last_bytes = dlen;
                 a->last_write_ms = (t1 - t0) * 1000.0;
+                a->total_bytes += dlen;
+                if (a->last_write_ms > a->worst_write_ms)
+                    a->worst_write_ms = a->last_write_ms;
                 a->frames++;
                 a->last_draw = t1;
                 // The gap splits in two at the moment the frame landed: what
@@ -1982,16 +2144,22 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
                 // whole question, and one number for the gap could not say.
                 double chrome_ms = prev_draw > 0
                     ? (t_arrive - prev_draw) * 1000.0 : 0;
-                term_log("%.3f frame %u: %zu KB b64, chrome %.1f ms, "
-                         "ours %.1f ms (write %.1f), gap %.1f ms, %.1f fps%s",
-                         t1, a->frames, dlen / 1024, chrome_ms,
+                term_log("%.3f frame %u: %dpx of %d, %zu KB b64, chrome %.1f ms, "
+                         "ours %.1f ms (write %.1f), gap %.1f ms, %.1f fps%s%s",
+                         t1, a->frames, pw, a->frame_w, dlen / 1024, chrome_ms,
                          (t1 - t_arrive) * 1000.0, a->last_write_ms,
-                         gap * 1000.0, a->fps, a->in_motion ? " [motion]" : "");
+                         gap * 1000.0, a->fps, a->in_motion ? " [motion]" : "",
+                         small ? " [stale size]" : "");
 
                 // One quick frame is a click landing; a run of them is the page
                 // sliding past. Waiting for the run is what keeps a single
                 // keypress from paying for a resolution change it cannot use.
-                if (gap > 0 && gap < MOTION_GAP) {
+                // A frame at the wrong size is not the page sliding past at
+                // all: it is the last size arriving late, and counting it turns
+                // the restart that ends a scroll into evidence of another one.
+                if (small) {
+                    a->motion_run = 0;
+                } else if (gap > 0 && gap < MOTION_GAP) {
                     if (a->motion_run < MOTION_RUN) a->motion_run++;
                 } else {
                     a->motion_run = 0;
@@ -2046,6 +2214,11 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         a->kitty.grid_dirty = true;
         a->pdf = a->pdf_clicked = false;   // until the new document says so
         size_t n;
+        // The frame object leads with its own id, and this is the one message
+        // that says which frame is the page rather than something inside it.
+        const char *f = json_str(msg, "id", &n);
+        if (f && n < sizeof a->frame) snprintf(a->frame, sizeof a->frame, "%.*s",
+                                               (int)n, f);
         const char *u = json_str(msg, "url", &n);
         // Escaped, like every other string that arrives this way.
         if (u) {
@@ -2054,6 +2227,32 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
             a->fit_w = 0;              // measured per page
             session_write(a);          // what anything attaching would look for
         }
+        return;
+    }
+
+    // The address moved without a document being loaded, which is how a page
+    // that routes in javascript navigates: clicking a post on x.com, or opening
+    // an image viewer, changes the address through the history API and nothing
+    // is fetched. There is no frameNavigated for it, so without this the bar
+    // goes on naming whatever the window last really loaded - and so does the
+    // note on disk, which is what anything attaching from outside reads.
+    if (strstr(msg, "Page.navigatedWithinDocument")) {
+        size_t n;
+        // An advert in a frame of its own routes the same way and is not the
+        // window's address. Only checked once the page has said which frame it
+        // is; before that there is nothing to check against.
+        const char *f = json_str(msg, "frameId", &n);
+        if (a->frame[0] && (!f || n != strlen(a->frame) ||
+                            memcmp(f, a->frame, n) != 0))
+            return;
+        const char *u = json_str(msg, "url", &n);
+        if (!u) return;
+        json_unescape(a->url, sizeof a->url, u, n);
+        session_write(a);
+        // The document is the same one, so no load event is coming to carry the
+        // title the app has just set alongside the address.
+        app_req_note(a, app_cdp(a, "Runtime.evaluate",
+            "\"expression\":\"document.title\",\"returnByValue\":true"), RQ_TITLE);
         return;
     }
 
@@ -2138,6 +2337,26 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         size_t n;
         const char *v = json_str(msg, "value", &n);
         a->pdf = v && n == 15 && !memcmp(v, "application/pdf", 15);
+        return;
+    }
+
+    // Read the same way the watcher reports, so both ends say '1' or nothing.
+    case RQ_MODE: {
+        size_t n;
+        const char *v = json_eval_str(msg, &n);
+        a->insert = v && n && v[0] == '1';
+        return;
+    }
+
+    case RQ_FRAME: {
+        // The tree leads with the top frame, whose own id is the first one in
+        // it; searched from there rather than from the front, where the id of
+        // the reply itself would answer first.
+        const char *tree = strstr(msg, "\"frameTree\"");
+        size_t n;
+        const char *f = tree ? json_str(tree, "id", &n) : NULL;
+        if (f && n < sizeof a->frame)
+            snprintf(a->frame, sizeof a->frame, "%.*s", (int)n, f);
         return;
     }
 
@@ -2251,7 +2470,15 @@ static void usage(void) {
         "              cannot place is named rather than ended\n"
         "  --exec CMD  run CMD against this window, its output in the console\n"
         "  --port N    fix chrome's devtools port so playwright can find it\n"
-        "  --no-pause  keep drawing while the terminal is not focused\n");
+        "  --no-pause  keep drawing while the terminal is not focused\n"
+        "  --raw-keys  let a key the page did not want reach the window\n"
+        "              system. On macOS that routes it through the menu bar,\n"
+        "              which on some pages costs seconds of the thread every\n"
+        "              frame and every reply comes from\n"
+        "  --no-throttle   do not slow the renderer while it is not focused,\n"
+        "              whatever the config says. Chrome's throttle burns a core\n"
+        "              busy-waiting, so a blurred window looks exactly like a\n"
+        "              hung one\n");
 }
 
 // Everything a fresh CDP session needs before it is worth drawing: the domains
@@ -2261,6 +2488,12 @@ static void usage(void) {
 void session_init(App *a) {
     app_cdp(a, "Page.enable", "");
     app_cdp(a, "Runtime.enable", "");
+
+    // Which frame is the page. A window that navigates somewhere is told by the
+    // event, but one that arrives on a page already loaded - an adopted browser,
+    // or a tab switched back to - never gets one, and an address moved by
+    // javascript would then have nothing to be checked against.
+    app_req_note(a, app_cdp(a, "Page.getFrameTree", ""), RQ_FRAME);
 
     // A browser we adopted, or the first run against a new Chrome, was started
     // before its own user agent could be read, so it is still saying headless.
@@ -2281,14 +2514,38 @@ void session_init(App *a) {
     {
         char esc[2048];
         json_escape(esc, sizeof esc, FOCUS_WATCHER);
-        app_cdp(a, "Runtime.addBinding", "\"name\":\"__webmode\"");
-        app_cdp(a, "Runtime.addBinding", "\"name\":\"__webrec\"");
+        // Named worlds have to be claimed before the script that lands in one:
+        // a binding arriving afterwards is not in the world already built.
+        app_cdp(a, "Runtime.addBinding",
+                 "\"name\":\"__webmode\",\"executionContextName\":\"%s\"",
+                 WEB_WORLD);
+        app_cdp(a, "Runtime.addBinding",
+                 "\"name\":\"__webrec\",\"executionContextName\":\"%s\"",
+                 WEB_WORLD);
         // A registration sticks to the page rather than to the session, so a
         // tab switched back to would collect another copy of it every time.
-        if (tab_session_new(a))
+        // `runImmediately` is what covers the document already on screen: the
+        // registration alone would not be run until the next one.
+        bool fresh = tab_session_new(a);
+        if (fresh)
             app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
-                     "\"source\":\"%s\"", esc);
-        app_cdp(a, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
+                     "\"source\":\"%s\",\"worldName\":\"%s\","
+                     "\"runImmediately\":true", esc, WEB_WORLD);
+        // In the same world, and registered the same way: a listener added from
+        // an isolated world sees the page's events and can cancel them, and
+        // nothing it defines is visible to the page.
+        if (a->claim_keys && fresh) {
+            json_escape(esc, sizeof esc, KEY_CLAIMER);
+            app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
+                     "\"source\":\"%s\",\"worldName\":\"%s\","
+                     "\"runImmediately\":true", esc, WEB_WORLD);
+            json_escape(esc, sizeof esc, FOCUS_WATCHER);   // as the next call expects
+        }
+        // A tab switched back to has its watcher already, and no event to
+        // repeat itself with, so the state comes back by asking.
+        json_escape(esc, sizeof esc, FOCUS_READ);
+        app_req_note(a, app_cdp(a, "Runtime.evaluate",
+            "\"expression\":\"%s\",\"returnByValue\":true", esc), RQ_MODE);
     }
 }
 
@@ -2308,6 +2565,13 @@ void ask_where(App *a) {
 // and its memory for nothing.
 static void leave_browser(App *a) {
     Chrome *c = &a->chrome;
+    // Nothing here is going to draw another frame, and a page still being
+    // captured is work the browser has to get through before it can answer any
+    // of the questions below - or shut down when it is told to. On a page that
+    // repaints continuously, that is most of the wait between the shell getting
+    // its terminal back and the window actually going.
+    if (c->ws.fd > 0 && !c->ws.closed) cdp_call(c, "Page.stopScreencast", "");
+
     // Every tab this window opened, whoever the browser belongs to. They exist
     // because we asked for them, so they go when we do - and closed here rather
     // than below, so the count of what is left is a count of somebody else's.
@@ -2369,6 +2633,7 @@ int app_attach(App *a, int port, char *msg, size_t cap) {
     memset(a->reqs, 0, sizeof a->reqs);
     a->pend.kind = PEND_NONE;
     a->title[0] = 0;
+    a->frame[0] = 0;           // session_init asks the new page which frame it is
     a->loading = false;
     a->insert = false;
     a->mouse_down = false;
@@ -2421,7 +2686,8 @@ int main(int argc, char **argv) {
         ? MOTION_SCALE_SSH : MOTION_SCALE;
     a.zoom = 1.0;
     a.pause_on_blur = a.pause_cfg = true;
-    a.blur_cpu_rate = 20;
+    a.blur_cpu_rate = 1;              // see handle_focus: the throttle costs a core
+    a.claim_keys = true;              // --raw-keys hands them to the window system
     a.exec_fd = -1;
     load_state(&a);                   // --zoom below still wins over it
     a.fit_width = true;
@@ -2472,6 +2738,12 @@ int main(int argc, char **argv) {
             a.clear_exit = false;
         } else if (!strcmp(argv[i], "--no-status")) {
             a.hide_status = true;
+        } else if (!strcmp(argv[i], "--raw-keys")) {
+            a.claim_keys = false;
+        } else if (!strcmp(argv[i], "--no-throttle")) {
+            // After load_state, so it beats a rate left in the config by an
+            // earlier run - which is the whole point of having it as a flag.
+            a.blur_cpu_rate = 1;
         } else if (!strcmp(argv[i], "--show")) {
             show = true;
         } else if (!strcmp(argv[i], "--keep")) {
@@ -2796,6 +3068,13 @@ int main(int argc, char **argv) {
             int ms = left > 0 ? (int)(left * 1000.0) + 1 : 0;
             if (wait < 0 || ms < wait) wait = ms;
         }
+        // A size that was not handed over is the same kind of nothing: the
+        // frame that would have said so is the one that did not come.
+        if (a.resize_at > 0) {
+            double left = a.resize_at - now_sec();
+            int ms = left > 0 ? (int)(left * 1000.0) + 1 : 0;
+            if (wait < 0 || ms < wait) wait = ms;
+        }
         int rc = poll(fds, 3, wait);
         if (rc < 0 && !g_resized) continue;
 
@@ -2808,8 +3087,16 @@ int main(int argc, char **argv) {
             term_read(&a.term);
             Event ev;
             while (term_next(&a.term, &ev)) {
-                term_log("%.3f event type=%d key=%d mods=%d text=%s", now_sec(),
-                         ev.type, ev.key, ev.mods, ev.text[0] ? ev.text : "");
+                // Mouse events say where and which button rather than key=0:
+                // a trace of something that was clicked has to name the click.
+                if (ev.type == EV_MOUSE)
+                    term_log("%.3f event mouse %s btn=%d cell %d,%d mods=%d",
+                             now_sec(), ev.motion ? "move" :
+                             ev.press ? "press" : "release",
+                             ev.button, ev.mx, ev.my, ev.mods);
+                else
+                    term_log("%.3f event type=%d key=%d mods=%d text=%s", now_sec(),
+                             ev.type, ev.key, ev.mods, ev.text[0] ? ev.text : "");
                 if (ev.type == EV_KEY) handle_key(&a, &ev);
                 else if (ev.type == EV_MOUSE) handle_mouse(&a, &ev);
                 else if (ev.type == EV_FOCUS) handle_focus(&a, ev.press);
@@ -2832,30 +3119,31 @@ int main(int argc, char **argv) {
         // the rest of the session carries on: the address bar still moves, the
         // title still changes, and nothing is drawn again. Restarting the
         // screencast is the one thing that always brings a frame back.
+        // Backing off rather than asking again on the same beat, and asking for
+        // less. relayout sends the device metrics with it, which is a whole
+        // page relayout - and the browser this is aimed at has by now stopped
+        // answering anything, so the ask lands on a queue rather than on a
+        // page. Every trace of a wedged window shows those calls going out and
+        // never coming back. Restarting the screencast is the part that brings
+        // a frame back when there is one to bring, and it is much the cheaper
+        // of the two.
+        double due = 3.0 * (1 << (a.unwedge_run < 3 ? a.unwedge_run : 3));
         if (a.expect_frame > 0 && !a.paused && now_sec() > a.expect_frame &&
-            now_sec() - a.last_unwedge > 3.0) {
+            now_sec() - a.last_unwedge > due) {
             a.last_unwedge = now_sec();
             a.expect_frame = 0;
-            term_log("no frame after acting on input; restarting screencast");
+            a.unwedge_run++;
+            term_log("no frame after acting on input; restarting screencast (%d)",
+                     a.unwedge_run);
             a.kitty.grid_dirty = true;
-            relayout(&a);
-        }
-
-        // The page has stopped. Going back to full resolution restarts the
-        // screencast, which is what puts the sharp frame up: the last one drawn
-        // was a moving one, and nothing on the page has to change for it to be
-        // replaced.
-        if (a.in_motion && now_sec() - a.last_draw > MOTION_IDLE) {
-            a.in_motion = false;
-            a.motion_run = 0;
-            term_log("%.3f motion off", now_sec());
-            a.last_hash = 0;        // the same picture, at a size worth drawing
-            relayout(&a);
-            // Going back up is the half that shows: a frame that never comes
-            // leaves the small one on screen. Watched for, and sooner than a
-            // keypress is, because this picture is already wrong rather than
-            // merely late.
-            if (a.expect_frame == 0) a.expect_frame = now_sec() + 1.0;
+            screencast_start(&a);
+            // Said out loud once it is clear this is not a frame running late.
+            // A window that has stopped drawing and says nothing is the whole
+            // of what a hang looks like from the outside; one that says the
+            // page has stopped answering is a different experience of the same
+            // fault, and the only part of it this program can fix.
+            if (a.unwedge_run == 3)
+                notify(&a, "page has stopped answering - ^R reloads, ^Q quits");
         }
 
         // A socket that has gone is a page that has gone: closed by itself, or
@@ -2875,6 +3163,43 @@ int main(int argc, char **argv) {
             draw_panes(&a);
         }
         if (a.chrome.ws.closed && !tab_lost(&a)) break;
+
+        // The page has stopped. Going back to full resolution restarts the
+        // screencast, which is what puts the sharp frame up: the last one drawn
+        // was a moving one, and nothing on the page has to change for it to be
+        // replaced.
+        // Decided after the socket has been read rather than before it: a frame
+        // already sitting in the buffer is the page still moving, and calling
+        // the scroll over one pass early is what put a frame captured at the
+        // small size on the far side of the size change.
+        if (a.in_motion && now_sec() - a.last_draw > MOTION_IDLE) {
+            a.in_motion = false;
+            a.motion_run = 0;
+            term_log("%.3f motion off", now_sec());
+            a.last_hash = 0;        // the same picture, at a size worth drawing
+            relayout(&a);
+            // Going back up is the half that shows: a frame that never comes
+            // leaves the small one on screen. Watched for, and sooner than a
+            // keypress is, because this picture is already wrong rather than
+            // merely late - so a deadline left over from a keypress is brought
+            // forward rather than kept.
+            double due = now_sec() + 1.0;
+            if (a.expect_frame == 0 || a.expect_frame > due) a.expect_frame = due;
+        }
+
+        // A frame that came back at the last size rather than this one. The ask
+        // is the only lever there is, so it goes out again; relayout clears the
+        // debt, and the count is what stops it becoming a loop.
+        if (a.resize_at > 0 && now_sec() > a.resize_at) {
+            a.resize_at = 0;        // owed or not, this pass is the answer
+            if (!a.paused) {
+                a.resize_tries++;
+                term_log("%.3f last frame was not %d px wide; asking again (%d)",
+                         now_sec(), a.frame_w, a.resize_tries);
+                a.last_hash = 0;    // the same picture, at a size worth drawing
+                relayout(&a);
+            }
+        }
 
         script_step(&a);
         draw_panes(&a);

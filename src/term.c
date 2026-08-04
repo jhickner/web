@@ -282,20 +282,42 @@ void term_restore(Term *t, bool clear_inline) {
 }
 
 // Set WEB_DEBUG to record exactly what arrives from the terminal.
-void term_log(const char *fmt, ...) {
-    static FILE *f;
-    static int checked;
-    if (!checked) {
-        checked = 1;
-        if (getenv("WEB_DEBUG")) f = fopen("/tmp/web_input.log", "w");
+#define TRACE_PATH "/tmp/web_input.log"
+
+static FILE *g_log;
+static int   g_log_env_checked;
+
+bool term_tracing(void) { return g_log != NULL; }
+
+// The same log, turned on part way through a run instead of at the start of
+// one. A page that only misbehaves once something has been clicked is a page
+// whose whole log is the part before the click, so the switch matters as much
+// as the recording: opened for appending, because looking twice at the same
+// thing should add to the account rather than replace it.
+bool term_trace(int on) {
+    if (on < 0) on = g_log ? 0 : 1;
+    if (on && !g_log) {
+        g_log_env_checked = 1;          // this is the file, whatever the env said
+        g_log = fopen(TRACE_PATH, "a");
+    } else if (!on && g_log) {
+        fclose(g_log);
+        g_log = NULL;
     }
-    if (!f) return;
+    return g_log != NULL;
+}
+
+void term_log(const char *fmt, ...) {
+    if (!g_log_env_checked) {
+        g_log_env_checked = 1;
+        if (getenv("WEB_DEBUG")) g_log = fopen(TRACE_PATH, "w");
+    }
+    if (!g_log) return;
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
+    vfprintf(g_log, fmt, ap);
     va_end(ap);
-    fputc('\n', f);
-    fflush(f);
+    fputc('\n', g_log);
+    fflush(g_log);
 }
 
 int term_read(Term *t) {
