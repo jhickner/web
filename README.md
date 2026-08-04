@@ -1,5 +1,6 @@
 # web
 
+![Hacker News rendered inline in a terminal, with a tab bar above the page](images/ss.png)
 
 Chrome in your terminal. Mostly. Sort of. 
 This project uses Chrome's screencast capability combined with kitty graphics
@@ -27,6 +28,13 @@ make
 ```
 
 No libraries to install: the whole thing is libc and about 8,000 lines of C.
+
+Give it more than one address and each one after the first opens in a tab,
+with the window starting on the first:
+
+```sh
+./web news.ycombinator.com lobste.rs example.com
+```
 
 Inside tmux, the graphics escapes need forwarding. Once, in `~/.tmux.conf`:
 
@@ -99,6 +107,8 @@ While reading:
 ## Options
 
 ```
+web [options] <url>...
+
 --scale F   device pixel ratio (default 1; 2 is sharper at 4x the data,
             0.5 is blurrier at a quarter of it)
 --zoom F    page magnification (default 1.0)

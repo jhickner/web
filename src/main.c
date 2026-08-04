@@ -1270,6 +1270,17 @@ static bool file_url(const char *raw, char *out, size_t cap) {
     return true;
 }
 
+// An address off the command line, made into one a browser will take. Kept
+// apart from what the address bar does with a phrase, because a word with no
+// dot in it is a search there and is a host here: `web localhost:8080` means
+// the server, and nobody types a search into a shell argument.
+static void start_url(const char *raw, char *out, size_t cap) {
+    if (strstr(raw, "://") || !strncmp(raw, "about:", 6))
+        snprintf(out, cap, "%s", raw);
+    else if (!file_url(raw, out, cap))
+        snprintf(out, cap, "https://%s", raw);
+}
+
 void navigate(App *a, const char *raw) {
     char url[1100];
     if (strstr(raw, "://") || strncmp(raw, "about:", 6) == 0) {
@@ -1465,6 +1476,8 @@ static void resize_box(App *a, int drows, int dcols, bool scale) {
     term_clear_inline(t);              // and so are the cells that named it
     term_resize_inline(t, block_rows(a));   // the bar above, the rest below
     a->status_last.len = 0;
+    a->tabs_last.len = 0;
+    a->console_last.len = 0;
     // The cells were just blanked, so the next frame has to land whatever it
     // looks like: a page that resizes to the same picture would otherwise be
     // dropped as a duplicate and leave the window empty until it moved.
@@ -2244,6 +2257,8 @@ static void handle_key(App *a, Event *ev) {
                 kitty_clear(&a->kitty);
                 term_clear_inline(&a->term);
                 a->status_last.len = 0;
+                a->tabs_last.len = 0;
+                a->console_last.len = 0;
                 a->last_hash = 0;
             }
             relayout(a);
@@ -2767,7 +2782,9 @@ static void on_target_message(App *a, const char *msg) {
 
 static void usage(void) {
     fprintf(stderr,
-        "usage: web [options] <url>\n"
+        "usage: web [options] <url>...\n"
+        "  A second address, and every one after it, opens in a tab of its\n"
+        "  own. The window starts on the first.\n"
         "  --scale F   hold the frame at F of the viewport (0.5 is a quarter of\n"
         "              the data and blurrier; above 1 does nothing, the\n"
         "              screencast will not hand over more than the viewport).\n"
@@ -3016,12 +3033,16 @@ int main(int argc, char **argv) {
     a.fit_width = true;
     a.inline_mode = true;             // a window in the shell, unless --full
     a.clear_exit = true;              // the window goes away, unless --no-clear
-    bool show = false, login = false, url_given = false;
+    bool show = false, login = false;
     bool endpoint_only = false, browsers_only = false, kill_only = false;
     const char *exec_cmd = NULL;
     double drain_at = 0;              // when the queue first ran out
     int port = 0;                     // 0 = let chrome pick a free one
     const char *eval_js = NULL;
+    // Every address on the command line, in the order it was given: the first
+    // is where this window goes, and each one after it gets a tab.
+    const char *urls[TAB_MAX];
+    int nurls = 0, extra_urls = 0;
     // Nowhere, until told. A homepage nobody asked for is a page load, a set of
     // cookies and a network round trip spent before the first key is pressed.
     const char *start = "about:blank";
@@ -3110,11 +3131,17 @@ int main(int argc, char **argv) {
             fprintf(stderr, "web: unknown or incomplete option '%s'\n", argv[i]);
             usage();
             return 1;
+        } else if (nurls < TAB_MAX) {
+            urls[nurls++] = argv[i];
         } else {
-            start = argv[i];
-            url_given = true;
+            extra_urls++;
         }
     }
+    if (extra_urls)
+        fprintf(stderr, "web: %d tabs is the limit; the last %d address%s "
+                        "ignored\n", TAB_MAX, extra_urls,
+                extra_urls == 1 ? " was" : "es were");
+    if (nurls) start = urls[0];
     // Questions about, and an end to, what is already running - all answered
     // without starting anything of our own.
     if (endpoint_only) return print_sessions();
@@ -3136,10 +3163,7 @@ int main(int argc, char **argv) {
     }
 
     char first[1200];
-    if (strstr(start, "://") || !strncmp(start, "about:", 6))
-        snprintf(first, sizeof first, "%s", start);
-    else if (!file_url(start, first, sizeof first))
-        snprintf(first, sizeof first, "https://%s", start);
+    start_url(start, first, sizeof first);
     snprintf(a.url, sizeof a.url, "%s", first);
 
     term_log("%.3f start", now_sec());
@@ -3292,13 +3316,29 @@ int main(int argc, char **argv) {
     // sent somewhere; one we started is already fetching, and navigating again
     // would throw that head start away and ask for the same page twice.
     bool launched = !a.chrome.adopted && !a.chrome.foreign;
-    if (a.chrome.foreign && !url_given) ask_where(&a);
+    if (a.chrome.foreign && !nurls) ask_where(&a);
     else if (early_url && launched) a.loading = true;
     else navigate(&a, first);
     // The first request to anywhere real leaves here, which is what the whole
     // startup chain above is in front of. Everything after this is the page's.
     term_log("%.3f navigate %s", now_sec(),
              early_url && launched ? "was on the command line" : "sent");
+
+    // The rest of the command line, one tab apiece. After the first has been
+    // sent, so the page somebody is waiting for is already on its way while the
+    // others are still being opened - and the window goes back to it at the
+    // end, because the first address is the one that was asked for.
+    //
+    // Not for a run with a job to do: a shot or a script is aimed at one page,
+    // and the tabs would be loads paid for and never looked at.
+    if (nurls > 1 && !a.shot_path && !a.script.drain_exit) {
+        for (int i = 1; i < nurls; i++) {
+            char u[1200];
+            start_url(urls[i], u, sizeof u);
+            if (!tab_open_url(&a, u)) break;
+        }
+        tab_go(&a, 0);
+    }
     // Timed from here rather than from the top of main: what the picture is
     // waiting for is the page, and none of starting a browser was that.
     if (a.shot_path) {
@@ -3349,6 +3389,8 @@ int main(int argc, char **argv) {
                 a.kitty.grid_dirty = true;
             }
             a.status_last.len = 0;      // the screen it was on is gone
+            a.tabs_last.len = 0;
+            a.console_last.len = 0;
             // Inline, a resize leaves the page the size it was, so the frame
             // that follows is the one already drawn and would be hash-skipped
             // - and the picture, just taken down, would not come back until

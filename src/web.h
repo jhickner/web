@@ -595,6 +595,11 @@ void tabs_paint(App *a);
 bool tabs_mouse(App *a, Event *ev);    // true when the bar consumed the click
 
 void tab_new(App *a);
+
+// A tab opened on an address instead of on the address bar, for the addresses
+// after the first on the command line. The window is left on it.
+bool tab_open_url(App *a, const char *url);
+
 void tab_close(App *a);
 void tab_go(App *a, int idx);          // 0-based
 void tab_step(App *a, int delta);      // wraps

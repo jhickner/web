@@ -266,6 +266,17 @@ void tab_new(App *a) {
     a->edit_len = 0;
 }
 
+bool tab_open_url(App *a, const char *url) {
+    if (!tab_add(a)) return false;
+    // Named before the load has said anything, for the reason tab_from_popup
+    // gives: a tab called "new tab" for the length of a fetch is a tab that
+    // looks like it was opened by mistake.
+    snprintf(a->url, sizeof a->url, "%s", url);
+    snprintf(a->tabs[a->tab].url, sizeof a->tabs[a->tab].url, "%s", url);
+    navigate(a, url);
+    return true;
+}
+
 // A page the browser opened on its own account, taken over. It is where a click
 // was aimed, so the window moves onto it the way it would have moved onto a
 // window opening anywhere else.
