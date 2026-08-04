@@ -1,11 +1,11 @@
 # web
 
-![Hacker News rendered inline in a terminal, with a tab bar above the page](images/ss.png)
+<img src="images/ss.png" width="530" alt="Hacker News rendered inline in a terminal, with a tab bar above the page">
 
 Chrome in your terminal. Mostly. Sort of. 
 This project uses Chrome's screencast capability combined with kitty graphics
 to stream a browser window (with tabs) inline, into your terminal. It works
-suprisingly well. It even works in tmux, although it's a bit slower.
+surprisingly well. It even works in tmux, although it's a bit slower.
 
 `web` runs headless Chrome, streams the page over the DevTools protocol, and
 draws each frame with the kitty graphics protocol. Keyboard and mouse go back
