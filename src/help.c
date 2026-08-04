@@ -31,6 +31,7 @@ static const Bind BINDS[] = {
     {"^O / ^P",       "back / forward"},
     {"^R",            "reload"},
     {"^Y",            "copy selection or address"},
+    {"y",             "copy the address"},
     {"^E",            "open in the desktop browser"},
     {"/",             "find, then n / N"},
     {"i",             "give the keyboard to the page"},

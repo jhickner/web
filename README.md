@@ -91,6 +91,7 @@ While reading:
 | `w` / `W` | widen / narrow the width the page is told it has |
 | `s` | frame size: auto, 100%, 75%, 50% |
 | `t` | frame transport: png, then two jpeg settings |
+| `y` | copy the address to the clipboard |
 | `/` | find in page, then `n` / `N` |
 | `P` | picking: click the page for a CSS selector, into the console |
 | `i` | hand the keyboard to the page |

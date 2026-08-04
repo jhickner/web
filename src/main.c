@@ -2195,6 +2195,11 @@ static void handle_key(App *a, Event *ev) {
         case 's': cycle_scale(a);     return;
         case 'n': find_next(a, false); return;
         case 'N': find_next(a, true);  return;
+        // Not ^Y's question of what is selected: the address, always.
+        case 'y':
+            clipboard_put(a->url);
+            notify(a, "copied url");
+            return;
         case '?':
             help_toggle(a);
             return;
