@@ -141,6 +141,7 @@ typedef struct {
     bool tmux;
     int  x, y, cols, rows;   // 1-based cell rect the page occupies
     bool grid_dirty;
+    unsigned grid_draws;     // grids laid down, for anything drawn over them
     unsigned gen;            // which name the picture is going up under
     Buf  out;
 } Kitty;
@@ -488,6 +489,13 @@ typedef struct {
     bool    tabs_open;            // whether the bar has a row right now
     int     tabs_row;             // 1-based row it is drawn on
     Buf     tabs_buf, tabs_last;
+
+    // The key list, `?`. It is drawn into the cells the picture occupies, so
+    // there is no row of its own to account for anywhere.
+    bool     help_open;
+    int      help_scroll;         // lines past the top, when it does not all fit
+    unsigned help_grid;           // the grid count it was last drawn over
+    Buf      help_buf, help_last;
 } App;
 
 // Note an outstanding call so its reply can be recognised, and claim the reply.
@@ -552,6 +560,13 @@ bool console_mouse(App *a, Event *ev);// transcript wheel/click handling
 void console_paint(App *a);
 void console_log(App *a, const char *line);
 void console_history_add(App *a, const char *line);
+
+// ---------------------------------------------------------------- help
+
+void help_toggle(App *a);            // `?`, and the key that puts it away again
+bool help_key(App *a, Event *ev);    // true when the list consumed it
+void help_paint(App *a);
+void help_free(App *a);
 
 // ---------------------------------------------------------------- tabs
 

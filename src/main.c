@@ -977,11 +977,10 @@ static void draw_status(App *a) {
         // Park the cursor after the text being typed.
         buf_addf(&b, "\x1b[%d;%dH", row, sx + (int)a->edit_len + 5);
     } else {
-        // Two lengths of the same list. Copy earns its place in both: the page
-        // is an image, so the terminal's own copy has nothing to take, and a
-        // key nobody can guess is a key nobody uses.
-        static const char KEYS[]   = "^L url  ^O back  ^R reload  ^Y copy  ^Q quit";
-        static const char KEYS_S[] = "^L url  ^Y copy  ^Q quit";
+        // The rest of the list is one keypress away, so the line only has to
+        // name that keypress. It is the one key nobody could have guessed at,
+        // and naming it costs the address six columns instead of forty.
+        static const char KEYS[] = "? keys";
 
         const char *left = a->title[0] ? a->title : a->url;
         char stats[160];
@@ -1003,7 +1002,7 @@ static void draw_status(App *a) {
                      a->in_motion ? " moving" : "");
             hint = stats;
         } else {
-            hint = sw > (int)sizeof KEYS + 3 ? KEYS : KEYS_S;
+            hint = KEYS;
         }
         int hintlen = (int)strlen(hint);
         // A narrow window drops the hint rather than shrinking the address to
@@ -1045,6 +1044,7 @@ static void draw_panes(App *a) {
     tabs_paint(a);
     draw_status(a);
     console_paint(a);
+    help_paint(a);          // over the picture, so last of all
 }
 
 // ------------------------------------------------------------------ input
@@ -1695,6 +1695,12 @@ static void handle_mouse(App *a, Event *ev) {
     // Not while a button is held: a drag that wandered up over the bar is the
     // page's until it is let go of, and switching tabs under it would leave the
     // page it started on holding a button nobody released.
+    // A click that lands on the key list is a click on the list, not on the page
+    // it is covering. A wheel is left alone: it is not a claim on anything.
+    if (a->help_open) {
+        if (ev->press && !ev->motion && ev->button < 3) help_toggle(a);
+        return;
+    }
     if (!a->mouse_down && tabs_mouse(a, ev)) return;
     if (console_mouse(a, ev)) return;
     Kitty *k = &a->kitty;
@@ -1823,6 +1829,9 @@ static void handle_key(App *a, Event *ev) {
         if (ev->mods == MOD_CTRL && ev->key == 'x') { console_toggle(a); return; }
         if (console_key(a, ev)) return;
     }
+    // The key list is over the page, so nothing under it can be reached while
+    // it is up: the next key scrolls it or puts it away.
+    if (help_key(a, ev)) return;
     // --step parks the runner after every line, and this is the key it waits
     // for. Swallowed rather than acted on: the point of it is to let the next
     // line go, and a script being walked through is not one being typed over.
@@ -1988,7 +1997,13 @@ static void handle_key(App *a, Event *ev) {
         case 's': cycle_scale(a);     return;
         case 'n': find_next(a, false); return;
         case 'N': find_next(a, true);  return;
+        case '?':
+            help_toggle(a);
+            return;
         case '/':
+            // A terminal that reports the unshifted key sends `?` as this one
+            // with shift held, and find is not what was asked for.
+            if (ev->mods & MOD_SHIFT) { help_toggle(a); return; }
             a->editing = true;
             a->prompt = 2;
             a->edit_len = 0;
@@ -3400,6 +3415,7 @@ int main(int argc, char **argv) {
     buf_free(&a.status_last);
     tabs_free(&a);
     console_free(&a);
+    help_free(&a);
     // Most of a cold start is Chrome coming up. Left running, it holds the
     // profile and the next run adopts it instead of paying for that again. A
     // browser we only attached to is not ours to close at all.

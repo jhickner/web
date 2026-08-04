@@ -169,6 +169,7 @@ static void draw_grid(Kitty *k) {
         }
     }
     buf_add(&k->out, "\x1b[39m", 5);
+    k->grid_draws++;
 }
 
 int kitty_draw_png(Kitty *k, const char *b64, size_t len) {

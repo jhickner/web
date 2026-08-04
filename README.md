@@ -46,6 +46,7 @@ set -g allow-passthrough all
 | `cmd+c` | copy the page selection (needs one line of terminal config, below) |
 | `cmd+v` | paste into the page, or into the address bar when it is open |
 | `^X` | open or close the console |
+| `?` | the key list, over the page — any key puts it away |
 | mouse | click, drag to select, wheel to scroll |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
 
@@ -70,6 +71,7 @@ While reading:
 | `P` | picking: click the page for a CSS selector, into the console |
 | `i` | hand the keyboard to the page |
 | `:` | open the console |
+| `?` | the key list; `j` / `k` if it is taller than the window |
 | `esc` | take it back |
 
 Page up and down and tab always go to the page, as do the sideways arrows, and
