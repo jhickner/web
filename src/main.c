@@ -188,6 +188,14 @@ void notify(App *a, const char *s) {
 // bottom, which is what makes the two directions feel like the same key.
 #define BOX_COL_STEP 2
 
+// The width the page is told it has, in CSS pixels. It is the same knob as zoom
+// seen from the other end, but a layout breaks at a width rather than at a
+// percentage, so this is the end worth walking: `w` and `W` step it, and the
+// step is fine enough to find the edge a layout breaks at.
+#define WIDTH_MIN  320
+#define WIDTH_MAX  2560
+#define WIDTH_STEP 40
+
 static int box_cols_for(App *a, int rows) {
     Term *t = &a->term;
     int want = (int)((double)(rows * t->cell_h) * BOX_ASPECT / t->cell_w + 0.5);
@@ -282,13 +290,17 @@ void relayout(App *a) {
     if (rect_w < 1) rect_w = 1;
     if (rect_h < 1) rect_h = 1;
 
+    // A width asked for by number is what the page is told, whatever the window
+    // is doing; the zoom is kept in step with it so the magnification keys pick
+    // up from where the width left off rather than jumping.
+    if (a->want_width > 0) a->zoom = (double)rect_w / a->want_width;
     double z = a->zoom > 0 ? a->zoom : 1.0;
 
-    int w = (int)(rect_w / z);
+    int w = a->want_width > 0 ? a->want_width : (int)(rect_w / z);
     // A page with a minimum layout width would otherwise hang off the side.
     // Widening the viewport to what it asks for keeps all of it in view; the
     // text ends up smaller, which is the honest trade.
-    if (a->fit_width && a->fit_w > w) w = a->fit_w;
+    if (a->fit_width && a->want_width <= 0 && a->fit_w > w) w = a->fit_w;
     // Low enough that an inline window has to be truly tiny before the number
     // it reports stops tracking its actual size, which is the one thing
     // resizing the box is for.
@@ -837,11 +849,11 @@ static void request_fit(App *a) {
         RQ_FIT);
 }
 
-// What is worth outliving the process: the zoom and the height of the inline
-// window, which belong to the terminal they are being read in rather than to
-// any page, and the user agent, which has to be known before Chrome starts and
-// can only be learned from a Chrome already running. All of it is keyed to
-// nothing - one browser, one terminal, one file.
+// What is worth outliving the process: the zoom, the pinned width and the
+// height of the inline window, which belong to the terminal they are being read
+// in rather than to any page, and the user agent, which has to be known before
+// Chrome starts and can only be learned from a Chrome already running. All of
+// it is keyed to nothing - one browser, one terminal, one file.
 static void state_path(char *out, size_t cap) {
     const char *cfg = getenv("XDG_CONFIG_HOME");
     const char *home = getenv("HOME");
@@ -861,6 +873,9 @@ static void load_state(App *a) {
         if (!strncmp(line, "zoom=", 5)) {
             double z = atof(line + 5);
             if (z >= 0.4 && z <= 4.0) a->zoom = z;
+        } else if (!strncmp(line, "width=", 6)) {
+            int w = atoi(line + 6);
+            if (w >= WIDTH_MIN && w <= WIDTH_MAX) a->want_width = w;
         } else if (!strncmp(line, "rows=", 5)) {
             int r = atoi(line + 5);
             if (r >= 2 && r <= 500) a->want_rows = r;
@@ -887,6 +902,10 @@ static void save_state(App *a) {
     FILE *f = fopen(path, "w");
     if (!f) return;
     fprintf(f, "zoom=%.4f\n", a->zoom);
+    // A pinned width outranks the zoom on the way back in: it is a width the
+    // page was held at rather than a ratio of a terminal that may be gone, so
+    // it means the same thing in the next terminal and the ratio does not.
+    if (a->want_width > 0) fprintf(f, "width=%d\n", a->want_width);
     // --full has no window of its own, so it carries whatever was stored for
     // the inline one through rather than dropping it.
     int rows = a->box_rows > 0 ? a->box_rows : a->want_rows;
@@ -904,32 +923,33 @@ static void save_state(App *a) {
     fclose(f);
 }
 
-// The width the page is told it has. It is the same knob as zoom seen from the
-// other end - the viewport is the cell rect divided by the zoom - but a page
-// that breaks at 1024 is easier to ask for by name than by percentage.
-static const int WIDTHS[] = {800, 1024, 1280, 1440, 1600, 1920};
-
-static void cycle_width(App *a, int step) {
-    int n = (int)(sizeof WIDTHS / sizeof *WIDTHS);
-    a->width_idx += step;
-    if (a->width_idx < 0) a->width_idx = n;
-    if (a->width_idx > n) a->width_idx = 0;
+// Walk the width the page is told it has. Pinned, it is the width that stays
+// put and the window's size decides the magnification instead - the opposite of
+// the zoom keys, and the reason it is worth pinning: a layout can be held at
+// 360px while the picture of it is made as large as the terminal allows.
+static void step_width(App *a, int step) {
+    // Unpinned the walk starts from what the cells are giving the page now, so
+    // the first press moves from what is on screen rather than from a number.
+    int cur = a->want_width > 0 ? a->want_width : a->css_w;
+    int want = cur + step * WIDTH_STEP;
+    want -= want % WIDTH_STEP;    // round onto the step, whatever it started from
+    if (want < WIDTH_MIN) want = WIDTH_MIN;
+    if (want > WIDTH_MAX) want = WIDTH_MAX;
 
     char m[80];
-    if (a->width_idx == 0) {
-        a->zoom = 1.0;              // back to whatever the cell rect gives
-        snprintf(m, sizeof m, "width auto");
-    } else {
-        int want = WIDTHS[a->width_idx - 1];
-        int rect_w = a->term.cols * a->term.cell_w;
-        a->zoom = (double)rect_w / want;
-        if (a->zoom < 0.4) a->zoom = 0.4;
-        if (a->zoom > 4.0) a->zoom = 4.0;
-        snprintf(m, sizeof m, "width %dpx (zoom %.0f%%)", want, a->zoom * 100);
+    if (want == a->want_width) {
+        snprintf(m, sizeof m, "width %dpx - as %s as it goes",
+                 want, step < 0 ? "narrow" : "wide");
+        notify(a, m);
+        return;
     }
+    a->want_width = want;
     a->fit_w = 0;
     relayout(a);
     save_state(a);
+    // The two numbers are one setting seen from two ends, and moving either one
+    // moves the other, so both are said whichever end the press came from.
+    snprintf(m, sizeof m, "width %dpx - zoom %.0f%%", a->css_w, a->zoom * 100);
     notify(a, m);
     request_fit(a);
 }
@@ -974,8 +994,11 @@ static void resize_box(App *a, int drows, int dcols) {
     relayout(a);
     save_state(a);
 
+    // A pinned width does not move when the window does, so the magnification
+    // is the half that changed and the number worth showing next to it.
     char m[64];
-    snprintf(m, sizeof m, "window %dx%d", a->css_w, a->css_h);
+    snprintf(m, sizeof m, "window %dx%d - zoom %.0f%%",
+             a->css_w, a->css_h, a->zoom * 100);
     notify(a, m);
     request_fit(a);
 }
@@ -1003,7 +1026,15 @@ static void zoom_by(App *a, double factor) {
     a->zoom *= factor;
     if (a->zoom < 0.4) a->zoom = 0.4;
     if (a->zoom > 4.0) a->zoom = 4.0;
+    // A narrow pinned width can leave the zoom past the range these keys walk,
+    // and clamping it there would send the press the other way - zooming in to
+    // magnify less. A press that cannot go its own way does nothing instead.
+    if ((factor > 1.0 && a->zoom < before) || (factor < 1.0 && a->zoom > before))
+        a->zoom = before;
     if (a->zoom == before) return;
+    // Magnifying is the other half of the same knob, so it takes the width off
+    // its pin: from here the window's size decides the width again.
+    a->want_width = 0;
 
     a->fit_w = 0;                 // re-measure from the width just asked for
     relayout(a);
@@ -1013,7 +1044,7 @@ static void zoom_by(App *a, double factor) {
     save_state(a);
 
     char m[64];
-    snprintf(m, sizeof m, "zoom %.0f%%", a->zoom * 100);
+    snprintf(m, sizeof m, "zoom %.0f%% - width %dpx", a->zoom * 100, a->css_w);
     notify(a, m);
     request_fit(a);
 }
@@ -1062,6 +1093,29 @@ void scroll_at(App *a, int x, int y, int dy) {
 
 void scroll_by(App *a, int dy) {
     scroll_at(a, a->css_w / 2, a->css_h / 2, dy);
+}
+
+// Sideways, which only a width narrower than the layout has any use for. No
+// hunt for a scroller: a viewport too narrow for the page overflows the page
+// itself, not some pane inside it.
+static void scroll_side(App *a, int dx) {
+    if (a->pdf) {
+        app_cdp(a, "Input.dispatchMouseEvent",
+                 "\"type\":\"mouseWheel\",\"x\":%d,\"y\":%d,"
+                 "\"deltaX\":%d,\"deltaY\":0,\"modifiers\":0",
+                 a->css_w / 2, a->css_h / 2, dx);
+        return;
+    }
+    char js[384];
+    snprintf(js, sizeof js,
+             "(function(d){"
+             "var t=document.scrollingElement||document.documentElement;"
+             "var m=t.scrollWidth-t.clientWidth,v=t.scrollLeft+d;"
+             "if(v<0)v=0;if(v>m)v=m;"
+             "t.scrollTo({left:v,top:t.scrollTop,behavior:'instant'});"
+             "})(%d)",
+             dx);
+    run_js(a, js);
 }
 
 // gg and G mean the page, not whatever pane happens to sit under the middle of
@@ -1402,6 +1456,8 @@ static void handle_key(App *a, Event *ev) {
         case KEY_RIGHT: nav_history(a, +1); return;
         case 'j': scroll_by(a, 60);    return;
         case 'k': scroll_by(a, -60);   return;
+        case 'l': scroll_side(a, a->css_w / 4);  return;
+        case 'h': scroll_side(a, -a->css_w / 4); return;
         case 'd': scroll_by(a, half);  return;
         case 'u': scroll_by(a, -half); return;
         case ' ': scroll_by(a, page);  return;
@@ -1436,8 +1492,8 @@ static void handle_key(App *a, Event *ev) {
             notify(a, a->selector_pick ? "picking: click for a selector"
                                        : "picking off");
             return;
-        case 'w': cycle_width(a, +1); return;
-        case 'W': cycle_width(a, -1); return;
+        case 'w': step_width(a, +1); return;
+        case 'W': step_width(a, -1); return;
         case 's': cycle_scale(a);     return;
         case 'n': find_next(a, false); return;
         case 'N': find_next(a, true);  return;
@@ -1476,10 +1532,13 @@ static void handle_key(App *a, Event *ev) {
         if (ev->key == '-' || ev->key == '_') { zoom_by(a, 1.0 / 1.25); return; }
         if (ev->key == '0') {
             a->zoom = 1.0;
+            a->want_width = 0;         // and the width goes back to the cells
             a->fit_w = 0;
             relayout(a);
             save_state(a);
-            notify(a, "zoom 100%");
+            char m[64];
+            snprintf(m, sizeof m, "zoom 100%% - width %dpx", a->css_w);
+            notify(a, m);
             request_fit(a);
             return;
         }
@@ -1617,6 +1676,18 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
     case RQ_FIT: {
         int want = (int)json_num(msg, "value", 0);
         if (want > a->css_w + 8 && want < 8000) {
+            // A width asked for by number is a command rather than a request:
+            // the page is held at it and magnified to suit, overflow and all.
+            // Widening it back would make the narrow widths unreachable, which
+            // is the one thing walking down to them is for - so this only says
+            // that the page did not fit, and the sideways scroll deals with it.
+            if (a->want_width > 0) {
+                char m[80];
+                snprintf(m, sizeof m, "width %dpx - page needs %dpx",
+                         a->css_w, want);
+                notify(a, m);
+                return;
+            }
             a->fit_w = want;
             relayout(a);
             // The zoom that survived is whatever the widened viewport allows,
@@ -1924,6 +1995,7 @@ int main(int argc, char **argv) {
             if (a.want_scale > 3.0) a.want_scale = 3.0;
         } else if (!strcmp(argv[i], "--zoom") && i + 1 < argc) {
             a.zoom = atof(argv[++i]);
+            a.want_width = 0;         // a ratio was asked for, so unpin the width
             if (a.zoom < 0.5) a.zoom = 0.5;
             if (a.zoom > 3.0) a.zoom = 3.0;
         } else if (!strcmp(argv[i], "--inline")) {

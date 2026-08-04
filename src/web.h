@@ -319,7 +319,7 @@ typedef struct {
     int     box_rows;          // inline: cell rows the window occupies
     int     box_cols;          // inline: cell columns, 0 = from the proportion
     int     want_cols;         // columns remembered from an earlier run
-    int     width_idx;         // cursor into WIDTHS, 0 = derived from the cells
+    int     want_width;        // width pinned by w/W, 0 = derived from the cells
     bool    scale_locked;      // the render scale was chosen by hand
 
     bool    fit_width;         // widen the viewport so no page is cut off

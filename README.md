@@ -37,7 +37,7 @@ set -g allow-passthrough all
 | `^G` | devtools port, frame size, write time, and throughput |
 | `^S` | hide or show the status line |
 | `^Q` | quit |
-| `alt+0` | reset zoom |
+| `alt+0` | reset zoom, and unpin the width |
 | `alt+f` | fit-to-width on/off |
 | `cmd+c` | copy the page selection (needs one line of terminal config, below) |
 | `cmd+v` | paste into the page, or into the address bar when it is open |
@@ -51,12 +51,13 @@ While reading:
 | `↓` / `↑` | down / up, a line at a time |
 | `←` / `→` | back / forward |
 | `j` / `k` | down / up |
+| `h` / `l` | left / right, for a page wider than the width it was given |
 | `d` / `u` | half a screen |
 | `space` / `b` | a screen |
 | `gg` / `G` | top / bottom of the page |
 | `[` / `]` | zoom out / in — or resize the window, inline |
 | `shift`+`↑↓←→` | drag the window's bottom right corner (`U`/`D`/`L`/`R` too) |
-| `w` / `W` | step the width the page is told it has |
+| `w` / `W` | widen / narrow the width the page is told it has |
 | `s` | render scale: 1x, 2x, 3x |
 | `t` | frame transport: png, then two jpeg settings that only time it |
 | `/` | find in page, then `n` / `N` for next and previous |
@@ -157,9 +158,15 @@ decide the key Chrome seals its cookies with, and a session sealed with the
 wrong one is a session `web` cannot read. Sign in, press Enter, and the browser
 is shut down properly so the cookies are committed on the way out.
 
-`w` and `s` are the two halves of how big the page comes out. `w` sets the width
-the page is *told* it has — 800, 1024, 1280, 1440, 1600, 1920, then back to
-whatever the cells work out to — which is what decides where a layout breaks.
+`w` and `s` are the two halves of how big the page comes out. `w` and `W` walk
+the width the page is *told* it has — 40px a press, between 320 and 2560, from
+whatever the cells were giving it — which is what decides where a layout breaks.
+A width walked to this way is *pinned*: it stays put while the window is resized
+and the magnification moves instead, so a layout can be held at 360px and still
+photographed as large as the terminal allows. It also outlives the run, and it
+comes back as a width rather than as a ratio, so it means the same thing in the
+next terminal. `alt+0` unpins it, and the zoom keys take it off the pin too —
+they are the same knob from the other end, and only one end can be held.
 `s` sets how many pixels Chrome renders per pixel the terminal shows: above 1x
 it draws larger and comes back down, which is the only way to get detail finer
 than the cells, at the square of the cost in bytes. The key steps whole ratios,
@@ -486,7 +493,14 @@ viewport means real horizontal overflow and nothing else — one measurement per
 change is enough, and it cannot oscillate.
 
 `alt+f` turns the fitting off if you would rather have the magnification and
-scroll sideways; `alt+0` resets to 100%.
+scroll sideways with `h` and `l`; `alt+0` resets to 100%.
+
+A width pinned with `w` or `W` is exempt: it is a number that was asked for
+rather than a ratio that fell out of a window size, so it is honoured whether
+the page fits it or not. The measurement still runs — the status line says
+`width 360px - page needs 980px` — and what does not fit is reached with `h`
+and `l`. Otherwise nothing could ever be looked at below its own minimum
+layout width, which is most of what a narrow width is for.
 
 Set `WEB_CHROME` to use a different Chrome build, and `WEB_CELL=WxH` if the
 page aspect looks stretched — inside tmux the terminal reports no pixel
