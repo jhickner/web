@@ -102,33 +102,36 @@ While reading:
 
 `~/.config/web/web.conf`, written with the defaults on first run:
 
-```
-pause-on-blur    = yes
-status-line      = yes
-clear-on-exit    = yes
-full             = no
-mute             = no
-raw-keys         = no
-keep             = no
-scale            = auto
-zoom             = 1
-rows             = auto
-cols             = auto
+| Setting | Default | Values | Description |
+|---|---|---|---|
+| `pause-on-blur` | `yes` | yes/no | stop drawing while the terminal is not focused |
+| `status-line` | `yes` | yes/no | show the status line under the page |
+| `clear-on-exit` | `yes` | yes/no | erase the window on exit instead of leaving it |
+| `full` | `no` | yes/no | take over the whole terminal instead of drawing a window |
+| `mute` | `no` | yes/no | start with the page's audio switched off |
+| `raw-keys` | `no` | yes/no | let a key the page did not want reach the window system |
+| `keep` | `no` | yes/no | leave Chrome running on exit |
+| `scale` | `auto` | `auto`, 0.1–3 | frame size as a fraction of the viewport; `auto` is full size when the page is still, smaller while it moves |
+| `zoom` | `1` | 0.5–3 | page magnification a new window opens at |
+| `rows` | `auto` | `auto`, a count | cell rows a new window opens at |
+| `cols` | `auto` | `auto`, a count | cell columns a new window opens at |
 
-shift-alt-right  = tab-next
-^y               = copy
-y                = copy-url
-f5               = reload
-```
-
-Settings take `yes`/`no` (`true`, `on`, `1` too); `scale` takes `auto` or 0.1
-to 3; `zoom` takes 0.5 to 3; `rows` and `cols` take `auto` or a count. Each is
-the command line option of the same name, which wins for that run.
+Booleans also take `true`, `on` and `1`. Each setting is the command line
+option of the same name, which wins for that run.
 
 `zoom`, `rows` and `cols` are where a new window opens. `[` `]` `alt+0` and
 `shift`+arrows move a running window from there, and nothing is written back.
 `rows` and `cols` do nothing under `full = yes`; a `cols` wider than the
 terminal is drawn at the terminal's width.
+
+Keys go in the same file:
+
+```
+shift-alt-right  = tab-next
+^y               = copy
+y                = copy-url
+f5               = reload
+```
 
 Keys are `ctrl` `alt` `shift` `cmd` joined by `+` or `-`, then a character or
 one of `left` `right` `up` `down` `space` `esc` `enter` `tab` `backspace`
