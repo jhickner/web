@@ -69,9 +69,34 @@ int app_cdp(App *a, const char *method, const char *fmt, ...) {
     return id;
 }
 
+// Something the user did, and whether it is the kind of thing that sets the
+// page moving. Both halves matter. The moving half starts the resolution drop
+// on the input itself rather than three frames later, which is what makes it
+// worth having: a scroll used to pay full price for its first frames, and over
+// ssh it never engaged at all - the run of quick frames it waits for is
+// measured on frames that are slow because they are still full size, so the
+// test could not pass until the thing it was testing for had already happened.
+//
+// The other half is the record of when input last arrived, which is what tells
+// motion apart from a page that has merely gone quiet: Chrome dropping frames
+// mid-scroll leaves the frame clock stale, and a scroll called over on that
+// alone comes back sharp in the middle of itself.
+static void note_input(App *a, bool moving) {
+    a->last_input = now_sec();
+    if (!moving || !a->motion_auto || a->in_motion) return;
+    if (!a->has_tty || a->paused) return;
+    a->in_motion = true;
+    a->still_at = 0;              // whatever was owed, the page is moving again
+    term_log("%.3f motion on (input)", a->last_input);
+    relayout(a);
+}
+
 static void queue_move(App *a, int x, int y, const char *btn, int buttons,
                        int mods) {
     Pending *p = &a->pend;
+    // A drag is the page moving; a bare hover is not, and softening the picture
+    // under a pointer that is only crossing it would be a poor trade.
+    note_input(a, buttons != 0);
     if (p->kind != PEND_MOVE) flush_pending(a);
     p->kind = PEND_MOVE;
     p->x = x;
@@ -216,10 +241,12 @@ void notify(App *a, const char *s) {
 // and measured on a scroll it is 86% of the frame time, nearly all of it
 // Chrome's. Dropping it while the page slides past and putting it back the
 // moment it stops is the one lever that shortens all three at once.
-// It is spent on the screencast cap rather than on the device scale factor:
-// the frame that arrives is the viewport in CSS pixels whatever the scale
-// factor says, so the cap is the only end of it Chrome listens to - and this
-// way the page is never re-rastered on the way in or out, only re-scaled.
+// It is spent on the screencast cap and nowhere else: the frame that arrives is
+// the viewport in CSS pixels and the device scale factor has no say in it at
+// all. Measured against this Chrome, a viewport of 480 asked for at a factor of
+// 2.325 and again at 1 hands back the same 480-pixel frame, byte for byte - so
+// a factor above 1 only buys the page a raster five times the size of anything
+// that will be sent. The cap is the one end Chrome listens to.
 // The linear scale; the pixels are its square, so 0.65 is 42% of them.
 #define MOTION_SCALE 0.65
 // Over ssh the bytes are the whole of the cost rather than a third of it, so
@@ -228,12 +255,17 @@ void notify(App *a, const char *s) {
 #define MOTION_RUN   3       // quick frames in a row before it is a scroll
 #define MOTION_GAP   0.20    // a frame this soon after the last is still moving
 #define MOTION_IDLE  0.30    // and this long without one is stopped
-// A frame that comes back at the size before last is Chrome capturing on its
-// own clock rather than ours. Long enough that the frame the resize itself
-// produces gets to arrive first and cancel the ask, short enough that the
-// picture is not left soft for a beat somebody would notice.
-#define RESIZE_WAIT  0.15
-#define RESIZE_TRIES 4       // asks before the size on offer is the size taken
+#define MOTION_QUIET 0.25    // and this long since the last key or wheel
+// Long enough that a frame Chrome was going to send anyway arrives first and
+// cancels the ask, short enough that the picture is not left soft for a beat
+// somebody would notice.
+#define STILL_WAIT   0.15
+// A capture can itself provoke a compositor frame, which would arrive as an
+// ordinary screencast frame and ask for another still. This is what stops the
+// two chasing each other on a page that will not settle.
+#define STILL_GAP    1.0
+#define STILL_TRIES  3       // asks before the screencast is the one at fault
+#define STILL_SEND_MAX 2.0   // how long a reply has to come back
 
 static int box_cols_for(App *a, int rows) {
     Term *t = &a->term;
@@ -263,6 +295,58 @@ static void screencast_start(App *a) {
     app_cdp(a, "Page.startScreencast",
              "\"format\":\"png\",\"maxWidth\":%d,\"maxHeight\":%d,\"everyNthFrame\":1",
              a->cast_w, a->cast_h);
+}
+
+// The sharp picture, asked for outright. Restarting the screencast above is an
+// ask with no answer: it brings a frame back when Chrome has one to bring and
+// says nothing when it does not, which is a page with nothing moving on it, a
+// frame rastered before the size changed, or a frame dropped for being one too
+// many in flight. That is the whole of why a scroll used to end on a soft
+// picture that never came back. A screenshot is a call with a reply, so a still
+// that does not turn up is something this can see, and ask for again.
+//
+// No clip: the reply is the viewport at the device scale factor, and relayout
+// holds that factor at exactly the width the screencast delivers when the page
+// is still. Asking for a region instead would be both bigger and wrong - clip
+// scales on top of the factor rather than instead of it, and its origin is the
+// document rather than the viewport, so a clipped still of a scrolled page
+// photographs the top of the page.
+// Nothing outstanding and nothing owed. For the places where the picture is
+// about to be replaced wholesale - another page, another tab, a window nobody
+// is looking at - so a reply arriving late cannot draw the page that was.
+void still_cancel(App *a) {
+    a->still_at = 0;
+    a->still_sent = 0;
+    a->still_tries = 0;
+}
+
+// Owe one, shortly. For anything that has just asked the screencast to redraw
+// and would be left with the wrong picture up if Chrome had nothing to send.
+void still_soon(App *a) {
+    a->still_at = now_sec() + STILL_WAIT;
+}
+
+static void still_request(App *a) {
+    // Cleared first, and on every path out of here: a debt left sitting in the
+    // past is one the loop finds due on every pass, and the sleep it computes
+    // from it is no sleep at all.
+    a->still_at = 0;
+    if (!a->has_tty || a->paused || a->in_motion || a->cast_w < 1) return;
+    // --screenshot issues this very call for its own purposes; two of them in
+    // flight would be two kinds waiting on one reply.
+    if (a->shot_path) return;
+    // A capture can provoke a compositor frame, which arrives as an ordinary
+    // frame and asks for another still. Held off rather than dropped: the page
+    // still owes a sharp picture, and this only says not yet.
+    double now = now_sec();
+    if (now - a->last_still < STILL_GAP) {
+        a->still_at = a->last_still + STILL_GAP;
+        return;
+    }
+    a->still_sent = now + STILL_SEND_MAX;
+    app_req_note(a, app_cdp(a, "Page.captureScreenshot",
+        "\"format\":\"png\",\"fromSurface\":true,\"captureBeyondViewport\":false"),
+        RQ_STILL);
 }
 
 // The viewport a screenshot run gets when there is no terminal to take the
@@ -369,29 +453,35 @@ void relayout(App *a) {
         if (a->scale > fits) a->scale = fits;
     }
 
-    // The ratio that turns the viewport into those pixels. Zoom and fit-width
-    // both make it fractional, and it is Chrome's job rather than the
-    // terminal's: asked for the final size it lays the text out at that size
-    // and hints it there, where the terminal could only stretch a bitmap that
-    // was already wrong.
-    // Motion moves both ends of the size, and it has to move both. The cap is
-    // what shrinks the frame, but a cap is not a property of the page: Chrome
-    // relayouts and hands a fresh frame over when the device metrics change,
-    // and metrics that go out identical give it no reason to draw anything.
-    // Moving the cap alone left the small frame on screen with nothing coming
-    // to replace it - which is what a short scroll looked like, motion ending
-    // and the picture never coming back. Rendering at the size being delivered
-    // also stops the page being rastered larger than it is sent.
     double ms = a->in_motion
         ? (a->motion_scale > 0 ? a->motion_scale : MOTION_SCALE) : 1.0;
 
-    double dsf = (double)rect_w * a->scale * ms / (double)a->css_w;
+    // The ratio the page is rastered at. It used to be struck against the cell
+    // rect, on the reasoning that a page laid out at the size it lands at is
+    // sharper than a bitmap the terminal stretched - but the screencast never
+    // sent those pixels. It caps against the viewport in CSS pixels and ignores
+    // the factor entirely, so raising it only made Chrome raster a frame five
+    // times the size of the one it then handed over. What it costs is real and
+    // what it buys is nothing, so it is held at the ratio actually being asked
+    // for, and never above what the pane can show.
+    //
+    // Motion is deliberately not in here. It rides on the cap alone, so a scroll
+    // starting or stopping no longer changes the device metrics - which means
+    // Chrome keeps the tiles it has already rastered instead of throwing them
+    // away twice per scroll, and the page is never re-laid-out for a resolution
+    // change. What that costs is the repaint a metrics change used to force:
+    // identical metrics give Chrome no reason to draw, so the sharp frame is
+    // fetched by still_request() rather than waited for.
+    double dsf = a->scale;
+    double fits = (double)rect_w * a->scale / (double)a->css_w;
+    if (fits < dsf) dsf = fits;
 
     a->status_last.len = 0;    // the status line may have moved rows
 
     // Both calls go out every time, including when the numbers have not moved.
-    // Restarting the screencast is what makes Chrome hand over a fresh frame,
-    // so this is the only way anything asking for a redraw gets one.
+    // Restarting the screencast is what usually makes Chrome hand over a fresh
+    // frame, and it is the cheap way to ask - but it is only an ask, and the
+    // still is what makes sure one arrives.
     app_cdp(a, "Emulation.setDeviceMetricsOverride",
              "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":%.6f,\"mobile\":false",
              a->css_w, a->css_h, dsf);
@@ -404,19 +494,21 @@ void relayout(App *a) {
     // what it says: half is half the width and a quarter of the pixels.
     // Above 1 it cannot mean anything, here or anywhere: the screencast has no
     // way to hand over more pixels than the viewport has.
-    a->cast_w = (int)((double)a->css_w * a->scale * ms + 0.5);
-    a->cast_h = (int)((double)a->css_h * a->scale * ms + 0.5);
+    a->cast_w = (int)((double)a->css_w * dsf * ms + 0.5);
+    a->cast_h = (int)((double)a->css_h * dsf * ms + 0.5);
     if (a->cast_w < 1) a->cast_w = 1;
     if (a->cast_h < 1) a->cast_h = 1;
 
-    // The width the next frame should come back at, which is the surface the
-    // metrics just asked for or the cap, whichever bites first. Kept so the
-    // frame that arrives can be measured against what was asked for: the two
-    // calls above are a request, and nothing else notices when it goes
-    // unanswered.
-    int surface_w = (int)((double)a->css_w * dsf + 0.5);
-    a->frame_w = surface_w < a->cast_w ? surface_w : a->cast_w;
-    a->resize_at = 0;          // whatever was owed, this is the ask
+    // The two sizes a picture can arrive at, kept so that whatever turns up can
+    // be measured against what was asked for. A screencast frame is the cap or
+    // the viewport, whichever bites first - the factor has no say. A screenshot
+    // is the viewport at the factor, which is the whole of why the factor is
+    // held where it is above: the two come out equal whenever the page is still,
+    // so the still is the same picture the screencast would have sent and not a
+    // sharper one that would visibly drop back on the next ordinary frame.
+    int cap_w = a->cast_w < a->css_w ? a->cast_w : a->css_w;
+    a->frame_w = cap_w;
+    a->still_w = (int)((double)a->css_w * dsf + 0.5);
 
     screencast_start(a);
 }
@@ -867,6 +959,42 @@ static void shot_write(App *a, const char *msg) {
     a->shot_state = rc < 0 ? SHOT_FAIL : SHOT_DONE;
 }
 
+// A still that came back. It goes up the same way a frame does - the base64 is
+// handed to the terminal without ever being decoded - and it counts as the
+// picture on screen, so a screencast frame carrying the same bytes would be
+// skipped. Only that direction is safe, and it is: the two encoders never agree
+// byte for byte, so this can dedupe one still against the next and can never
+// hide a real frame behind one.
+//
+// Left alone deliberately: fps and the frame count, which describe the
+// screencast and would read as a stutter if a still were counted among them.
+static void still_draw(App *a, const char *msg) {
+    // A reply that outlived the blur it was asked before. Nothing is being
+    // looked at, and the unpause redraws from scratch anyway.
+    if (a->paused) return;
+    size_t n = 0;
+    const char *b64 = json_str(msg, "data", &n);
+    if (!b64 || !n) return;    // the deadline in the loop asks again
+
+    double t0 = now_sec();
+    kitty_draw_png(&a->kitty, b64, n);
+    double t1 = now_sec();
+
+    a->last_hash = fnv1a(b64, n);
+    a->last_draw = t1;
+    a->last_still = t1;
+    a->still_sent = 0;
+    a->still_tries = 0;
+    a->last_bytes = n;
+    a->last_write_ms = (t1 - t0) * 1000.0;
+    a->total_bytes += n;
+    a->stills++;
+    if (a->last_write_ms > a->worst_write_ms) a->worst_write_ms = a->last_write_ms;
+    term_log("%.3f still %u: %dpx of %d, %zu KB b64, ours %.1f ms",
+             t1, a->stills, png_width(b64, n), a->still_w, n / 1024,
+             a->last_write_ms);
+}
+
 // The shutter. It photographs the viewport, so a run with a terminal under it
 // files what the window was showing and one without files the page-sized
 // viewport relayout gave it instead.
@@ -993,13 +1121,13 @@ static void draw_status(App *a) {
             // guessed, which is not visible from any of the numbers before them.
             snprintf(stats, sizeof stats,
                      "cdp:%d  %zuKB %.0fms %.1ffps  %dx%d@%gx z%.0f%%  "
-                     "cell %dx%d cast %dx%d%s",
+                     "cell %dx%d cast %dx%d  %us%s",
                      a->chrome.port,
                      a->last_bytes / 1024, a->last_write_ms, a->fps,
                      a->css_w, a->css_h, a->scale,
                      100.0 * (sw * a->term.cell_w) / (a->css_w ? a->css_w : 1),
                      a->term.cell_w, a->term.cell_h, a->cast_w, a->cast_h,
-                     a->in_motion ? " moving" : "");
+                     a->stills, a->in_motion ? " moving" : "");
             hint = stats;
         } else {
             hint = KEYS;
@@ -1075,6 +1203,19 @@ static void send_key(App *a, int vk, const char *key, const char *code,
 }
 
 bool special_key(App *a, int key, int mods) {
+    // The keys below that move the page, told apart from the keys that edit
+    // with it. Held down, these are a scroll like any other and are worth the
+    // same trade - but not with a text field focused, where the very same keys
+    // are walking a caret through it and the picture wants to stay sharp.
+    bool moves = !a->insert;
+    switch (key) {
+    case KEY_UP: case KEY_DOWN: case KEY_LEFT: case KEY_RIGHT:
+    case KEY_HOME: case KEY_END: case KEY_PGUP: case KEY_PGDN:
+        break;
+    default:
+        moves = false;
+    }
+    note_input(a, moves);
     switch (key) {
     case KEY_ENTER:     send_key(a, 13, "Enter", "Enter", "\\r", mods); return true;
     case KEY_TAB:       send_key(a, 9, "Tab", "Tab", NULL, mods); return true;
@@ -1376,7 +1517,9 @@ static void cycle_scale(App *a) {
     a->in_motion = false;               // whichever way, start from full size
     a->motion_run = 0;
     a->scale_locked = true;             // an explicit ask outranks the width cap
+    still_cancel(a);                    // the size it was asked at is not this one
     relayout(a);
+    still_soon(a);
     // The size it works out to, because a percentage of a viewport nobody has
     // memorised is not something to picture.
     char m[64];
@@ -1395,7 +1538,7 @@ static void cycle_scale(App *a) {
 // amount of reading the frames one at a time says so as plainly as the totals
 // do. Everything between the two marks is in /tmp/web_input.log.
 static void trace_toggle(App *a) {
-    static unsigned at_frames;
+    static unsigned at_frames, at_stills;
     static size_t   at_bytes;
     static double   at_time;
 
@@ -1403,9 +1546,10 @@ static void trace_toggle(App *a) {
         double secs = now_sec() - at_time;
         unsigned n = a->frames - at_frames;
         size_t bytes = a->total_bytes - at_bytes;
-        term_log("=== trace off after %.1fs: %u frames, %.1f MB base64 "
-                 "(%.1f MB/s), %.0f KB a frame, worst write %.0f ms",
-                 secs, n, bytes / 1048576.0, secs > 0 ? bytes / 1048576.0 / secs : 0,
+        term_log("=== trace off after %.1fs: %u frames, %u stills, %.1f MB "
+                 "base64 (%.1f MB/s), %.0f KB a frame, worst write %.0f ms",
+                 secs, n, a->stills - at_stills, bytes / 1048576.0,
+                 secs > 0 ? bytes / 1048576.0 / secs : 0,
                  n ? bytes / 1024.0 / n : 0, a->worst_write_ms);
         term_trace(0);
         char m[96];
@@ -1420,13 +1564,15 @@ static void trace_toggle(App *a) {
         return;
     }
     at_frames = a->frames;
+    at_stills = a->stills;
     at_bytes = a->total_bytes;
     at_time = now_sec();
     a->worst_write_ms = 0;
     term_log("\n=== trace on at %.3f: %s", at_time, a->url);
-    term_log("=== viewport %dx%d css, cast %dx%d, scale %g, "
+    term_log("=== viewport %dx%d css, cast %dx%d, frame %d, still %d, scale %g, "
              "%s, term %dx%d cells of %dx%d px%s%s",
-             a->css_w, a->css_h, a->cast_w, a->cast_h, a->scale,
+             a->css_w, a->css_h, a->cast_w, a->cast_h,
+             a->frame_w, a->still_w, a->scale,
              a->in_motion ? "moving" : "still", a->term.cols, a->term.rows,
              a->term.cell_w, a->term.cell_h,
              a->kitty.tmux ? ", tmux" : "",
@@ -1476,6 +1622,7 @@ void run_js(App *a, const char *js) {
 // clamped to the ends first, so a step at the top or bottom of a page simply
 // does nothing instead of leaving something behind to unwind.
 void scroll_at(App *a, int x, int y, int dy) {
+    note_input(a, true);
     // The hunt below runs over a document that, for a PDF, is a stub: an empty
     // body and a stylesheet link, with the viewer itself in a frame of another
     // process that this one cannot see. There is no scroller here to find. A
@@ -1515,6 +1662,7 @@ void scroll_by(App *a, int dy) {
 // hunt for a scroller: a viewport too narrow for the page overflows the page
 // itself, not some pane inside it.
 static void scroll_side(App *a, int dx) {
+    note_input(a, true);
     if (a->pdf) {
         app_cdp(a, "Input.dispatchMouseEvent",
                  "\"type\":\"mouseWheel\",\"x\":%d,\"y\":%d,"
@@ -1537,6 +1685,7 @@ static void scroll_side(App *a, int dx) {
 // gg and G mean the page, not whatever pane happens to sit under the middle of
 // the view: "top" is somewhere you can name, and a step is not.
 void scroll_page_end(App *a, bool bottom) {
+    note_input(a, true);
     // An end is a distance only the viewer knows: it cannot be asked for as a
     // wheel the way a step can, and the #page= fragment it reads on the way in
     // is ignored once it is up. Home and End are its own, and plain - with
@@ -1695,6 +1844,9 @@ static void handle_focus(App *a, bool focused) {
     if (!focused) {
         a->paused = true;
         a->expect_frame = 0;        // no frame is coming, and none is owed
+        a->in_motion = false;       // and it is not moving, it is not drawing
+        a->motion_run = 0;
+        still_cancel(a);            // nothing to photograph for nobody to see
         app_cdp(a, "Page.stopScreencast", "");
         // Not drawing is the whole of it: the page goes on animating into a
         // screencast nobody is reading, and stopping that is the saving.
@@ -1717,6 +1869,9 @@ static void handle_focus(App *a, bool focused) {
     a->last_hash = 0;
     a->kitty.grid_dirty = true;
     screencast_start(a);
+    // The restart is an ask like any other, and a page that did not change
+    // while it was away gives Chrome nothing to answer it with.
+    still_soon(a);
 }
 
 static void handle_mouse(App *a, Event *ev) {
@@ -2120,29 +2275,23 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
 
         double sid = json_num(msg, "sessionId", 0);
 
-        // A frame is only an answer to the last size asked for if it comes back
-        // at that size. Chrome captures on its own clock: the frame in flight
-        // when the metrics changed was rastered before them and arrives after,
-        // and the frame the resize itself produces is dropped rather than
-        // queued if it lands while too many are unacknowledged. Either way the
-        // small picture is left on screen with nothing coming for it - which is
-        // motion ending and the page never coming back sharp. Measuring it is
-        // the only way to tell, and the tolerance is wide because rounding
-        // moves a pixel or two while the motion scales move a third.
+        // Whether this frame is as good a picture as a still would be, which is
+        // the one question worth asking of it. Chrome captures on its own clock,
+        // so a frame rastered before the last size change arrives after it and
+        // comes back at the size before last; and the answer is no in any case
+        // at a scale the screencast cannot reach, where the cap is the viewport
+        // and the still is not. Either way this is what decides whether the
+        // still already owed can be called off. The tolerance is wide because
+        // rounding moves a pixel or two while the motion scales move a third.
         int pw = png_width(data, dlen);
-        bool small = pw > 0 && a->frame_w > 0 && pw * 20 < a->frame_w * 19;
-        if (!small) a->resize_tries = 0;
-        // Bounded, and the bound puts the debt down rather than leaving it
-        // owed: a page that will not come back at the size asked for is not
-        // worth a loop that never sleeps again. Any frame at the right size
-        // hands the asks back, so the next scroll starts with all of them.
-        if (!small || a->resize_tries >= RESIZE_TRIES) {
-            a->expect_frame = 0;      // the page is still answering
-            a->unwedge_run = 0;       // and the restarts start over from three
-            a->resize_at = 0;
-        } else if (a->resize_at == 0) {
-            a->resize_at = now_sec() + RESIZE_WAIT;
-        }
+        bool sharp = pw > 0 && a->frame_w > 0 &&
+                     pw * 20 >= a->frame_w * 19 &&
+                     a->frame_w * 20 >= a->still_w * 19;
+        // A frame is a frame whatever size it came back at: with the sharp
+        // picture now fetched rather than waited for, this flag has only one
+        // job left, which is to say whether the page is answering at all.
+        a->expect_frame = 0;
+        a->unwedge_run = 0;
 
         // Taken before the hash rather than before the write: everything from
         // here on is ours, and the point of the split below is to say how much
@@ -2184,7 +2333,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
                          t1, a->frames, pw, a->frame_w, dlen / 1024, chrome_ms,
                          (t1 - t_arrive) * 1000.0, a->last_write_ms,
                          gap * 1000.0, a->fps, a->in_motion ? " [motion]" : "",
-                         small ? " [stale size]" : "");
+                         sharp ? "" : " [soft]");
 
                 // One quick frame is a click landing; a run of them is the page
                 // sliding past. Waiting for the run is what keeps a single
@@ -2192,7 +2341,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
                 // A frame at the wrong size is not the page sliding past at
                 // all: it is the last size arriving late, and counting it turns
                 // the restart that ends a scroll into evidence of another one.
-                if (small) {
+                if (!sharp) {
                     a->motion_run = 0;
                 } else if (gap > 0 && gap < MOTION_GAP) {
                     if (a->motion_run < MOTION_RUN) a->motion_run++;
@@ -2219,10 +2368,21 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
             a->in_motion = true;
             term_log("%.3f motion on", now_sec());
             relayout(a);
-            // A size change that produces no frame leaves the wrong picture up
-            // with nothing coming for it, so the watchdog is told to expect one.
-            if (a->expect_frame == 0) a->expect_frame = now_sec() + 1.0;
         }
+
+        // Any soft frame drawn while the page is not moving owes a sharp one.
+        // Hung on the frame rather than on the moment motion ends, which is what
+        // makes this reliable: a scroll called over early, a transition whose
+        // frame never came, a stray repaint at the moving size long afterwards -
+        // none of them are special cases any more, because whatever put a soft
+        // picture up is the same thing that asks for the sharp one.
+        //
+        // Not only under auto. A ratio above 1 is the other way a frame comes
+        // back softer than it was asked for - the screencast cannot hand over
+        // more pixels than the viewport has, and a screenshot can - so --scale 2
+        // is a size only a still can deliver, and it is owed one every time.
+        if (!a->in_motion)
+            a->still_at = sharp ? 0 : now_sec() + STILL_WAIT;
 
         // Going fullscreen throws the viewport override away and puts the page
         // back on the real screen, so the frames stop matching the cells they
@@ -2312,6 +2472,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         a->last_hash = 0;          // the new page may hash to the old frame
         a->kitty.grid_dirty = true;
         screencast_start(a);
+        still_soon(a);             // in case the restart above goes unanswered
         request_fit(a);
         app_req_note(a, app_cdp(a, "Runtime.evaluate",
             "\"expression\":\"document.title\",\"returnByValue\":true"), RQ_TITLE);
@@ -2483,6 +2644,13 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
 
     case RQ_SHOT:
         if (a->shot_state == SHOT_SENT) shot_write(a, msg);
+        return;
+
+    // The sharp picture, come back. Drawn even if the page has started moving
+    // again since it was asked for: it is a true picture of the page either
+    // way, and the frames now arriving replace it within a frame or two.
+    case RQ_STILL:
+        still_draw(a, msg);
         return;
     }
 }
@@ -3230,14 +3398,20 @@ int main(int argc, char **argv) {
         // poll cannot be woken by. One wakeup at the deadline is all it takes -
         // and while frames are still arriving they do the waking themselves.
         if (a.in_motion) {
-            double left = a.last_draw + MOTION_IDLE - now_sec();
+            // Whichever of the two goes quiet last, since motion ends only when
+            // both have.
+            double f = a.last_draw + MOTION_IDLE;
+            double k = a.last_input + MOTION_QUIET;
+            double left = (f > k ? f : k) - now_sec();
             int ms = left > 0 ? (int)(left * 1000.0) + 1 : 0;
             if (wait < 0 || ms < wait) wait = ms;
         }
-        // A size that was not handed over is the same kind of nothing: the
-        // frame that would have said so is the one that did not come.
-        if (a.resize_at > 0) {
-            double left = a.resize_at - now_sec();
+        // A still owed, and a still asked for and not answered, are both the
+        // same kind of nothing: no event will arrive to say so.
+        for (int i = 0; i < 2; i++) {
+            double at = i ? a.still_sent : a.still_at;
+            if (at <= 0) continue;
+            double left = at - now_sec();
             int ms = left > 0 ? (int)(left * 1000.0) + 1 : 0;
             if (wait < 0 || ms < wait) wait = ms;
         }
@@ -3360,32 +3534,43 @@ int main(int argc, char **argv) {
         // already sitting in the buffer is the page still moving, and calling
         // the scroll over one pass early is what put a frame captured at the
         // small size on the far side of the size change.
-        if (a.in_motion && now_sec() - a.last_draw > MOTION_IDLE) {
+        // Both halves, because either alone is wrong: the frames stop while a
+        // trackpad is still coasting, and the input stops while Chrome is
+        // dropping frames in the middle of a scroll.
+        if (a.in_motion && now_sec() - a.last_draw > MOTION_IDLE &&
+            now_sec() - a.last_input > MOTION_QUIET) {
             a.in_motion = false;
             a.motion_run = 0;
             term_log("%.3f motion off", now_sec());
             a.last_hash = 0;        // the same picture, at a size worth drawing
+            // The cap has to go back up whether or not a frame comes of it: it
+            // is what the next frame will be measured against, and what a still
+            // is cancelled by.
             relayout(&a);
-            // Going back up is the half that shows: a frame that never comes
-            // leaves the small one on screen. Watched for, and sooner than a
-            // keypress is, because this picture is already wrong rather than
-            // merely late - so a deadline left over from a keypress is brought
-            // forward rather than kept.
-            double due = now_sec() + 1.0;
-            if (a.expect_frame == 0 || a.expect_frame > due) a.expect_frame = due;
+            still_soon(&a);
         }
 
-        // A frame that came back at the last size rather than this one. The ask
-        // is the only lever there is, so it goes out again; relayout clears the
-        // debt, and the count is what stops it becoming a loop.
-        if (a.resize_at > 0 && now_sec() > a.resize_at) {
-            a.resize_at = 0;        // owed or not, this pass is the answer
-            if (!a.paused) {
-                a.resize_tries++;
-                term_log("%.3f last frame was not %d px wide; asking again (%d)",
-                         now_sec(), a.frame_w, a.resize_tries);
-                a.last_hash = 0;    // the same picture, at a size worth drawing
-                relayout(&a);
+        // The sharp picture, owed and now due. Nothing here waits on Chrome
+        // choosing to draw: the ask has a reply, and a reply that does not come
+        // is asked for again.
+        if (a.still_at > 0 && now_sec() > a.still_at) still_request(&a);
+
+        // Asked for and never answered. Bounded, and the bound hands the
+        // problem on rather than dropping it: a page that will not photograph
+        // is not a resolution problem any more, it is a page that has stopped
+        // answering, which is what the screencast restart below is for.
+        if (a.still_sent > 0 && now_sec() > a.still_sent) {
+            a.still_sent = 0;
+            a.still_tries++;
+            term_log("%.3f no still after %.1fs (%d)",
+                     now_sec(), STILL_SEND_MAX, a.still_tries);
+            if (a.still_tries < STILL_TRIES) {
+                a.still_at = now_sec();
+            } else {
+                a.still_tries = 0;
+                a.kitty.grid_dirty = true;
+                screencast_start(&a);
+                if (a.expect_frame == 0) a.expect_frame = now_sec() + 1.0;
             }
         }
 

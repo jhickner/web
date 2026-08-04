@@ -188,6 +188,9 @@ static bool tab_show(App *a, int idx) {
     // The new session numbers its replies from one, so anything still
     // outstanding on the old one would be claimed by an unrelated reply.
     memset(a->reqs, 0, sizeof a->reqs);
+    // Including a still: its id went with the table, and the page it was a
+    // picture of is not the one being switched to.
+    still_cancel(a);
     a->pend.kind = PEND_NONE;
     a->loading = false;
     a->insert = false;
@@ -204,8 +207,10 @@ static bool tab_show(App *a, int idx) {
     relayout(a);
     session_write(a);
     // A page that comes up with nothing to say leaves the tab we switched away
-    // from still on screen, so the watchdog is told a frame is owed.
+    // from still on screen, so the watchdog is told a frame is owed - and the
+    // picture is asked for outright rather than only waited for.
     a->expect_frame = now_sec() + 2.0;
+    still_soon(a);
     return true;
 }
 

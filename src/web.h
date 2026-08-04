@@ -251,7 +251,7 @@ typedef struct {
 enum {
     RQ_NONE, RQ_TITLE, RQ_URL, RQ_COPY, RQ_FIT, RQ_SCRIPT,
     RQ_SELECTOR, RQ_RECORD, RQ_PDF, RQ_SHOT_READY, RQ_SHOT, RQ_FRAME,
-    RQ_MODE, RQ_HISTORY
+    RQ_MODE, RQ_HISTORY, RQ_STILL
 };
 
 // The isolated world everything we inject for our own use lives in. It shares
@@ -378,7 +378,7 @@ typedef struct {
     size_t  edit_len;
 
     uint64_t last_hash;
-    unsigned frames, skipped;
+    unsigned frames, skipped, stills;
     double  last_draw;
     double  last_metrics_fix;  // when the viewport override was last restored
     double  expect_frame;      // something was done that should redraw; deadline
@@ -424,13 +424,19 @@ typedef struct {
     int     motion_run;        // quick frames in a row seen so far
     double  motion_scale;      // how far down, harder over ssh than locally
 
-    // What was asked for, and what to do when it does not turn up. Asking is
-    // all the size change ever was: a frame captured before the resize landed
-    // arrives after it, and one that is dropped on Chrome's side is never
-    // re-sent, so the picture has to be measured rather than assumed.
-    int     frame_w;           // pixel width the next frame should arrive at
-    int     resize_tries;      // asks since the last frame that came back right
-    double  resize_at;         // when to ask again, 0 = nothing owed
+    // The sharp picture, fetched rather than waited for. Restarting the
+    // screencast is an ask nothing answers: a page with nothing moving on it
+    // gives Chrome no reason to draw, a frame captured before the size changed
+    // arrives after it, and a frame dropped for being one too many in flight is
+    // never re-sent. A screenshot is a call with a reply, so a still that does
+    // not arrive is something this can see and ask for again.
+    int     frame_w;           // pixel width the next screencast frame should be
+    int     still_w;           // and what a screenshot comes back at
+    double  still_at;          // when to ask for one, 0 = nothing owed
+    double  still_sent;        // deadline on the reply, 0 = none outstanding
+    int     still_tries;       // asks since the last one that answered
+    double  last_still;        // so a capture cannot chase the frame it provokes
+    double  last_input;        // the other half of "the page has stopped"
 
     bool    fit_width;         // widen the viewport so no page is cut off
     int     fit_w;             // width the page says it needs
@@ -523,6 +529,13 @@ int  app_attach(App *a, int port, char *msg, size_t cap);
 void navigate(App *a, const char *raw);
 void run_js(App *a, const char *js);
 void relayout(App *a);
+
+// Drop any outstanding or owed screenshot of the page. What is on screen is
+// about to stop being the page this was asked about.
+void still_cancel(App *a);
+
+// Ask for one shortly, unless a frame turns up first and makes it unnecessary.
+void still_soon(App *a);
 void scroll_at(App *a, int x, int y, int dy);
 void scroll_by(App *a, int dy);
 void scroll_page_end(App *a, bool bottom);

@@ -267,19 +267,44 @@ to *hold* — asked for one, it stays that size moving or still.
 
 **Auto** makes that trade only while it is free, and it is the default. A page sliding past is
 measured at 86% Chrome and 14% us, and the pixel count is what both are paid in,
-so the resolution drops once three quick frames say the picture is moving and
-goes back the moment it stops — 42% of the pixels while scrolling, all of them
-the instant you stop to read, and a quarter of them over ssh, where the bytes
-are the whole of the cost. The detail it drops is detail nobody could have read
-while it was moving. `^G` says `moving` while it is down, and `--scale 1` or one
-press of `s` holds the full size if you would rather it did not.
+so the resolution drops the moment a wheel or an arrow says the picture is
+moving and goes back once it stops — 42% of the pixels while scrolling, all of
+them the instant you stop to read, and a quarter of them over ssh, where the
+bytes are the whole of the cost. The detail it drops is detail nobody could have
+read while it was moving. `^G` says `moving` while it is down, and `--scale 1` or
+one press of `s` holds the full size if you would rather it did not.
 
-It is spent on the screencast's size cap rather than on the device scale factor,
-because that is the only end of it Chrome listens to: the frame that arrives is
-the viewport in CSS pixels whatever the scale factor says, and the cap only ever
-scales one *down*. Asked for 842 pixels against a 560-pixel viewport, Chrome
-sends 560. So nothing happens until the cap goes under the viewport — and going
-that way, the page is never re-laid-out on the way in or out, only re-scaled.
+It starts on the input rather than on the frames. A run of quick frames is also
+taken as a scroll — a video or an animation moves without anybody touching
+anything — but waiting for one was never enough on its own: the frames it counts
+are slow precisely because they are still full size, so over ssh the test could
+not pass until the thing it was testing for was already over.
+
+It is spent on the screencast's size cap and nowhere else. The device scale
+factor has no say in what arrives: measured against this Chrome, a 480-pixel
+viewport asked for at a factor of 2.325 and again at 1 hands back the same
+480-pixel frame, byte for byte. The cap is the only end of it Chrome listens to,
+and it only ever scales one *down* — asked for 842 pixels against a 560-pixel
+viewport, Chrome sends 560. So nothing happens until the cap goes under the
+viewport, and going that way the page is never re-laid-out on the way in or out,
+only re-scaled.
+
+**Coming back sharp** is the half that used to be unreliable. Putting the cap
+back up restarts the screencast, which brings a frame back when Chrome has one
+to bring and says nothing at all when it does not — a page with nothing moving
+on it, a frame rastered before the size changed, a frame dropped for being one
+too many in flight. There was no way to tell those apart from a frame merely
+running late, so a short scroll could end on the small picture and stay there.
+
+So the sharp picture is now asked for outright, with `Page.captureScreenshot`.
+That is a call with a reply: it either hands back a PNG or it does not, and one
+that does not come back is something the window can see and ask for again. The
+ask is armed a sixth of a second after the picture goes quiet and called off by
+any frame that already arrived sharp, so the common case still costs nothing —
+and because it hangs on the frame rather than on the moment the scroll ended, a
+scroll called over early, a transition whose frame never came and a stray
+repaint long afterwards are all the same case and all repair themselves. `^G`
+counts the stills that were needed.
 
 `cmd+v` needs nothing: the terminal turns it into a bracketed paste, which is
 ordinary input. `cmd+c` is the other way around — the terminal keeps that one
