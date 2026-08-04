@@ -231,6 +231,18 @@ const char *json_eval_str(const char *msg, size_t *len) {
 
 // Turn a JSON string body back into bytes. Only the escapes CDP actually
 // produces for page text are handled.
+// The four hex digits of a \u escape. The caller has already checked they are
+// there; a digit that is not one reads as whatever the arithmetic makes of it,
+// which is the same answer strtol would give for malformed input.
+static unsigned hex4(const char *s) {
+    unsigned cp = 0;
+    for (int k = 0; k < 4; k++) {
+        char c = s[k];
+        cp = cp * 16 + (unsigned)(c <= '9' ? c - '0' : (c | 32) - 'a' + 10);
+    }
+    return cp;
+}
+
 size_t json_unescape(char *dst, size_t cap, const char *src, size_t n) {
     size_t o = 0;
     for (size_t i = 0; i < n && o + 4 < cap; i++) {
@@ -244,20 +256,37 @@ size_t json_unescape(char *dst, size_t cap, const char *src, size_t n) {
         case 'f': dst[o++] = '\f'; break;
         case 'u': {
             if (i + 4 >= n) { i = n; break; }
-            unsigned cp = 0;
-            for (int k = 1; k <= 4; k++) {
-                char c = src[i + k];
-                cp = cp * 16 + (unsigned)(c <= '9' ? c - '0' :
-                                          (c | 32) - 'a' + 10);
-            }
+            unsigned cp = hex4(src + i + 1);
             i += 4;
+            // Anything above the BMP is written as a pair of surrogates, and
+            // half of one means nothing on its own: an emoji in a page title
+            // would otherwise come out as two characters that are not
+            // characters. A half with no partner becomes the replacement
+            // character rather than an invalid sequence of its own.
+            if (cp >= 0xd800 && cp <= 0xdbff) {
+                unsigned lo = (i + 6 < n && src[i + 1] == '\\' &&
+                               src[i + 2] == 'u') ? hex4(src + i + 3) : 0;
+                if (lo >= 0xdc00 && lo <= 0xdfff) {
+                    cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                    i += 6;
+                } else {
+                    cp = 0xfffd;
+                }
+            } else if (cp >= 0xdc00 && cp <= 0xdfff) {
+                cp = 0xfffd;               // a trailing half, on its own
+            }
             if (cp < 0x80) {
                 dst[o++] = (char)cp;
             } else if (cp < 0x800) {
                 dst[o++] = (char)(0xc0 | (cp >> 6));
                 dst[o++] = (char)(0x80 | (cp & 0x3f));
-            } else {
+            } else if (cp < 0x10000) {
                 dst[o++] = (char)(0xe0 | (cp >> 12));
+                dst[o++] = (char)(0x80 | ((cp >> 6) & 0x3f));
+                dst[o++] = (char)(0x80 | (cp & 0x3f));
+            } else {
+                dst[o++] = (char)(0xf0 | (cp >> 18));
+                dst[o++] = (char)(0x80 | ((cp >> 12) & 0x3f));
                 dst[o++] = (char)(0x80 | ((cp >> 6) & 0x3f));
                 dst[o++] = (char)(0x80 | (cp & 0x3f));
             }

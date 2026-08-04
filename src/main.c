@@ -2047,9 +2047,9 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         a->pdf = a->pdf_clicked = false;   // until the new document says so
         size_t n;
         const char *u = json_str(msg, "url", &n);
-        if (u && n < sizeof a->url) {
-            memcpy(a->url, u, n);
-            a->url[n] = 0;
+        // Escaped, like every other string that arrives this way.
+        if (u) {
+            json_unescape(a->url, sizeof a->url, u, n);
             a->title[0] = 0;
             a->fit_w = 0;              // measured per page
             session_write(a);          // what anything attaching would look for
@@ -2181,9 +2181,11 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
     case RQ_TITLE: {
         size_t n;
         const char *v = json_eval_str(msg, &n);
-        if (v && n && n < sizeof a->title) {
-            memcpy(a->title, v, n);
-            a->title[n] = 0;
+        // The reply is JSON, so the title arrives escaped: the middle dot in
+        // GitHub's comes over as a six character u-escape, and stored as it
+        // came it would be drawn as those six characters.
+        if (v) {
+            json_unescape(a->title, sizeof a->title, v, n);
             session_write(a);
         }
         return;
@@ -2194,9 +2196,8 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
     case RQ_URL: {
         size_t n;
         const char *v = json_eval_str(msg, &n);
-        if (v && n && n < sizeof a->url) {
-            memcpy(a->url, v, n);
-            a->url[n] = 0;
+        if (v) {
+            json_unescape(a->url, sizeof a->url, v, n);
             session_write(a);
         }
         return;
