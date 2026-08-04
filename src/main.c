@@ -1077,6 +1077,7 @@ static void status_sync(App *a) {
     else
         writeall(a->term.fd, "\x1b[2J", 4);
     relayout(a);
+    still_soon(a);      // same reason: unchanged metrics, and the image is gone
 }
 
 // Called after every input batch and every frame, so it keeps its buffer and
@@ -3354,6 +3355,12 @@ int main(int argc, char **argv) {
                 // growing the pane again brings it back below the new one.
                 term_clear_below(&a.term);
             }
+            // The picture was taken down above, and relayout only asks for a
+            // new one: a terminal that shrank without shrinking the box hands
+            // the page metrics it already has, which gives Chrome nothing to
+            // answer the restart with. The still is the ask that has a reply,
+            // so the window comes back whether or not the page redraws.
+            still_soon(&a);
         }
 
         struct pollfd fds[4] = {{0}};   // poll leaves revents alone on EINTR
