@@ -2277,10 +2277,20 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    // Started on a blank page rather than straight at the address, so the first
-    // request to anywhere real is made after everything below is set up.
-    if (chrome_launch(&a.chrome, "about:blank", fw, fh, show, a.mute, a.ua, true,
-                      port) < 0)
+    // The address goes on Chrome's own command line, so the fetch is under way
+    // while the browser is still starting and while we are still attaching to
+    // it: a page's whole time to first byte, overlapped with a couple of
+    // hundred milliseconds that were being spent anyway. It costs one extra
+    // layout, because the first document is laid out at --window-size rather
+    // than at the viewport relayout settles on a moment later.
+    //
+    // Only with a user agent already in hand. Without one the correction is
+    // applied after attaching, which is too late for a document that is already
+    // on its way - and the first run against a new Chrome build is exactly when
+    // that string is not known yet.
+    bool early_url = a.ua[0] != 0;
+    if (chrome_launch(&a.chrome, early_url ? first : "about:blank",
+                      fw, fh, show, a.mute, a.ua, true, port) < 0)
         return 1;
     term_log("%.3f chrome up on port %d (%s)", now_sec(), a.chrome.port,
              a.chrome.adopted ? "adopted" : "launched");
@@ -2332,11 +2342,17 @@ int main(int argc, char **argv) {
     // already running on the port we were pointed at and no address was asked
     // for, in which case it is somewhere of its own and loading a first page
     // would take it off whatever that is.
+    // A browser we adopted never saw the command line, so it still has to be
+    // sent somewhere; one we started is already fetching, and navigating again
+    // would throw that head start away and ask for the same page twice.
+    bool launched = !a.chrome.adopted && !a.chrome.foreign;
     if (a.chrome.foreign && !url_given) ask_where(&a);
+    else if (early_url && launched) a.loading = true;
     else navigate(&a, first);
     // The first request to anywhere real leaves here, which is what the whole
     // startup chain above is in front of. Everything after this is the page's.
-    term_log("%.3f navigate sent", now_sec());
+    term_log("%.3f navigate %s", now_sec(),
+             early_url && launched ? "was on the command line" : "sent");
     // Timed from here rather than from the top of main: what the picture is
     // waiting for is the page, and none of starting a browser was that.
     if (a.shot_path) {
