@@ -111,6 +111,9 @@ mute             = no
 raw-keys         = no
 keep             = no
 scale            = auto
+zoom             = 1
+rows             = auto
+cols             = auto
 
 shift-alt-right  = tab-next
 ^y               = copy
@@ -119,8 +122,13 @@ f5               = reload
 ```
 
 Settings take `yes`/`no` (`true`, `on`, `1` too); `scale` takes `auto` or 0.1
-to 3. Each is the command line option of the same name, which wins for that
-run.
+to 3; `zoom` takes 0.5 to 3; `rows` and `cols` take `auto` or a count. Each is
+the command line option of the same name, which wins for that run.
+
+`zoom`, `rows` and `cols` are where a new window opens. `[` `]` `alt+0` and
+`shift`+arrows move a running window from there, and nothing is written back.
+`rows` and `cols` do nothing under `full = yes`; a `cols` wider than the
+terminal is drawn at the terminal's width.
 
 Keys are `ctrl` `alt` `shift` `cmd` joined by `+` or `-`, then a character or
 one of `left` `right` `up` `down` `space` `esc` `enter` `tab` `backspace`
@@ -138,6 +146,8 @@ web [options] <url>...
             nothing; the screencast never exceeds the viewport
 --zoom F    page magnification (default 1.0)
 --rows N    how many cell rows the window gets
+--cols N    how many cell columns the window gets (default: from the
+            proportion, and never wider than the terminal)
 --no-status start with the status line hidden (^S toggles it)
 --no-clear  leave the window on screen on exit instead of erasing it
 --full      take over the whole terminal instead of drawing a window

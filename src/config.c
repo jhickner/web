@@ -11,9 +11,10 @@
 // are compiled in and the file is read over the top of them, so a line the
 // file does not carry is the one it has always been, and the file is never
 // written back - what it says is what the user said, and nothing here has an
-// opinion it would want to save. Which is also why nothing that changes while
-// the window is up is in it: the zoom and the size of the window belong to the
-// one window, and there may be a dozen of them running.
+// opinion it would want to save. Which is also why what a key changes while
+// the window is up - the zoom, the size of the window - is only ever read out
+// of here: it says where a new window opens, and the dozen that may be running
+// each go their own way from there without any of it coming back.
 //
 // Nothing else in the program knows a key: main.c asks this what an event
 // means and acts on the answer, and help.c asks it which key an action wears
@@ -359,10 +360,11 @@ static const KeyBind DEFAULTS[] = {
 // was: the file is read before the arguments are, so a flag still wins for the
 // run it is given on.
 //
-// The ones a key changes - the zoom, the width, the size of the window - are
-// deliberately not here. They belong to the one window rather than to the
-// person, and several windows are usually up at once.
-typedef enum { S_BOOL, S_BOOL_NOT, S_SCALE } SetKind;
+// `zoom`, `rows` and `cols` are where a new window starts and nothing more. A
+// key moves them afterwards and the file never hears about it, so the several
+// windows usually up at once each keep their own - what is written here is an
+// opening position, not a record of one.
+typedef enum { S_BOOL, S_BOOL_NOT, S_SCALE, S_ZOOM, S_COUNT } SetKind;
 
 static const struct {
     const char *name;
@@ -377,10 +379,15 @@ static const struct {
     {"raw-keys",      S_BOOL_NOT, offsetof(App, claim_keys)},
     {"keep",          S_BOOL,     offsetof(App, keep)},
     {"scale",         S_SCALE,    0},
+    {"zoom",          S_ZOOM,     offsetof(App, zoom)},
+    {"rows",          S_COUNT,    offsetof(App, want_rows)},
+    {"cols",          S_COUNT,    offsetof(App, want_cols)},
 };
 #define NSETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))
 
-static bool *bool_at(App *a, size_t off) { return (bool *)((char *)a + off); }
+static bool   *bool_at(App *a, size_t off)   { return (bool *)((char *)a + off); }
+static double *double_at(App *a, size_t off) { return (double *)((char *)a + off); }
+static int    *int_at(App *a, size_t off)    { return (int *)((char *)a + off); }
 
 static bool parse_bool(const char *v, bool *out) {
     if (!strcasecmp(v, "yes") || !strcasecmp(v, "true") ||
@@ -391,13 +398,28 @@ static bool parse_bool(const char *v, bool *out) {
 }
 
 static bool setting_set(App *a, int i, const char *v) {
+    char *end;
     if (SETTINGS[i].kind == S_SCALE) {
         if (!strcasecmp(v, "auto")) { a->motion_auto = true; return true; }
-        char *end;
         double d = strtod(v, &end);
         if (end == v || *end || d < 0.1 || d > 3.0) return false;
         a->motion_auto = false;
         a->want_scale = d;
+        return true;
+    }
+    // The same range --zoom takes, refused rather than clamped: a file is
+    // written once and read every run, so a number outside it is worth saying.
+    if (SETTINGS[i].kind == S_ZOOM) {
+        double d = strtod(v, &end);
+        if (end == v || *end || d < 0.5 || d > 3.0) return false;
+        *double_at(a, SETTINGS[i].off) = d;
+        return true;
+    }
+    if (SETTINGS[i].kind == S_COUNT) {
+        if (!strcasecmp(v, "auto")) { *int_at(a, SETTINGS[i].off) = 0; return true; }
+        long n = strtol(v, &end, 10);
+        if (end == v || *end || n < 1 || n > 1000) return false;
+        *int_at(a, SETTINGS[i].off) = (int)n;
         return true;
     }
     bool on;
@@ -410,6 +432,16 @@ static void setting_text(const App *a, int i, char *out, size_t cap) {
     if (SETTINGS[i].kind == S_SCALE) {
         if (a->motion_auto) snprintf(out, cap, "auto");
         else                snprintf(out, cap, "%g", a->want_scale);
+        return;
+    }
+    if (SETTINGS[i].kind == S_ZOOM) {
+        snprintf(out, cap, "%g", *double_at((App *)a, SETTINGS[i].off));
+        return;
+    }
+    if (SETTINGS[i].kind == S_COUNT) {
+        int n = *int_at((App *)a, SETTINGS[i].off);
+        if (n > 0) snprintf(out, cap, "%d", n);
+        else       snprintf(out, cap, "auto");
         return;
     }
     bool on = *bool_at((App *)a, SETTINGS[i].off);
@@ -487,9 +519,12 @@ static int read_config(const char *path, App *a) {
             if (!strcasecmp(SETTINGS[i].name, spec)) { s = i; break; }
         if (s >= 0) {
             if (!setting_set(a, s, name)) {
+                const char *want = "yes or no";
+                if (SETTINGS[s].kind == S_SCALE)      want = "size";
+                else if (SETTINGS[s].kind == S_ZOOM)  want = "magnification";
+                else if (SETTINGS[s].kind == S_COUNT) want = "count";
                 fprintf(stderr, "web: %s:%d: `%s` is not a %s for %s\n", path,
-                        lineno, name,
-                        SETTINGS[s].kind == S_SCALE ? "size" : "yes or no", spec);
+                        lineno, name, want, spec);
                 bad++;
             }
             continue;

@@ -2949,8 +2949,11 @@ static void first_size(App *a, int *w, int *h) {
         ? (a->want_rows > 0 ? a->want_rows : a->term.rows / 2)
         : a->term.rows - (a->status_open ? 1 : 0);
     if (rows < 1) rows = 1;
+    int cols = (a->inline_mode && a->want_cols > 0) ? a->want_cols : a->term.cols;
+    if (cols > a->term.cols) cols = a->term.cols;
+    if (cols < 1) cols = 1;
     double z = a->zoom > 0 ? a->zoom : 1.0;
-    *w = (int)(a->term.cols * a->term.cell_w / z);
+    *w = (int)(cols * a->term.cell_w / z);
     *h = (int)(rows * a->term.cell_h / z);
     if (*w < 200) *w = 200;
     if (*h < 200) *h = 200;
@@ -3022,6 +3025,9 @@ int main(int argc, char **argv) {
             a.inline_mode = false;
         } else if (!strcmp(argv[i], "--rows") && i + 1 < argc) {
             a.want_rows = atoi(argv[++i]);
+            a.inline_mode = true;
+        } else if (!strcmp(argv[i], "--cols") && i + 1 < argc) {
+            a.want_cols = atoi(argv[++i]);
             a.inline_mode = true;
         } else if (!strcmp(argv[i], "--clear")) {
             a.clear_exit = true;       // the default; kept so scripts still work

@@ -451,7 +451,7 @@ typedef struct {
 
     int     box_rows;          // inline: cell rows the window occupies
     int     box_cols;          // inline: cell columns, 0 = from the proportion
-    int     want_cols;         // columns remembered from an earlier run
+    int     want_cols;         // cols for that block, 0 = from the proportion
     int     want_width;        // width pinned by w/W, 0 = derived from the cells
     bool    scale_locked;      // the render scale was chosen by hand
 
