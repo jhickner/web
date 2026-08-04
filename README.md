@@ -40,7 +40,7 @@ set -g allow-passthrough all
 | `^T` / `^W` | new tab / close tab (the last one closes the window) |
 | `^N` / `^B` | next tab / previous tab |
 | `alt+1`…`alt+9` | the tab with that number on it |
-| `alt+0` | reset zoom, and unpin the width |
+| `alt+0` | reset zoom and the pinned width, and the window's proportion with it |
 | `alt+f` | fit-to-width on/off |
 | `cmd+c` | copy the page selection (needs one line of terminal config, below) |
 | `cmd+v` | paste into the page, or into the address bar when it is open |
@@ -60,8 +60,8 @@ While reading:
 | `d` / `u` | half a screen |
 | `space` / `b` | a screen |
 | `gg` / `G` | top / bottom of the page |
-| `[` / `]` | zoom out / in — or resize the window, inline |
-| `shift`+`↑↓←→` | drag the window's bottom right corner (`U`/`D`/`L`/`R` too) |
+| `[` / `]` | zoom out / in — or scale the window, inline: both edges together |
+| `shift`+`↑↓←→` | drag one edge of the window, the other stays put (`U`/`D`/`L`/`R` too) |
 | `w` / `W` | widen / narrow the width the page is told it has |
 | `s` | frame size: auto, then 100%, 75%, 50% held |
 | `t` | frame transport: png, then two jpeg settings that only time it |
@@ -560,14 +560,21 @@ that one is in a shorter terminal. `alt+=` and `alt+-` still zoom either way.
 
 Shift and an arrow take the two edges separately, which is the same corner
 dragged by hand: `shift+↓` and `shift+→` let the window out, `shift+↑` and
-`shift+←` take it back. The top left stays where it is, so the window only ever
-grows down and to the right, and the shell's history above it never moves. A
-column is a smaller step than a row — cells are about twice as tall as they are
-wide — so the sideways keys move two at a time. Until one of them is pressed the
-width follows the height at the proportion above; after that it is yours, and
-the height keys stop changing it. `U`, `D`, `L` and `R` do the same thing, for
-terminals that keep the shifted arrows for themselves. Both numbers are kept for
-the next run.
+`shift+←` take it back. Each one moves its own edge and leaves the other where
+it is, so the height keys never change the width and the width keys never change
+the height. The top left stays where it is, so the window only ever grows down
+and to the right, and the shell's history above it never moves. A column is a
+smaller step than a row — cells are about twice as tall as they are wide — so
+the sideways keys move two at a time. `U`, `D`, `L` and `R` do the same four
+things, for terminals that keep the shifted arrows for themselves.
+
+`[` and `]` are the other gesture: a smaller and a larger window rather than a
+shorter and a taller one, so both edges move together and the window keeps
+whatever shape it has been given as it goes. Both numbers are kept for the next
+run.
+
+`alt+0` drops a width set by hand and puts the window back on the proportion
+above, where it takes its width from its height again.
 
 `--full` gives up the window and takes the whole terminal on the alternate
 screen instead, restoring it on the way out. There is no box to resize there, so

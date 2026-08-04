@@ -1249,7 +1249,12 @@ static void step_width(App *a, int step) {
 // cell rect sets the viewport, and the layout follows from there. The corner
 // being dragged is the bottom right one - the window keeps the row it opened
 // on, and grows down and to the right from there.
-static void resize_box(App *a, int drows, int dcols) {
+//
+// Two different gestures come through here. `drows`/`dcols` drag one edge and
+// leave the other where it is, which is what the arrows do. `scale` asks for
+// the other edge to come along in proportion, which is what makes the brackets
+// a smaller and a larger window rather than a shorter and a taller one.
+static void resize_box(App *a, int drows, int dcols, bool scale) {
     if (!a->inline_mode) {
         notify(a, "--full has no window to resize");
         return;
@@ -1262,16 +1267,31 @@ static void resize_box(App *a, int drows, int dcols) {
     if (rows > t->rows - fixed) rows = t->rows - fixed;
 
     int was_cols = box_cols_now(a, a->box_rows);
-    int cols = box_cols_now(a, rows) + dcols;
+    int cols;
+    if (dcols) {
+        cols = was_cols + dcols;            // that edge, and nothing else
+    } else if (!scale) {
+        cols = was_cols;                    // this edge, and nothing else
+    } else if (a->box_cols > 0) {
+        // Scaled from the width the window actually has rather than reset to
+        // the default proportion, so a shape chosen by hand is kept and simply
+        // gets smaller. Before this, a window whose width had ever been set
+        // could only be made shorter - it never got narrower again.
+        cols = (int)((double)was_cols * rows / a->box_rows + 0.5);
+    } else {
+        cols = box_cols_for(a, rows);       // never set: the standard proportion
+    }
     if (cols < BOX_MIN_COLS) cols = BOX_MIN_COLS;
     if (cols > t->cols) cols = t->cols;
     if (rows == a->box_rows && cols == was_cols) return;
 
     a->box_rows = rows;
-    // Only a sideways nudge pins the width. Until one arrives the window keeps
-    // its proportion as it grows, which is what makes the height key alone
-    // behave the way it always has.
-    if (dcols) a->box_cols = cols;
+    // Whatever the width came out as has to be remembered, or the proportion
+    // would work it out again from the new height and undo this. The one case
+    // that must not be written down is a scaling step on a window that has
+    // never had a width of its own: that one is still following the proportion,
+    // and should go on doing so.
+    if (dcols || !scale || a->box_cols > 0) a->box_cols = cols;
 
     kitty_clear(&a->kitty);            // the image those cells named is going
     term_clear_inline(t);              // and so are the cells that named it
@@ -1771,10 +1791,10 @@ static void handle_key(App *a, Event *ev) {
         // below, where the same arrows without shift scroll and go back.
         if (ev->mods & MOD_SHIFT) {
             switch (ev->key) {
-            case KEY_DOWN:  resize_box(a, +1, 0); return;
-            case KEY_UP:    resize_box(a, -1, 0); return;
-            case KEY_RIGHT: resize_box(a, 0, +BOX_COL_STEP); return;
-            case KEY_LEFT:  resize_box(a, 0, -BOX_COL_STEP); return;
+            case KEY_DOWN:  resize_box(a, +1, 0, false); return;
+            case KEY_UP:    resize_box(a, -1, 0, false); return;
+            case KEY_RIGHT: resize_box(a, 0, +BOX_COL_STEP, false); return;
+            case KEY_LEFT:  resize_box(a, 0, -BOX_COL_STEP, false); return;
             }
         }
 
@@ -1823,16 +1843,16 @@ static void handle_key(App *a, Event *ev) {
         // screen there is no window to resize and they zoom instead. alt+= and
         // alt+- zoom either way.
         case '[':
-            if (a->inline_mode) resize_box(a, -1, 0); else zoom_by(a, 1.0 / 1.25);
+            if (a->inline_mode) resize_box(a, -1, 0, true); else zoom_by(a, 1.0 / 1.25);
             return;
         case ']':
-            if (a->inline_mode) resize_box(a, +1, 0); else zoom_by(a, 1.25);
+            if (a->inline_mode) resize_box(a, +1, 0, true); else zoom_by(a, 1.25);
             return;
         // The same four, for a terminal that keeps the shifted arrows to itself.
-        case 'D': resize_box(a, +1, 0); return;
-        case 'U': resize_box(a, -1, 0); return;
-        case 'R': resize_box(a, 0, +BOX_COL_STEP); return;
-        case 'L': resize_box(a, 0, -BOX_COL_STEP); return;
+        case 'D': resize_box(a, +1, 0, false); return;
+        case 'U': resize_box(a, -1, 0, false); return;
+        case 'R': resize_box(a, 0, +BOX_COL_STEP, false); return;
+        case 'L': resize_box(a, 0, -BOX_COL_STEP, false); return;
         case 'P':
             a->selector_pick = !a->selector_pick;
             notify(a, a->selector_pick ? "picking: click for a selector"
@@ -1886,10 +1906,26 @@ static void handle_key(App *a, Event *ev) {
             a->zoom = 1.0;
             a->want_width = 0;         // and the width goes back to the cells
             a->fit_w = 0;
+            // The window's own width as well as the page's, so the box goes
+            // back to the proportion it opens with rather than to whatever
+            // shape it was last nudged into. Dropped from the remembered state
+            // too, or the next run reads it straight back in.
+            bool was_pinned = a->box_cols > 0;
+            a->box_cols = a->want_cols = 0;
+            if (was_pinned) {
+                // The cells the picture named are about to belong to something
+                // narrower, and nothing else will write over the ones it gives
+                // up. Same order resize_box uses, and for the same reason.
+                kitty_clear(&a->kitty);
+                term_clear_inline(&a->term);
+                a->status_last.len = 0;
+                a->last_hash = 0;
+            }
             relayout(a);
             save_state(a);
             char m[64];
-            snprintf(m, sizeof m, "zoom 100%% - width %dpx", a->css_w);
+            snprintf(m, sizeof m, "zoom 100%% - window %d cells, width %dpx",
+                     a->kitty.cols, a->css_w);
             notify(a, m);
             request_fit(a);
             return;
