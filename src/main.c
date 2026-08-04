@@ -1322,73 +1322,37 @@ static void request_fit(App *a) {
         RQ_FIT);
 }
 
-// What is worth outliving the process: the zoom, the pinned width and the
-// height of the inline window, which belong to the terminal they are being read
-// in rather than to any page, and the user agent, which has to be known before
-// Chrome starts and can only be learned from a Chrome already running. All of
-// it is keyed to nothing - one browser, one terminal, one file.
-static void state_path(char *out, size_t cap) {
-    const char *cfg = getenv("XDG_CONFIG_HOME");
-    const char *home = getenv("HOME");
-    if (cfg && *cfg) snprintf(out, cap, "%s/web", cfg);
-    else             snprintf(out, cap, "%s/.config/web", home ? home : "/tmp");
+// The user agent Chrome is calling itself, which has to be known before Chrome
+// starts and can only be learned from a Chrome already running. Not a setting
+// and not worth a config line: it is a fact about the browser, so it is cached
+// beside the browser, in the profile the answer came from.
+//
+// Nothing else outlives the process. The zoom, the pinned width and the size
+// of the window are what this window is doing now - several of them are
+// usually up at once, each one somewhere different, and a file they all wrote
+// to would only be the last one to quit.
+static void ua_path(char *out, size_t cap) {
+    char profile[512];
+    chrome_profile_path(profile, sizeof profile);
+    snprintf(out, cap, "%s/ua", profile);
 }
 
-static void load_state(App *a) {
-    char dir[512], path[600];
-    state_path(dir, sizeof dir);
-    snprintf(path, sizeof path, "%s/state", dir);
+static void load_ua(App *a) {
+    char path[600];
+    ua_path(path, sizeof path);
     FILE *f = fopen(path, "r");
     if (!f) return;
-    char line[700];
-    while (fgets(line, sizeof line, f)) {
-        line[strcspn(line, "\r\n")] = 0;
-        if (!strncmp(line, "zoom=", 5)) {
-            double z = atof(line + 5);
-            if (z >= 0.4 && z <= 4.0) a->zoom = z;
-        } else if (!strncmp(line, "width=", 6)) {
-            int w = atoi(line + 6);
-            if (w >= WIDTH_MIN && w <= WIDTH_MAX) a->want_width = w;
-        } else if (!strncmp(line, "rows=", 5)) {
-            int r = atoi(line + 5);
-            if (r >= 2 && r <= 500) a->want_rows = r;
-        } else if (!strncmp(line, "cols=", 5)) {
-            int c = atoi(line + 5);
-            if (c >= BOX_MIN_COLS && c <= 2000) a->want_cols = c;
-        } else if (!strncmp(line, "ua=", 3) && line[3]) {
-            snprintf(a->ua, sizeof a->ua, "%s", line + 3);
-        } else if (!strncmp(line, "pause_on_blur=", 14)) {
-            a->pause_cfg = a->pause_on_blur = atoi(line + 14) != 0;
-        }
-    }
+    if (fgets(a->ua, sizeof a->ua, f)) a->ua[strcspn(a->ua, "\r\n")] = 0;
     fclose(f);
 }
 
-static void save_state(App *a) {
-    char dir[512], path[600];
-    state_path(dir, sizeof dir);
-    mkdirs(dir);
-    snprintf(path, sizeof path, "%s/state", dir);
+static void save_ua(App *a) {
+    if (!a->ua[0]) return;
+    char path[600];
+    ua_path(path, sizeof path);
     FILE *f = fopen(path, "w");
     if (!f) return;
-    fprintf(f, "zoom=%.4f\n", a->zoom);
-    // A pinned width outranks the zoom on the way back in: it is a width the
-    // page was held at rather than a ratio of a terminal that may be gone, so
-    // it means the same thing in the next terminal and the ratio does not.
-    if (a->want_width > 0) fprintf(f, "width=%d\n", a->want_width);
-    // --full has no window of its own, so it carries whatever was stored for
-    // the inline one through rather than dropping it.
-    int rows = a->box_rows > 0 ? a->box_rows : a->want_rows;
-    if (rows > 0) fprintf(f, "rows=%d\n", rows);
-    // Only a width that was asked for. Left out, the window opens at the
-    // proportion it always has, which is the right answer for a terminal that
-    // is not the one the number came from.
-    int cols = a->box_cols > 0 ? a->box_cols : a->want_cols;
-    if (cols > 0) fprintf(f, "cols=%d\n", cols);
-    // What the file said, not what this run is doing: --no-pause is for one
-    // session, and a flag that quietly rewrote the setting would outlive it.
-    fprintf(f, "pause_on_blur=%d\n", a->pause_cfg ? 1 : 0);
-    if (a->ua[0]) fprintf(f, "ua=%s\n", a->ua);
+    fprintf(f, "%s\n", a->ua);
     fclose(f);
 }
 
@@ -1415,7 +1379,6 @@ static void step_width(App *a, int step) {
     a->want_width = want;
     a->fit_w = 0;
     relayout(a);
-    save_state(a);
     // The two numbers are one setting seen from two ends, and moving either one
     // moves the other, so both are said whichever end the press came from.
     snprintf(m, sizeof m, "width %dpx - zoom %.0f%%", a->css_w, a->zoom * 100);
@@ -1483,7 +1446,6 @@ static void resize_box(App *a, int drows, int dcols, bool scale) {
     // dropped as a duplicate and leave the window empty until it moved.
     a->last_hash = 0;
     relayout(a);
-    save_state(a);
 
     // A pinned width does not move when the window does, so the magnification
     // is the half that changed and the number worth showing next to it.
@@ -1613,10 +1575,6 @@ static void zoom_by(App *a, double factor) {
 
     a->fit_w = 0;                 // re-measure from the width just asked for
     relayout(a);
-    // Only what was asked for is remembered. The fit pass below can lower
-    // a->zoom to whatever a stubbornly wide page allows, and saving that would
-    // let one such page quietly become the setting for every later run.
-    save_state(a);
 
     char m[64];
     snprintf(m, sizeof m, "zoom %.0f%% - width %dpx", a->zoom * 100, a->css_w);
@@ -1833,6 +1791,146 @@ static const char KEY_CLAIMER[] =
     "if(t&&(t.isContentEditable||n==='INPUT'||n==='TEXTAREA'||n==='SELECT'))return;"
     "e.preventDefault();},true);})()";
 
+// A gif never stops: Chrome repaints it, the screencast hands over every
+// repaint, and the terminal spends the whole session redrawing an advert in a
+// corner of a page nobody is reading. Held until it is clicked, a page of them
+// costs what a page of text costs. The click that starts one is the click the
+// page would have had, minus the one thing it was going to do with it - so a
+// gif inside a link takes two, the first to play it and the second to follow.
+//
+// What counts as a gif is settled by watching one rather than by reading its
+// address. The address is no use: a picture that animates is as likely to be a
+// webp or an avif as a gif, and the one that started this was a gif served as a
+// webp from `/_next/image?url=...&w=1920`, where the only `.gif` in it is
+// somebody else's query parameter. So a picture that has just come into view is
+// sampled into a small canvas a few times over the next couple of seconds, and
+// one whose pixels move is one that is moving. That also means a gif that only
+// ever had one frame is left alone, which reading the name could never manage.
+//
+// Sampling is the same read the still is, so it is refused for the same
+// pictures - the ones from another host that sent no cors header. There the
+// address is all there is, and only a name ending in .gif or .apng is held; the
+// rest are left to animate. The one thing worse than missing one would be a
+// grey box over a picture that was never moving in the first place.
+//
+// The still is read back off a canvas at the moment the motion is noticed, so
+// it is a frame from the first second or so rather than frame one. A picture
+// the browser will not let us read becomes a box of the same size saying what
+// it is, and is then asked for a second time with cors, which most of the hosts
+// that serve gifs allow; that answer replaces the box when it arrives.
+//
+// Video is the same cost with a simpler answer - a paused video goes on
+// showing the frame it stopped on, so nothing has to stand in for it. Only one
+// that started by itself is stopped: playing while the user has just clicked
+// something is a page doing what it was asked to, and taking that back would
+// make its own play button useless.
+//
+// This runs in WEB_WORLD like the two above, so the guard is ours alone. What
+// it leaves on the page is on the elements themselves - the address of the gif
+// has to outlive the still that replaced it, and the DOM is the one thing both
+// worlds can see. Everything else it remembers is held in maps of its own,
+// rather than written onto the page: a page of photographs would otherwise
+// collect an attribute apiece for the finding that they are photographs.
+static const char CLICK_PLAY[] =
+    "(function(){if(window.__webplay)return;window.__webplay=1;"
+    "var judged=new WeakMap(),cv=null;"
+    "function named(u){"
+    "return /^data:image\\/gif/i.test(u)||/\\.(gif|apng)([?#]|$)/i.test(u);}"
+    // One number for what the picture looks like now, off a canvas small enough
+    // that reading it back costs nothing. null is the browser refusing to let
+    // us look at all.
+    "function sample(img){try{"
+    "if(!cv){cv=document.createElement('canvas');cv.width=cv.height=64;}"
+    "var g=cv.getContext('2d',{willReadFrequently:true});"
+    "g.clearRect(0,0,64,64);g.drawImage(img,0,0,64,64);"
+    "var d=g.getImageData(0,0,64,64).data,h=0;"
+    "for(var i=0;i<d.length;i+=4)h=(h*31+d[i]+d[i+1]*3+d[i+2]*7)|0;"
+    "return h;}catch(e){return null;}}"
+    "function badge(g,w,h){if(w<64||h<32)return;"
+    "var s=Math.max(11,Math.min(w,h)/9);g.font='bold '+s+'px sans-serif';"
+    "g.textBaseline='top';var t='\\u25B6 GIF',p=s*0.4,"
+    "bw=g.measureText(t).width+p*2,bh=s*1.3+p*2;"
+    "g.fillStyle='rgba(0,0,0,0.6)';g.fillRect(p,h-bh-p,bw,bh);"
+    "g.fillStyle='#fff';g.fillText(t,p*2,h-bh);}"
+    "function still(src,w,h){try{"
+    "var c=document.createElement('canvas');c.width=w;c.height=h;"
+    "var g=c.getContext('2d');g.drawImage(src,0,0,w,h);badge(g,w,h);"
+    "return c.toDataURL('image/png');}catch(e){return null;}}"
+    // Sized to the picture it stands in for, so the page lays out as it would
+    // have: an svg carries its own width and height, which is the intrinsic
+    // size an <img> asks it for.
+    "function box(w,h){var s=Math.round(Math.max(11,Math.min(w,h)/7));"
+    "return 'data:image/svg+xml;charset=utf-8,'+encodeURIComponent("
+    "'<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"'+w+"
+    "'\" height=\"'+h+'\">'+"
+    "'<rect width=\"100%\" height=\"100%\" fill=\"#1b1b1b\"/>'+"
+    "'<text x=\"50%\" y=\"50%\" fill=\"#c8c8c8\" "
+    "font-family=\"sans-serif\" font-size=\"'+s+"
+    "'\" text-anchor=\"middle\" dominant-baseline=\"central\">"
+    "&#9654; GIF</text></svg>');}"
+    "function later(img,src,w,h){var probe=new Image();"
+    "probe.crossOrigin='anonymous';probe.onload=function(){"
+    "if(img.dataset.webGif!==src)return;"       // clicked while it was coming
+    "var s=still(probe,w,h);if(s)img.src=s;};probe.src=src;}"
+    "function hold(img,src,w,h){"
+    "if('webGif' in img.dataset)return;"
+    "judged.set(img,src);img.dataset.webGif=src;"
+    "if(img.srcset){img.dataset.webSet=img.srcset;img.srcset='';}"
+    "var s=still(img,w,h);img.src=s||box(w,h);if(!s)later(img,src,w,h);}"
+    // Whether this one moves, asked of the picture itself. Answered over the
+    // next couple of seconds rather than at once: a gif is only a gif once it
+    // has reached its second frame, and some of them take a while about it.
+    "function look(img){"
+    "if('webGif' in img.dataset)return;"
+    "var src=img.currentSrc||img.src;if(!src)return;"
+    "if(judged.get(img)===src)return;"
+    "var w=img.naturalWidth,h=img.naturalHeight;"
+    "if(w<8||h<8){judged.set(img,src);return;}"
+    "var a=sample(img);"
+    "if(a===null){"          // another host, and no way to see what it is doing
+    "if(named(src))hold(img,src,w,h);else judged.set(img,src);return;}"
+    "var n=0,t=setInterval(function(){"
+    "if((img.currentSrc||img.src)!==src||'webGif' in img.dataset)"
+    "{clearInterval(t);return;}"
+    "var b=sample(img);"
+    "if(b!==null&&b!==a){clearInterval(t);hold(img,src,w,h);return;}"
+    "if(++n>=4){clearInterval(t);judged.set(img,src);}},500);}"
+    // Only once it is on screen. An image outside the viewport is not animated
+    // by the browser at all, so watching one there would find it still and say
+    // so - and it is also not costing a frame until it arrives.
+    "var io=new IntersectionObserver(function(es){"
+    "for(var i=0;i<es.length;i++)if(es[i].isIntersecting)look(es[i].target);});"
+    "function stop(v){if('webPlay' in v.dataset)return;"
+    "v.dataset.webVid='1';v.autoplay=false;v.pause();}"
+    "function play(el){el.dataset.webPlay='1';"
+    "if(el.tagName==='VIDEO'){delete el.dataset.webVid;"
+    "var p=el.play();if(p&&p.catch)p.catch(function(){});return;}"
+    "var src=el.dataset.webGif;delete el.dataset.webGif;"
+    "judged.set(el,src);"                 // playing, and not to be held again
+    "if('webSet' in el.dataset){el.srcset=el.dataset.webSet;"
+    "delete el.dataset.webSet;}el.src=src;}"
+    // A load listener in the capture phase, rather than a walk of the document
+    // or an observer watching it: load does not bubble, but it does travel down
+    // to the image it is about, so this hears every picture the page ever
+    // fetches - including the ones an ad frame adds an hour in.
+    "document.addEventListener('load',function(e){"
+    "var t=e.target;if(t&&t.tagName==='IMG')io.observe(t);},true);"
+    "document.addEventListener('play',function(e){var v=e.target;"
+    "if(!v||v.tagName!=='VIDEO'||'webPlay' in v.dataset)return;"
+    "if(!v.autoplay&&navigator.userActivation&&navigator.userActivation.isActive)"
+    "return;stop(v);},true);"
+    "document.addEventListener('click',function(e){"
+    "var t=e.target;if(!t||!t.closest)return;"
+    "var el=t.closest('[data-web-gif],[data-web-vid]');if(!el)return;"
+    "e.preventDefault();e.stopPropagation();play(el);},true);"
+    // Everything already on screen. Nothing for a document that is only
+    // starting, and the whole of it for a tab that was switched back to.
+    "var im=document.images||[];"
+    "for(var i=0;i<im.length;i++)if(im[i].complete)io.observe(im[i]);"
+    "var vs=document.getElementsByTagName('video');"
+    "for(var j=0;j<vs.length;j++)if(!vs[j].paused)stop(vs[j]);"
+    "})()";
+
 // The shortest selector that finds the element again: its id where it has one,
 // otherwise a CSS path shortened to the first ancestor that is already unique.
 // CSS because that is what the console can spend - `document.querySelector` is
@@ -2015,14 +2113,188 @@ static void copy_selection(App *a) {
         "\"returnByValue\":true"), RQ_COPY);
 }
 
+// One key, already turned into what it was asked to do. What key that was is
+// keys.c's business and none of this function's; false means nothing was done
+// here and the key still belongs to whatever is underneath.
+static bool do_action(App *a, Event *ev, Act act) {
+    switch (act) {
+    case ACT_NONE:
+    case ACT_INVALID:
+        return false;
+
+    case ACT_QUIT: {
+        char spec[32];
+        key_text(ev->mods, ev->key, spec, sizeof spec);
+        term_log("QUIT via %s", spec);
+        g_quit = 1;
+        return true;
+    }
+
+    // ------------------------------------------------------------- moving
+
+    // Chrome moves 40 CSS pixels per arrow press; matching it means a page
+    // scrolls here at the speed it does in a window.
+    // On a clicked-into PDF the arrows are handed over rather than turned into
+    // a scroll, because where they go is the viewer's business: in the document
+    // they move the view, and with the thumbnail rail focused they change the
+    // page. Neither is something to imitate from here.
+    case ACT_LINE_DOWN:
+    case ACT_LINE_UP:
+        if (a->pdf && a->pdf_clicked && special_key(a, ev->key, ev->mods)) return true;
+        scroll_by(a, act == ACT_LINE_DOWN ? 40 : -40);
+        return true;
+    case ACT_SCROLL_DOWN:  scroll_by(a, 60);  return true;
+    case ACT_SCROLL_UP:    scroll_by(a, -60); return true;
+    case ACT_SCROLL_RIGHT: scroll_side(a, a->css_w / 4);  return true;
+    case ACT_SCROLL_LEFT:  scroll_side(a, -a->css_w / 4); return true;
+    case ACT_HALF_DOWN:    scroll_by(a, a->css_h / 2);  return true;
+    case ACT_HALF_UP:      scroll_by(a, -(a->css_h / 2)); return true;
+    case ACT_PAGE_DOWN:    scroll_by(a, (int)(a->css_h * 0.9));  return true;
+    case ACT_PAGE_UP:      scroll_by(a, -(int)(a->css_h * 0.9)); return true;
+    // Twice, the way vi asks for it. The first press is remembered by the
+    // caller, which clears it again the moment any other action goes through.
+    case ACT_TOP:
+        if (a->pending_g) scroll_page_end(a, false);
+        else              a->pending_g = true;
+        return true;
+    case ACT_BOTTOM:
+        scroll_page_end(a, true);
+        return true;
+
+    // --------------------------------------------------------- the page
+
+    case ACT_ADDRESS:
+        a->editing = true;
+        a->prompt = 1;
+        snprintf(a->edit, sizeof a->edit, "%s", a->url);
+        a->edit_len = strlen(a->edit);
+        return true;
+    case ACT_FIND:
+        a->editing = true;
+        a->prompt = 2;
+        a->edit_len = 0;
+        return true;
+    case ACT_FIND_NEXT: find_next(a, false); return true;
+    case ACT_FIND_PREV: find_next(a, true);  return true;
+    case ACT_BACK:    nav_history(a, -1); return true;
+    case ACT_FORWARD: nav_history(a, +1); return true;
+    case ACT_RELOAD:
+        app_cdp(a, "Page.reload", "\"ignoreCache\":false");
+        a->loading = true;
+        notify(a, "reloading");
+        return true;
+    case ACT_COPY: copy_selection(a); return true;
+    case ACT_COPY_URL:
+        clipboard_put(a->url);
+        notify(a, "copied url");
+        return true;
+    case ACT_EXTERNAL: open_external(a); return true;
+    case ACT_PICK:
+        a->selector_pick = !a->selector_pick;
+        notify(a, a->selector_pick ? "picking: click for a selector"
+                                   : "picking off");
+        return true;
+    case ACT_INSERT:
+        a->insert = true;
+        notify(a, "insert mode - esc to leave");
+        return true;
+    case ACT_INSERT_OFF:
+        if (!a->insert) return false;   // reading already: the page can have it
+        // Drop focus so the page stops claiming the keyboard.
+        run_js(a, "document.activeElement&&document.activeElement.blur()");
+        a->insert = false;
+        return true;
+
+    // --------------------------------------------------------------- tabs
+
+    case ACT_TAB_NEW:   tab_new(a);      return true;
+    case ACT_TAB_CLOSE: tab_close(a);    return true;
+    case ACT_TAB_NEXT:  tab_step(a, +1); return true;
+    case ACT_TAB_PREV:  tab_step(a, -1); return true;
+    case ACT_TAB_1: case ACT_TAB_2: case ACT_TAB_3:
+    case ACT_TAB_4: case ACT_TAB_5: case ACT_TAB_6:
+    case ACT_TAB_7: case ACT_TAB_8: case ACT_TAB_9:
+        tab_go(a, act - ACT_TAB_1);
+        return true;
+
+    // ------------------------------------------------------------- window
+
+    case ACT_ZOOM_IN:  zoom_by(a, 1.25);       return true;
+    case ACT_ZOOM_OUT: zoom_by(a, 1.0 / 1.25); return true;
+    // Inline draws a window, so these resize it; taking the whole screen there
+    // is no window to resize and they zoom instead.
+    case ACT_LARGER:
+        if (a->inline_mode) resize_box(a, +1, 0, true); else zoom_by(a, 1.25);
+        return true;
+    case ACT_SMALLER:
+        if (a->inline_mode) resize_box(a, -1, 0, true); else zoom_by(a, 1.0 / 1.25);
+        return true;
+    case ACT_ZOOM_RESET: {
+        a->zoom = 1.0;
+        a->want_width = 0;         // and the width goes back to the cells
+        a->fit_w = 0;
+        // The window's own width as well as the page's, so the box goes back to
+        // the proportion it opens with rather than to whatever shape it was
+        // last nudged into. Dropped from the remembered state too, or the next
+        // run reads it straight back in.
+        bool was_pinned = a->box_cols > 0;
+        a->box_cols = a->want_cols = 0;
+        if (was_pinned) {
+            // The cells the picture named are about to belong to something
+            // narrower, and nothing else will write over the ones it gives up.
+            // Same order resize_box uses, and for the same reason.
+            kitty_clear(&a->kitty);
+            term_clear_inline(&a->term);
+            a->status_last.len = 0;
+            a->tabs_last.len = 0;
+            a->console_last.len = 0;
+            a->last_hash = 0;
+        }
+        relayout(a);
+        char m[64];
+        snprintf(m, sizeof m, "zoom 100%% - window %d cells, width %dpx",
+                 a->kitty.cols, a->css_w);
+        notify(a, m);
+        request_fit(a);
+        return true;
+    }
+    case ACT_FIT:
+        a->fit_width = !a->fit_width;
+        if (!a->fit_width) a->fit_w = 0;
+        notify(a, a->fit_width ? "fit width on" : "fit width off");
+        relayout(a);
+        return true;
+    case ACT_PAGE_WIDER:    step_width(a, +1); return true;
+    case ACT_PAGE_NARROWER: step_width(a, -1); return true;
+    case ACT_SCALE:         cycle_scale(a);    return true;
+    case ACT_BOX_TALLER:    resize_box(a, +1, 0, false); return true;
+    case ACT_BOX_SHORTER:   resize_box(a, -1, 0, false); return true;
+    case ACT_BOX_WIDER:     resize_box(a, 0, +BOX_COL_STEP, false); return true;
+    case ACT_BOX_NARROWER:  resize_box(a, 0, -BOX_COL_STEP, false); return true;
+
+    // ---------------------------------------------------------- the rest
+
+    case ACT_CONSOLE: console_toggle(a); return true;
+    case ACT_HELP:    help_toggle(a);    return true;
+    case ACT_STATS:   a->show_stats = !a->show_stats;   return true;
+    case ACT_STATUS:  a->hide_status = !a->hide_status; return true;
+    case ACT_TRACE:   trace_toggle(a);   return true;
+    }
+    return false;
+}
+
 static void handle_key(App *a, Event *ev) {
-    // Ahead of everything: a focused console is where the keyboard is, and ^Q is
-    // the one key that still means what it always did.
+    // Ahead of everything: a focused console is where the keyboard is, and quit
+    // is the one key that still means what it always did. Along with the key
+    // that opens the console, which otherwise could not put it away from
+    // inside it: the editor swallows every control key it does not use. Both
+    // are looked up rather than spelled out, so moving them moves them here too.
     if (a->console_focus) {
-        if (ev->mods == MOD_CTRL && ev->key == 'q') { g_quit = 1; return; }
-        // And ^X, or the key that opens the console cannot put it away from
-        // inside it: the editor swallows every control key it does not use.
-        if (ev->mods == MOD_CTRL && ev->key == 'x') { console_toggle(a); return; }
+        Act in_console = keys_lookup(ev->mods, ev->key);
+        if (ev->mods & (MOD_CTRL | MOD_ALT | MOD_SUPER)) {
+            if (in_console == ACT_QUIT)    { g_quit = 1; return; }
+            if (in_console == ACT_CONSOLE) { console_toggle(a); return; }
+        }
         if (console_key(a, ev)) return;
     }
     // The key list is over the page, so nothing under it can be reached while
@@ -2068,216 +2340,20 @@ static void handle_key(App *a, Event *ev) {
         return;
     }
 
-    // cmd only reaches us at all where the terminal has been told to let it
-    // through, and only for chords it does not claim for itself.
-    if (ev->mods == MOD_SUPER) {
-        if (ev->key == 'c') { copy_selection(a); return; }
-        return;                 // anything else is the terminal's business
-    }
+    Act act = keys_lookup(ev->mods, ev->key);
+    // Without ctrl, alt or cmd, a key is only ours while reading: a browser you
+    // cannot type "j" into is not a browser. Leaving insert mode is the one
+    // thing still listened for from inside it, or there is no way back out.
+    if (!(ev->mods & (MOD_CTRL | MOD_ALT | MOD_SUPER)) && a->insert &&
+        act != ACT_INSERT_OFF)
+        act = ACT_NONE;
+    // `gg` is the only pair there is, so anything else breaks it up.
+    if (act != ACT_TOP) a->pending_g = false;
+    if (do_action(a, ev, act)) return;
 
-    if (ev->mods == MOD_CTRL) {
-        switch (ev->key) {
-        case 'q': case 'c': term_log("QUIT via ^%c", ev->key); g_quit = 1; return;
-        case 'l':
-            a->editing = true;
-            a->prompt = 1;
-            snprintf(a->edit, sizeof a->edit, "%s", a->url);
-            a->edit_len = strlen(a->edit);
-            return;
-        case 'g':
-            a->show_stats = !a->show_stats;
-            return;
-        case 'd': trace_toggle(a); return;
-        case 's':
-            a->hide_status = !a->hide_status;
-            return;
-        case 'y': copy_selection(a); return;
-        case 'x': console_toggle(a); return;
-        case 'r':
-            app_cdp(a, "Page.reload", "\"ignoreCache\":false");
-            a->loading = true;
-            notify(a, "reloading");
-            return;
-        case 'o': nav_history(a, -1); return;
-        case 'p': nav_history(a, +1); return;
-        case 'e': open_external(a); return;
-        case 't': tab_new(a); return;
-        case 'w': tab_close(a); return;
-        case 'n': tab_step(a, +1); return;
-        case 'b': tab_step(a, -1); return;
-        }
-    }
-
-    // With a text field focused the page gets everything: a browser you cannot
-    // type "j" into is not a browser.
-    if (!a->insert && !(ev->mods & (MOD_CTRL | MOD_ALT))) {
-        int page = (int)(a->css_h * 0.9);
-        int half = a->css_h / 2;
-
-        if (a->pending_g && ev->key != 'g') a->pending_g = false;
-
-        // Shift and an arrow drag the window's bottom right corner: down and
-        // right let it out, up and left take it back. Taken before the table
-        // below, where the same arrows without shift scroll and go back.
-        if (ev->mods & MOD_SHIFT) {
-            switch (ev->key) {
-            case KEY_DOWN:  resize_box(a, +1, 0, false); return;
-            case KEY_UP:    resize_box(a, -1, 0, false); return;
-            case KEY_RIGHT: resize_box(a, 0, +BOX_COL_STEP, false); return;
-            case KEY_LEFT:  resize_box(a, 0, -BOX_COL_STEP, false); return;
-            }
-        }
-
-        switch (ev->key) {
-        // Chrome moves 40 CSS pixels per arrow press; matching it means a page
-        // scrolls here at the speed it does in a window.
-        // On a clicked-into PDF the arrows are handed over rather than turned
-        // into a scroll, because where they go is the viewer's business: in
-        // the document they move the view, and with the thumbnail rail focused
-        // they change the page. Neither is something to imitate from here.
-        case KEY_DOWN:
-        case KEY_UP:
-            if (a->pdf && a->pdf_clicked) { special_key(a, ev->key, ev->mods); return; }
-            scroll_by(a, ev->key == KEY_DOWN ? 40 : -40);
-            return;
-        // Handed to the page rather than kept for history. A gallery, a slide
-        // deck or a carousel binds these and there is no other way to reach
-        // them from here, while going back has ^O and backspace and does not
-        // need a third key. The vertical pair stay ours: they scroll, which is
-        // what they would have done in the page anyway.
-        case KEY_LEFT:
-        case KEY_RIGHT:
-            special_key(a, ev->key, ev->mods);
-            return;
-        // Shift turns it round, the way a browser does: the key that goes back
-        // is the one that comes forward again.
-        case KEY_BACKSPACE: nav_history(a, ev->mods & MOD_SHIFT ? +1 : -1); return;
-        case 'j': scroll_by(a, 60);    return;
-        case 'k': scroll_by(a, -60);   return;
-        case 'l': scroll_side(a, a->css_w / 4);  return;
-        case 'h': scroll_side(a, -a->css_w / 4); return;
-        case 'd': scroll_by(a, half);  return;
-        case 'u': scroll_by(a, -half); return;
-        case ' ': scroll_by(a, page);  return;
-        case 'b': scroll_by(a, -page); return;
-        case 'g':
-            if (a->pending_g) {
-                a->pending_g = false;
-                scroll_page_end(a, false);
-            } else {
-                a->pending_g = true;
-            }
-            return;
-        case 'G':
-            scroll_page_end(a, true);
-            return;
-        // Inline draws a window, so the brackets resize it; taking the whole
-        // screen there is no window to resize and they zoom instead. alt+= and
-        // alt+- zoom either way.
-        case '[':
-            if (a->inline_mode) resize_box(a, -1, 0, true); else zoom_by(a, 1.0 / 1.25);
-            return;
-        case ']':
-            if (a->inline_mode) resize_box(a, +1, 0, true); else zoom_by(a, 1.25);
-            return;
-        // The same four, for a terminal that keeps the shifted arrows to itself.
-        case 'D': resize_box(a, +1, 0, false); return;
-        case 'U': resize_box(a, -1, 0, false); return;
-        case 'R': resize_box(a, 0, +BOX_COL_STEP, false); return;
-        case 'L': resize_box(a, 0, -BOX_COL_STEP, false); return;
-        case 'P':
-            a->selector_pick = !a->selector_pick;
-            notify(a, a->selector_pick ? "picking: click for a selector"
-                                       : "picking off");
-            return;
-        case 'w': step_width(a, +1); return;
-        case 'W': step_width(a, -1); return;
-        case 's': cycle_scale(a);     return;
-        case 'n': find_next(a, false); return;
-        case 'N': find_next(a, true);  return;
-        // Not ^Y's question of what is selected: the address, always.
-        case 'y':
-            clipboard_put(a->url);
-            notify(a, "copied url");
-            return;
-        case '?':
-            help_toggle(a);
-            return;
-        case '/':
-            // A terminal that reports the unshifted key sends `?` as this one
-            // with shift held, and find is not what was asked for.
-            if (ev->mods & MOD_SHIFT) { help_toggle(a); return; }
-            a->editing = true;
-            a->prompt = 2;
-            a->edit_len = 0;
-            return;
-        case 'i':
-            a->insert = true;
-            notify(a, "insert mode - esc to leave");
-            return;
-        case ':':
-            console_toggle(a);
-            return;
-        }
-    }
-
-    if (ev->key == KEY_ESC && a->insert) {
-        // Drop focus so the page stops claiming the keyboard.
-        run_js(a, "document.activeElement&&document.activeElement.blur()");
-        a->insert = false;
-        return;
-    }
-
-    if (ev->mods == MOD_ALT) {
-        double before = a->zoom;
-        // alt+<n> is the tab that number names, which is the number the bar
-        // draws beside it. alt+0 is the zoom's, below, and has been for longer.
-        if (ev->key >= '1' && ev->key <= '9') {
-            tab_go(a, ev->key - '1');
-            return;
-        }
-        if (ev->key == 'f') {
-            a->fit_width = !a->fit_width;
-            if (!a->fit_width) a->fit_w = 0;
-            notify(a, a->fit_width ? "fit width on" : "fit width off");
-            relayout(a);
-            return;
-        }
-        if (ev->key == '=' || ev->key == '+') { zoom_by(a, 1.25); return; }
-        if (ev->key == '-' || ev->key == '_') { zoom_by(a, 1.0 / 1.25); return; }
-        if (ev->key == '0') {
-            a->zoom = 1.0;
-            a->want_width = 0;         // and the width goes back to the cells
-            a->fit_w = 0;
-            // The window's own width as well as the page's, so the box goes
-            // back to the proportion it opens with rather than to whatever
-            // shape it was last nudged into. Dropped from the remembered state
-            // too, or the next run reads it straight back in.
-            bool was_pinned = a->box_cols > 0;
-            a->box_cols = a->want_cols = 0;
-            if (was_pinned) {
-                // The cells the picture named are about to belong to something
-                // narrower, and nothing else will write over the ones it gives
-                // up. Same order resize_box uses, and for the same reason.
-                kitty_clear(&a->kitty);
-                term_clear_inline(&a->term);
-                a->status_last.len = 0;
-                a->tabs_last.len = 0;
-                a->console_last.len = 0;
-                a->last_hash = 0;
-            }
-            relayout(a);
-            save_state(a);
-            char m[64];
-            snprintf(m, sizeof m, "zoom 100%% - window %d cells, width %dpx",
-                     a->kitty.cols, a->css_w);
-            notify(a, m);
-            request_fit(a);
-            return;
-        }
-        (void)before;
-    }
-
+    // An unclaimed cmd chord is the terminal's business, and a page handed one
+    // makes nothing of it.
+    if (ev->mods & MOD_SUPER) return;
     if (special_key(a, ev->key, ev->mods)) return;
     if (ev->text[0] && !(ev->mods & (MOD_CTRL | MOD_ALT))) send_char(a, ev->text);
 }
@@ -2820,6 +2896,12 @@ static void usage(void) {
         "  --exec CMD  run CMD against this window, its output in the console\n"
         "  --port N    fix chrome's devtools port so playwright can find it\n"
         "  --no-pause  keep drawing while the terminal is not focused\n"
+        "  --click-play  hold animated gifs at their first frame, and\n"
+        "              autoplaying video at whatever frame it reached, until\n"
+        "              they are clicked. A gif redraws the whole window for as\n"
+        "              long as it is on screen. `click_play=1` in\n"
+        "              ~/.config/web/state keeps it on, and --no-click-play\n"
+        "              turns that off for one run\n"
         "  --raw-keys  let a key the page did not want reach the window\n"
         "              system. On macOS that routes it through the menu bar,\n"
         "              which on some pages costs seconds of the thread every\n"
@@ -2885,6 +2967,15 @@ void session_init(App *a) {
                      "\"source\":\"%s\",\"worldName\":\"%s\","
                      "\"runImmediately\":true", esc, WEB_WORLD);
             json_escape(esc, sizeof esc, FOCUS_WATCHER);   // as the next call expects
+        }
+        // Its own buffer: this one is a script rather than a listener, and it
+        // does not fit in the one above.
+        if (a->click_play && fresh) {
+            char held[8192];
+            json_escape(held, sizeof held, CLICK_PLAY);
+            app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
+                     "\"source\":\"%s\",\"worldName\":\"%s\","
+                     "\"runImmediately\":true", held, WEB_WORLD);
         }
         // A tab switched back to has its watcher already, and no event to
         // repeat itself with, so the state comes back by asking.
@@ -3031,13 +3122,18 @@ int main(int argc, char **argv) {
     a.motion_scale = (getenv("SSH_CONNECTION") || getenv("SSH_TTY"))
         ? MOTION_SCALE_SSH : MOTION_SCALE;
     a.zoom = 1.0;
-    a.pause_on_blur = a.pause_cfg = true;
+    a.pause_on_blur = true;
     a.claim_keys = true;              // --raw-keys hands them to the window system
     a.exec_fd = -1;
-    load_state(&a);                   // --zoom below still wins over it
     a.fit_width = true;
     a.inline_mode = true;             // a window in the shell, unless --full
     a.clear_exit = true;              // the window goes away, unless --no-clear
+    load_ua(&a);
+    // Every default is in place, so the file is read over exactly what it would
+    // otherwise be - and written out of it, the first time, saying the same.
+    // Before the terminal is touched, so a complaint about a line of it lands
+    // on the shell rather than over the window. The arguments below still win.
+    config_load(&a);
     bool show = false, login = false;
     bool endpoint_only = false, browsers_only = false, kill_only = false;
     const char *exec_cmd = NULL;
@@ -3123,7 +3219,11 @@ int main(int argc, char **argv) {
                 return 1;
             }
         } else if (!strcmp(argv[i], "--no-pause")) {
-            a.pause_on_blur = false;      // this run only; the file keeps its own
+            a.pause_on_blur = false;      // this run; the file is not written back
+        } else if (!strcmp(argv[i], "--click-play")) {
+            a.click_play = true;          // likewise, both ways round
+        } else if (!strcmp(argv[i], "--no-click-play")) {
+            a.click_play = false;
         } else if (!strcmp(argv[i], "--login")) {
             login = true;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
@@ -3286,7 +3386,7 @@ int main(int argc, char **argv) {
         int rc = chrome_user_agent(&a.chrome, ua, sizeof ua);
         if (rc >= 0 && strcmp(ua, a.ua) != 0) {
             snprintf(a.ua, sizeof a.ua, "%s", ua);
-            save_state(&a);
+            save_ua(&a);
         }
         a.ua_patch_req = rc == 1;   // applied below, once the session is up
     }

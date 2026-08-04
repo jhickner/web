@@ -12,54 +12,66 @@
 #define GAP 3          // columns between two columns of the list
 #define MAX_COLS 4
 
-typedef struct { const char *key, *what; } Bind;
+// A row names the action or two it is about and the key column is looked up,
+// so the list draws whatever the config file has made of them rather than what
+// was true when it was written. `key` is for the few rows that are not a
+// binding at all. A row with none of the three is a heading; an empty one is a
+// blank. Kept as the display list itself so the columns below are a straight
+// slice of it.
+typedef struct {
+    const char *key;
+    Act         act, act2;
+    bool        twice;      // pressed twice, the way gg is
+    const char *what;
+} Bind;
 
-// A row with no key is a heading; one with neither is a blank. Kept as the
-// display list itself so the columns below are a straight slice of it.
 static const Bind BINDS[] = {
-    {NULL, "moving"},
-    {"j / k",         "down / up"},
-    {"d / u",         "half a screen"},
-    {"space / b",     "a screen"},
-    {"gg / G",        "top / bottom"},
-    {"h / l",         "left / right"},
-    {"arrows",        "a line at a time"},
-    {"backspace",     "back"},
-    {NULL, NULL},
-    {NULL, "the page"},
-    {"^L",            "address bar"},
-    {"^O / ^P",       "back / forward"},
-    {"^R",            "reload"},
-    {"^Y",            "copy selection or address"},
-    {"y",             "copy the address"},
-    {"^E",            "open in the desktop browser"},
-    {"/",             "find, then n / N"},
-    {"i",             "give the keyboard to the page"},
-    {"esc",           "take it back"},
-    {"P",             "pick a CSS selector"},
-    {NULL, NULL},
-    {NULL, "tabs"},
-    {"^T / ^W",       "new / close"},
-    {"^N / ^B",       "next / previous"},
-    {"alt+1..9",      "the tab with that number"},
-    {NULL, NULL},
-    {NULL, "the window"},
-    {"[ / ]",         "zoom out / in"},
-    {"alt+- / alt+=", "zoom out / in"},
-    {"alt+0",         "reset zoom and width"},
-    {"alt+f",         "fit width on / off"},
-    {"w / W",         "widen / narrow the page"},
-    {"s",             "frame size"},
-    {"shift+arrows",  "drag the window edge"},
-    {"U / D / L / R", "the same, without shift"},
-    {NULL, NULL},
-    {NULL, "the rest"},
-    {":",             "console (^X too)"},
-    {"^G",            "stats on the status line"},
-    {"^S",            "hide the status line"},
-    {"^D",            "trace to /tmp/web_input.log"},
-    {"?",             "this list"},
-    {"^Q",            "quit"},
+    {.what = "moving"},
+    {.act = ACT_SCROLL_DOWN, .act2 = ACT_SCROLL_UP,    .what = "down / up"},
+    {.act = ACT_HALF_DOWN,   .act2 = ACT_HALF_UP,      .what = "half a screen"},
+    {.act = ACT_PAGE_DOWN,   .act2 = ACT_PAGE_UP,      .what = "a screen"},
+    {.act = ACT_TOP, .twice = true, .act2 = ACT_BOTTOM, .what = "top / bottom"},
+    {.act = ACT_SCROLL_LEFT, .act2 = ACT_SCROLL_RIGHT, .what = "left / right"},
+    {.act = ACT_LINE_DOWN,   .act2 = ACT_LINE_UP,      .what = "a line at a time"},
+    {0},
+    {.what = "the page"},
+    {.act = ACT_ADDRESS,                          .what = "address bar"},
+    {.act = ACT_BACK,     .act2 = ACT_FORWARD,    .what = "back / forward"},
+    {.act = ACT_RELOAD,                           .what = "reload"},
+    {.act = ACT_COPY,                             .what = "copy selection or address"},
+    {.act = ACT_COPY_URL,                         .what = "copy the address"},
+    {.act = ACT_EXTERNAL,                         .what = "open in the desktop browser"},
+    {.act = ACT_FIND,                             .what = "find in the page"},
+    {.act = ACT_FIND_NEXT, .act2 = ACT_FIND_PREV, .what = "next match / the one before"},
+    {.act = ACT_INSERT,                           .what = "give the keyboard to the page"},
+    {.act = ACT_INSERT_OFF,                       .what = "take it back"},
+    {.act = ACT_PICK,                             .what = "pick a CSS selector"},
+    {0},
+    {.what = "tabs"},
+    {.act = ACT_TAB_NEW,  .act2 = ACT_TAB_CLOSE, .what = "new / close"},
+    {.act = ACT_TAB_NEXT, .act2 = ACT_TAB_PREV,  .what = "next / previous"},
+    {.act = ACT_TAB_1, .act2 = ACT_TAB_9,        .what = "that tab, and the ones between"},
+    {0},
+    {.what = "the window"},
+    {.act = ACT_SMALLER,     .act2 = ACT_LARGER,        .what = "zoom out / in"},
+    {.act = ACT_ZOOM_OUT,    .act2 = ACT_ZOOM_IN,       .what = "zoom out / in"},
+    {.act = ACT_ZOOM_RESET,                             .what = "reset zoom and width"},
+    {.act = ACT_FIT,                                    .what = "fit width on / off"},
+    {.act = ACT_PAGE_WIDER,  .act2 = ACT_PAGE_NARROWER, .what = "widen / narrow the page"},
+    {.act = ACT_SCALE,                                  .what = "frame size"},
+    {.act = ACT_BOX_TALLER,  .act2 = ACT_BOX_SHORTER,   .what = "the window taller / shorter"},
+    {.act = ACT_BOX_WIDER,   .act2 = ACT_BOX_NARROWER,  .what = "wider / narrower"},
+    {0},
+    {.what = "the rest"},
+    {.act = ACT_CONSOLE,                       .what = "console"},
+    {.act = ACT_STATS,                         .what = "stats on the status line"},
+    {.act = ACT_STATUS,                        .what = "hide the status line"},
+    {.act = ACT_TRACE,                         .what = "trace to /tmp/web_input.log"},
+    {.act = ACT_HELP,                          .what = "this list"},
+    {.act = ACT_QUIT,                          .what = "quit"},
+    {0},
+    {.what = "the settings, and every key"},
+    {.key = "", .what = "~/.config/web/web.conf"},
 };
 #define LINES ((int)(sizeof BINDS / sizeof BINDS[0]))
 
@@ -72,7 +84,29 @@ typedef struct {
 
 static int g_keyw, g_descw;
 
-static bool is_heading(int i) { return !BINDS[i].key && BINDS[i].what; }
+// The key column of a row, worked out now rather than written down. NULL for a
+// heading or a blank, which have no column of their own.
+static const char *entry_key(const Bind *e, char *buf, size_t cap) {
+    if (e->key) return e->key;
+    if (!e->act) return NULL;
+    char one[48], two[48];
+    keys_text(e->act, one, sizeof one);
+    if (e->twice) {
+        size_t n = strlen(one);
+        if (2 * n < sizeof one) memcpy(one + n, one, n + 1);
+    }
+    if (e->act2) {
+        keys_text(e->act2, two, sizeof two);
+        snprintf(buf, cap, "%s / %s", one, two);
+    } else {
+        snprintf(buf, cap, "%s", one);
+    }
+    return buf;
+}
+
+static bool is_heading(int i) {
+    return !BINDS[i].key && !BINDS[i].act && BINDS[i].what;
+}
 
 // Whether breaking the list into columns `rows` tall lands the breaks between
 // sections: every column but the first opens on a heading, none closes on one,
@@ -91,7 +125,9 @@ static bool tidy(int rows, int n) {
 static void measure(void) {
     if (g_keyw) return;
     for (int i = 0; i < LINES; i++) {
-        int k = BINDS[i].key ? (int)strlen(BINDS[i].key) : 0;
+        char buf[104];
+        const char *key = entry_key(&BINDS[i], buf, sizeof buf);
+        int k = key ? (int)strlen(key) : 0;
         int d = BINDS[i].what ? (int)strlen(BINDS[i].what) : 0;
         if (k > g_keyw) g_keyw = k;
         if (d > g_descw) g_descw = d;
@@ -159,17 +195,19 @@ static void pad(Buf *b, int n) {
 }
 
 static void put_entry(Buf *b, const Bind *e, int keyw, int colw) {
-    if (!e || (!e->key && !e->what)) { pad(b, colw); return; }
-    if (!e->key) {
+    if (!e || (!e->key && !e->act && !e->what)) { pad(b, colw); return; }
+    char buf[104];
+    const char *key = entry_key(e, buf, sizeof buf);
+    if (!key) {
         int n = (int)strlen(e->what);
         if (n > colw) n = colw;
         buf_addf(b, "\x1b[1;36m%.*s\x1b[0m", n, e->what);
         pad(b, colw - n);
         return;
     }
-    int kn = (int)strlen(e->key);
+    int kn = (int)strlen(key);
     if (kn > keyw) kn = keyw;
-    buf_addf(b, "\x1b[1m%*.*s\x1b[0m  ", keyw, kn, e->key);
+    buf_addf(b, "\x1b[1m%*.*s\x1b[0m  ", keyw, kn, key);
     int dw = colw - keyw - 2;
     int dn = (int)strlen(e->what);
     if (dn > dw) dn = dw;
@@ -248,21 +286,26 @@ void help_toggle(App *a) {
 
 bool help_key(App *a, Event *ev) {
     if (!a->help_open || ev->type != EV_KEY) return false;
+    // The keys that move the page move the list, so whatever they were changed
+    // to is what scrolls this too.
+    Act act = keys_lookup(ev->mods, ev->key);
     // Quit still means quit, from here as much as from anywhere else.
-    if (ev->mods == MOD_CTRL && (ev->key == 'q' || ev->key == 'c')) return false;
+    if (act == ACT_QUIT) return false;
 
     Shape s;
     if (shape(a, &s) && s.max_scroll > 0 &&
         !(ev->mods & (MOD_CTRL | MOD_ALT | MOD_SUPER))) {
         int page = s.rows > 1 ? s.rows - 1 : 1;
         int d = 0;
-        switch (ev->key) {
-        case 'j': case KEY_DOWN:  d = 1;     break;
-        case 'k': case KEY_UP:    d = -1;    break;
-        case ' ': case KEY_PGDN:  d = page;  break;
-        case 'b': case KEY_PGUP:  d = -page; break;
-        case 'g': a->help_scroll = 0;            return true;
-        case 'G': a->help_scroll = s.max_scroll; return true;
+        switch (act) {
+        case ACT_SCROLL_DOWN: case ACT_LINE_DOWN: d = 1;     break;
+        case ACT_SCROLL_UP:   case ACT_LINE_UP:   d = -1;    break;
+        case ACT_PAGE_DOWN:   case ACT_HALF_DOWN: d = page;  break;
+        case ACT_PAGE_UP:     case ACT_HALF_UP:   d = -page; break;
+        // One press, not two: there is nothing else here for `g` to start.
+        case ACT_TOP:    a->help_scroll = 0;            return true;
+        case ACT_BOTTOM: a->help_scroll = s.max_scroll; return true;
+        default: break;
         }
         if (d) {
             a->help_scroll += d;

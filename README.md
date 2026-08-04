@@ -63,7 +63,7 @@ web --login
 | `^S` | hide or show the status line |
 | `^Q` | quit |
 | `^T` / `^W` | new tab / close tab (the last one closes the window) |
-| `^N` / `^B` | next tab / previous tab |
+| `^N` / `^B` | next tab / previous tab (`shift+alt+→` / `shift+alt+←` too) |
 | `alt+1`…`alt+9` | go to that tab |
 | `alt+0` | reset zoom, pinned width, and window proportion |
 | `alt+f` | fit-to-width on/off |
@@ -90,7 +90,6 @@ While reading:
 | `shift`+`↑↓←→` | drag one window edge (`U`/`D`/`L`/`R` too) |
 | `w` / `W` | widen / narrow the width the page is told it has |
 | `s` | frame size: auto, 100%, 75%, 50% |
-| `t` | frame transport: png, then two jpeg settings |
 | `y` | copy the address to the clipboard |
 | `/` | find in page, then `n` / `N` |
 | `P` | picking: click the page for a CSS selector, into the console |
@@ -98,6 +97,37 @@ While reading:
 | `:` | open the console |
 | `?` | key list; `j` / `k` to scroll it |
 | `esc` | take the keyboard back |
+
+## Config
+
+`~/.config/web/web.conf`, written with the defaults on first run:
+
+```
+pause-on-blur    = yes
+click-play       = no
+status-line      = yes
+clear-on-exit    = yes
+full             = no
+mute             = no
+raw-keys         = no
+keep             = no
+scale            = auto
+
+shift-alt-right  = tab-next
+^y               = copy
+y                = copy-url
+f5               = reload
+```
+
+Settings take `yes`/`no` (`true`, `on`, `1` too); `scale` takes `auto` or 0.1
+to 3. Each is the command line option of the same name, which wins for that
+run.
+
+Keys are `ctrl` `alt` `shift` `cmd` joined by `+` or `-`, then a character or
+one of `left` `right` `up` `down` `space` `esc` `enter` `tab` `backspace`
+`delete` `home` `end` `pgup` `pgdn` `f1`–`f12`. `^y` is `ctrl+y`. Action names
+are the ones in the generated file; `none` unbinds; deleting a line restores
+its default. A key without `ctrl`, `alt` or `cmd` acts only while reading.
 
 ## Options
 
@@ -131,6 +161,7 @@ web [options] <url>...
 --port N    fix Chrome's devtools port instead of letting it pick one
 --no-pause  keep drawing while the terminal is not focused
 --raw-keys  let a key the page did not want reach the window system
+--click-play  hold animated gifs and autoplaying video until they are clicked
 ```
 
 `--browsers` lists the Chrome instances `web` has started:
@@ -152,6 +183,34 @@ web: 1 stranded browser holding the profile; web --kill ends it
 $ web --kill
 web: window 15902 is running but is not this profile's to end; kill 15902 if it is yours
 ```
+
+## Click to play
+
+An animated gif never stops repainting, and every repaint is a frame Chrome
+encodes, `web` writes and the terminal decodes — one advert in a corner keeps
+the whole window drawing for as long as the page is open. `--click-play` holds
+them still:
+
+```sh
+./web --click-play news.ycombinator.com
+```
+
+Each gif becomes its own first frame, marked `▶ GIF` in the corner, and a click
+puts the animation back. Video that started by itself is paused where it got
+to; a click plays it. The click that activates something is not passed on, so a
+gif inside a link takes a second click to follow the link.
+
+A first frame that Chrome will not let the page read back — which is most gifs,
+since they come from another host — is stood in for by a box of the same size,
+and replaced by the real frame if a second, CORS-flavoured request for it is
+allowed.
+
+Only `.gif` and `.apng` are held. An animated webp cannot be told from a still
+one without reading bytes the page will not hand over, and guessing wrong would
+put a grey box over half the web.
+
+`click-play = yes` in `~/.config/web/web.conf` keeps it on; `--no-click-play`
+turns it off for one run.
 
 ## Screenshots
 

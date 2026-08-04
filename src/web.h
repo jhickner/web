@@ -174,6 +174,45 @@ enum { MOD_SHIFT = 1, MOD_ALT = 2, MOD_CTRL = 4, MOD_SUPER = 8 };
 
 typedef enum { EV_NONE, EV_KEY, EV_MOUSE, EV_PASTE, EV_FOCUS, EV_EOF } EvType;
 
+// ------------------------------------------------------------------- keys
+
+// Everything a key can be asked to do. The keys themselves are in config.c,
+// where ~/.config/web/web.conf is read over the defaults; main.c only ever
+// sees the action a key came out as. tab-1 through tab-9 are consecutive on
+// purpose: the one handler subtracts to get the number.
+typedef enum {
+    ACT_NONE = 0,
+    ACT_SCROLL_DOWN, ACT_SCROLL_UP, ACT_SCROLL_LEFT, ACT_SCROLL_RIGHT,
+    ACT_LINE_DOWN, ACT_LINE_UP, ACT_HALF_DOWN, ACT_HALF_UP,
+    ACT_PAGE_DOWN, ACT_PAGE_UP, ACT_TOP, ACT_BOTTOM,
+    ACT_ADDRESS, ACT_BACK, ACT_FORWARD, ACT_RELOAD,
+    ACT_COPY, ACT_COPY_URL, ACT_EXTERNAL,
+    ACT_FIND, ACT_FIND_NEXT, ACT_FIND_PREV,
+    ACT_INSERT, ACT_INSERT_OFF, ACT_PICK,
+    ACT_TAB_NEW, ACT_TAB_CLOSE, ACT_TAB_NEXT, ACT_TAB_PREV,
+    ACT_TAB_1, ACT_TAB_2, ACT_TAB_3, ACT_TAB_4, ACT_TAB_5,
+    ACT_TAB_6, ACT_TAB_7, ACT_TAB_8, ACT_TAB_9,
+    ACT_ZOOM_IN, ACT_ZOOM_OUT, ACT_ZOOM_RESET, ACT_SMALLER, ACT_LARGER,
+    ACT_FIT, ACT_PAGE_WIDER, ACT_PAGE_NARROWER, ACT_SCALE,
+    ACT_BOX_TALLER, ACT_BOX_SHORTER, ACT_BOX_WIDER, ACT_BOX_NARROWER,
+    ACT_CONSOLE, ACT_HELP, ACT_STATS, ACT_STATUS, ACT_TRACE, ACT_QUIT,
+    ACT_INVALID,          // a name the file gave that is not one of these
+} Act;
+
+// The config file is read into the App, so loading it is declared with the
+// rest of what takes one, below.
+
+// What this key means now, or ACT_NONE for one that means nothing.
+Act  keys_lookup(int mods, int key);
+
+// A key that does this, for the help list; false when nothing is bound to it,
+// and `out` is a dash so the list still has something to draw.
+bool keys_text(Act act, char *out, size_t cap);
+
+// The spellings, both ways round, for the generated file and for messages.
+void key_text(int mods, int key, char *out, size_t cap);
+const char *act_name(Act act);
+
 typedef struct {
     EvType type;
     int    key;          // KEY_* or a unicode codepoint
@@ -395,8 +434,13 @@ typedef struct {
     bool    status_open;       // whether it is on screen right now
 
     bool    pause_on_blur;     // stop drawing while the terminal is not focused
-    bool    pause_cfg;         // what the config file said, which is what it keeps
     bool    paused;            // and whether that has happened
+
+    // A gif animates for as long as it is on screen, and every frame of it is
+    // a frame of ours: the picture is never still, so the window never stops
+    // encoding and writing. Held until clicked, the page costs what a page of
+    // text costs.
+    bool    click_play;
 
     // Cancel the browser's own action for a navigation key the page did not
     // want, so it is never handed back to the window system. The page still
@@ -504,6 +548,17 @@ typedef struct {
     unsigned help_grid;           // the grid count it was last drawn over
     Buf      help_buf, help_last;
 } App;
+
+// ----------------------------------------------------------------- config
+
+// The defaults, then ~/.config/web/web.conf over them - the settings as well
+// as the keys, which is why this takes the App it is about to fill in. Writes
+// the file first if it is not there yet, so what can be changed is visible
+// without reading the manual. Called before the command line is read, so a
+// flag still wins for the run it is on. Returns how many lines of the file
+// made no sense, each already reported on stderr.
+int  config_load(App *a);
+void config_dir(char *out, size_t cap);
 
 // Note an outstanding call so its reply can be recognised, and claim the reply.
 void app_req_note(App *a, int id, int kind);
