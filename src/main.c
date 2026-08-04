@@ -349,7 +349,18 @@ void relayout(App *a) {
     // terminal's: asked for the final size it lays the text out at that size
     // and hints it there, where the terminal could only stretch a bitmap that
     // was already wrong.
-    double dsf = (double)rect_w * a->scale / (double)a->css_w;
+    // Motion moves both ends of the size, and it has to move both. The cap is
+    // what shrinks the frame, but a cap is not a property of the page: Chrome
+    // relayouts and hands a fresh frame over when the device metrics change,
+    // and metrics that go out identical give it no reason to draw anything.
+    // Moving the cap alone left the small frame on screen with nothing coming
+    // to replace it - which is what a short scroll looked like, motion ending
+    // and the picture never coming back. Rendering at the size being delivered
+    // also stops the page being rastered larger than it is sent.
+    double ms = a->in_motion
+        ? (a->motion_scale > 0 ? a->motion_scale : MOTION_SCALE) : 1.0;
+
+    double dsf = (double)rect_w * a->scale * ms / (double)a->css_w;
 
     a->status_last.len = 0;    // the status line may have moved rows
 
@@ -368,15 +379,8 @@ void relayout(App *a) {
     // what it says: half is half the width and a quarter of the pixels.
     // Above 1 it cannot mean anything, here or anywhere: the screencast has no
     // way to hand over more pixels than the viewport has.
-    a->cast_w = (int)((double)a->css_w * a->scale + 0.5);
-    a->cast_h = (int)((double)a->css_h * a->scale + 0.5);
-    if (a->in_motion) {
-        double ms = a->motion_scale > 0 ? a->motion_scale : MOTION_SCALE;
-        int mw = (int)(a->css_w * ms + 0.5);
-        int mh = (int)(a->css_h * ms + 0.5);
-        if (mw < a->cast_w) a->cast_w = mw;
-        if (mh < a->cast_h) a->cast_h = mh;
-    }
+    a->cast_w = (int)((double)a->css_w * a->scale * ms + 0.5);
+    a->cast_h = (int)((double)a->css_h * a->scale * ms + 0.5);
     if (a->cast_w < 1) a->cast_w = 1;
     if (a->cast_h < 1) a->cast_h = 1;
     screencast_start(a);
@@ -1700,6 +1704,9 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
             a->in_motion = true;
             term_log("%.3f motion on", now_sec());
             relayout(a);
+            // A size change that produces no frame leaves the wrong picture up
+            // with nothing coming for it, so the watchdog is told to expect one.
+            if (a->expect_frame == 0) a->expect_frame = now_sec() + 1.0;
         }
 
         // Going fullscreen throws the viewport override away and puts the page
@@ -2494,6 +2501,11 @@ int main(int argc, char **argv) {
             term_log("%.3f motion off", now_sec());
             a.last_hash = 0;        // the same picture, at a size worth drawing
             relayout(&a);
+            // Going back up is the half that shows: a frame that never comes
+            // leaves the small one on screen. Watched for, and sooner than a
+            // keypress is, because this picture is already wrong rather than
+            // merely late.
+            if (a.expect_frame == 0) a.expect_frame = now_sec() + 1.0;
         }
 
         if (fds[1].revents & (POLLIN | POLLHUP)) {
