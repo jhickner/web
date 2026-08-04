@@ -272,29 +272,33 @@ void relayout(App *a) {
     }
 
     int status = a->status_open ? 1 : 0;
+    int above = a->tabs_open ? 1 : 0;          // the tab bar, when it has earned it
     int below = status + a->console_rows;      // everything under the picture
     int rect_cols;
     if (a->inline_mode) {
         // The terminal may have shrunk under the box since it was last sized.
-        int max_rows = t->rows - below;
+        int max_rows = t->rows - below - above;
         if (a->box_rows > max_rows) a->box_rows = max_rows;
         if (a->box_rows < 2) a->box_rows = 2;
         a->img_rows = a->box_rows;
         rect_cols = box_cols_now(a, a->img_rows);
-        // Keep the whole block, status line included, on the screen. A block
-        // whose last row falls past the bottom scrolls the terminal as it is
-        // drawn, which lands half the picture at the top and half at the
-        // bottom - and the halves never line back up.
-        if (t->inline_origin + a->img_rows + below - 1 > t->rows)
-            t->inline_origin = t->rows - a->img_rows - below + 1;
+        // Keep the whole block, tab bar and status line included, on the
+        // screen. A block whose last row falls past the bottom scrolls the
+        // terminal as it is drawn, which lands half the picture at the top and
+        // half at the bottom - and the halves never line back up.
+        if (t->inline_origin + above + a->img_rows + below - 1 > t->rows)
+            t->inline_origin = t->rows - a->img_rows - below - above + 1;
         if (t->inline_origin < 1) t->inline_origin = 1;
-        kitty_set_rect(&a->kitty, 1, t->inline_origin, rect_cols, a->img_rows);
-        a->status_row = t->inline_origin + a->img_rows;
+        a->tabs_row = t->inline_origin;
+        kitty_set_rect(&a->kitty, 1, t->inline_origin + above, rect_cols,
+                       a->img_rows);
+        a->status_row = t->inline_origin + above + a->img_rows;
     } else {
-        a->img_rows = t->rows - below;
+        a->img_rows = t->rows - below - above;
         if (a->img_rows < 1) a->img_rows = 1;
         rect_cols = t->cols;
-        kitty_set_rect(&a->kitty, 1, 1, rect_cols, a->img_rows);
+        a->tabs_row = 1;
+        kitty_set_rect(&a->kitty, 1, 1 + above, rect_cols, a->img_rows);
         a->status_row = t->rows - a->console_rows;
     }
     a->console_row = a->status_row + status;
@@ -397,7 +401,7 @@ static void session_file(App *a, char *out, size_t cap) {
     snprintf(out, cap, "%s/sessions/%d.json", a->chrome.profile, (int)getpid());
 }
 
-static void session_write(App *a) {
+void session_write(App *a) {
     if (!a->chrome.profile[0] || a->chrome.port <= 0 || !a->chrome.target[0])
         return;
     char dir[600], path[700];
@@ -654,23 +658,37 @@ static void shot_step(App *a) {
 
 // ------------------------------------------------------------------ status
 
+// Every row the inline block owns: the bar, the picture, the status line and
+// the console. Worked out in one place because two of them are settled here and
+// two are settled by keys, and a count that disagrees with the layout is a row
+// of somebody else's screen that never gets cleaned up.
+static int block_rows(App *a) {
+    return (a->tabs_open ? 1 : 0) + a->box_rows +
+           (a->status_open ? 1 : 0) + a->console_rows;
+}
+
 // The address bar and the find prompt are drawn on the status line, so a line
-// that has been hidden comes back for as long as one of them is open.
+// that has been hidden comes back for as long as one of them is open. The tab
+// bar comes and goes with there being more than one tab to name.
 static void status_sync(App *a) {
     bool want = !a->hide_status || a->editing;
     int  rows = console_rows(a);
-    if (want == a->status_open && rows == a->console_rows) return;
+    bool tabs = tabs_wanted(a);
+    if (want == a->status_open && rows == a->console_rows &&
+        tabs == a->tabs_open) return;
     a->status_open = want;
     a->console_rows = rows;
+    a->tabs_open = tabs;
     a->status_last.len = 0;
     a->console_last.len = 0;
+    a->tabs_last.len = 0;
     kitty_clear(&a->kitty);          // the rows it lived on change hands
     // Inline, the page itself is not resized by this, so the frame that comes
     // back is the one already on screen - and a duplicate is normally dropped,
     // which would leave the block empty for as long as the page sits still.
     a->last_hash = 0;
     if (a->inline_mode)
-        term_resize_inline(&a->term, a->box_rows + (want ? 1 : 0) + rows);
+        term_resize_inline(&a->term, block_rows(a));
     else
         writeall(a->term.fd, "\x1b[2J", 4);
     relayout(a);
@@ -680,9 +698,7 @@ static void status_sync(App *a) {
 // stays quiet when the line has not changed: an unnecessary repaint here lands
 // in the middle of a stream of image data.
 static void draw_status(App *a) {
-    if (!a->has_tty) return;
-    status_sync(a);
-    if (!a->status_open) return;
+    if (!a->has_tty || !a->status_open) return;
     Term *t = &a->term;
     Buf b = a->status;
     b.len = 0;
@@ -763,7 +779,13 @@ static void draw_status(App *a) {
     buf_add(&a->status_last, b.p, b.len);
 }
 
+// The rows settle first, then everything on them. The status line goes last of
+// the two above the console because it is the one that parks the cursor while
+// the address bar is open, and whatever draws after it moves the cursor again.
 static void draw_panes(App *a) {
+    if (!a->has_tty) return;
+    status_sync(a);
+    tabs_paint(a);
     draw_status(a);
     console_paint(a);
 }
@@ -1007,11 +1029,11 @@ static void resize_box(App *a, int drows, int dcols) {
         return;
     }
     Term *t = &a->term;
-    int status = a->status_open ? 1 : 0;
+    int fixed = block_rows(a) - a->box_rows;   // the bar, the status line, the console
 
     int rows = a->box_rows + drows;
     if (rows < 2) rows = 2;
-    if (rows > t->rows - status) rows = t->rows - status;
+    if (rows > t->rows - fixed) rows = t->rows - fixed;
 
     int was_cols = box_cols_now(a, a->box_rows);
     int cols = box_cols_now(a, rows) + dcols;
@@ -1027,7 +1049,7 @@ static void resize_box(App *a, int drows, int dcols) {
 
     kitty_clear(&a->kitty);            // the image those cells named is going
     term_clear_inline(t);              // and so are the cells that named it
-    term_resize_inline(t, rows + status);   // the status line sits below
+    term_resize_inline(t, block_rows(a));   // the bar above, the rest below
     a->status_last.len = 0;
     // The cells were just blanked, so the next frame has to land whatever it
     // looks like: a page that resizes to the same picture would otherwise be
@@ -1238,13 +1260,19 @@ static void find_next(App *a, bool backwards) {
 
 // The page tells us when focus lands on something typable, so j and k scroll
 // when you are reading and type themselves when you are filling in a form.
+// The listeners go on once per document, whatever else happens: switching tabs
+// runs this again against a page that may already be carrying it, and a second
+// set of them would report every focus change twice. The report at the end is
+// not guarded - that one is how a session that has just arrived finds out where
+// the focus already is.
 static const char FOCUS_WATCHER[] =
     "(function(){"
     "function ed(e){if(!e)return false;var t=e.tagName;"
     "return e.isContentEditable||t==='INPUT'||t==='TEXTAREA'||t==='SELECT';}"
     "function rep(){try{__webmode(ed(document.activeElement)?'1':'0');}catch(e){}}"
+    "if(!window.__webwatch){window.__webwatch=1;"
     "document.addEventListener('focusin',rep,true);"
-    "document.addEventListener('focusout',function(){setTimeout(rep,0);},true);"
+    "document.addEventListener('focusout',function(){setTimeout(rep,0);},true);}"
     "rep();})()";
 
 // The shortest selector that finds the element again: its id where it has one,
@@ -1294,6 +1322,10 @@ static void handle_focus(App *a, bool focused) {
 }
 
 static void handle_mouse(App *a, Event *ev) {
+    // Not while a button is held: a drag that wandered up over the bar is the
+    // page's until it is let go of, and switching tabs under it would leave the
+    // page it started on holding a button nobody released.
+    if (!a->mouse_down && tabs_mouse(a, ev)) return;
     if (console_mouse(a, ev)) return;
     Kitty *k = &a->kitty;
     bool inside = ev->mx >= k->x && ev->mx < k->x + k->cols &&
@@ -1493,6 +1525,10 @@ static void handle_key(App *a, Event *ev) {
         case 'o': nav_history(a, -1); return;
         case 'p': nav_history(a, +1); return;
         case 'e': open_external(a); return;
+        case 't': tab_new(a); return;
+        case 'w': tab_close(a); return;
+        case 'n': tab_step(a, +1); return;
+        case 'b': tab_step(a, -1); return;
         }
     }
 
@@ -1605,6 +1641,12 @@ static void handle_key(App *a, Event *ev) {
 
     if (ev->mods == MOD_ALT) {
         double before = a->zoom;
+        // alt+<n> is the tab that number names, which is the number the bar
+        // draws beside it. alt+0 is the zoom's, below, and has been for longer.
+        if (ev->key >= '1' && ev->key <= '9') {
+            tab_go(a, ev->key - '1');
+            return;
+        }
         if (ev->key == 'f') {
             a->fit_width = !a->fit_width;
             if (!a->fit_width) a->fit_w = 0;
@@ -1948,7 +1990,7 @@ static void usage(void) {
 // the events come from, the overrides the picture depends on, and the watcher
 // the page reports focus through. None of it survives a change of browser, so
 // it lives here rather than inline in main.
-static void session_init(App *a) {
+void session_init(App *a) {
     app_cdp(a, "Page.enable", "");
     app_cdp(a, "Runtime.enable", "");
 
@@ -1973,15 +2015,18 @@ static void session_init(App *a) {
         json_escape(esc, sizeof esc, FOCUS_WATCHER);
         app_cdp(a, "Runtime.addBinding", "\"name\":\"__webmode\"");
         app_cdp(a, "Runtime.addBinding", "\"name\":\"__webrec\"");
-        app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
-                 "\"source\":\"%s\"", esc);
+        // A registration sticks to the page rather than to the session, so a
+        // tab switched back to would collect another copy of it every time.
+        if (tab_session_new(a))
+            app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
+                     "\"source\":\"%s\"", esc);
         app_cdp(a, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
     }
 }
 
 // Where a browser we did not navigate already is. Nothing loaded, so no event
 // is going to say, and the status line has nothing to show until it is asked.
-static void ask_where(App *a) {
+void ask_where(App *a) {
     app_req_note(a, app_cdp(a, "Runtime.evaluate",
         "\"expression\":\"location.href\",\"returnByValue\":true"), RQ_URL);
     app_req_note(a, app_cdp(a, "Runtime.evaluate",
@@ -1995,7 +2040,13 @@ static void ask_where(App *a) {
 // and its memory for nothing.
 static void leave_browser(App *a) {
     Chrome *c = &a->chrome;
-    if (c->foreign) {                    // never ours, not even the tab
+    // Every tab this window opened, whoever the browser belongs to. They exist
+    // because we asked for them, so they go when we do - and closed here rather
+    // than below, so the count of what is left is a count of somebody else's.
+    tabs_close_others(a);
+
+    if (c->foreign) {                    // the page it was on is not ours
+        if (a->ntabs > 0 && a->tabs[a->tab].ours) chrome_close_target(c);
         if (c->ws.fd > 0) ws_close(&c->ws);
         return;
     }
@@ -2057,6 +2108,9 @@ int app_attach(App *a, int port, char *msg, size_t cap) {
     a->last_hash = 0;
     a->kitty.grid_dirty = true;
 
+    // None of the old browser's pages came with us, so the bar starts over on
+    // the one page this one has.
+    tabs_init(a);
     session_init(a);
     ask_where(a);
     // The viewport override goes on their page too: the frames have to match
@@ -2311,6 +2365,7 @@ int main(int argc, char **argv) {
              a.chrome.adopted ? "adopted" : "launched");
     if (chrome_attach(&a.chrome) < 0) { chrome_kill(&a.chrome); return 1; }
     term_log("%.3f attached", now_sec());
+    tabs_init(&a);              // one tab: whatever the attach landed on
     // Marked now rather than on the way out, so a window that quits before this
     // one already knows the browser has been asked to stay. Somebody else's is
     // never ours to mark: we do not shut it down either way.
@@ -2427,7 +2482,7 @@ int main(int argc, char **argv) {
             // relayout may have taken rows off the box to fit it, and the
             // count of what the block owns is what erases it on the way out.
             if (a.inline_mode) {
-                a.term.inline_rows = a.img_rows +
+                a.term.inline_rows = a.img_rows + (a.tabs_open ? 1 : 0) +
                                      (a.status_open ? 1 : 0) + a.console_rows;
                 // Now that the block has settled, sweep whatever is under it.
                 // A status line pushed off the bottom by a shrink is in the
@@ -2529,17 +2584,23 @@ int main(int argc, char **argv) {
             if (a.expect_frame == 0) a.expect_frame = now_sec() + 1.0;
         }
 
+        // A socket that has gone is a page that has gone: closed by itself, or
+        // by whoever else is driving this browser. With another tab to fall
+        // back on that is one tab less rather than the end of the window.
         if (fds[1].revents & (POLLIN | POLLHUP)) {
-            if (ws_fill(&a.chrome.ws) < 0) break;
-            char *msg;
-            size_t len;
-            while (ws_next(&a.chrome.ws, &msg, &len) == 1) {
-                on_cdp_message(&a, msg, len);
-                a.chrome.ws.msg.len = 0;
+            if (ws_fill(&a.chrome.ws) < 0) {
+                if (!tab_lost(&a)) break;
+            } else {
+                char *msg;
+                size_t len;
+                while (ws_next(&a.chrome.ws, &msg, &len) == 1) {
+                    on_cdp_message(&a, msg, len);
+                    a.chrome.ws.msg.len = 0;
+                }
             }
             draw_panes(&a);
         }
-        if (a.chrome.ws.closed) break;
+        if (a.chrome.ws.closed && !tab_lost(&a)) break;
 
         script_step(&a);
         draw_panes(&a);
@@ -2611,6 +2672,7 @@ int main(int argc, char **argv) {
     buf_free(&a.exec_buf);
     buf_free(&a.status);
     buf_free(&a.status_last);
+    tabs_free(&a);
     console_free(&a);
     // Most of a cold start is Chrome coming up. Left running, it holds the
     // profile and the next run adopts it instead of paying for that again. A

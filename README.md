@@ -37,12 +37,16 @@ set -g allow-passthrough all
 | `^G` | devtools port, frame size, write time, and throughput |
 | `^S` | hide or show the status line |
 | `^Q` | quit |
+| `^T` / `^W` | new tab / close tab (the last one closes the window) |
+| `^N` / `^B` | next tab / previous tab |
+| `alt+1`…`alt+9` | the tab with that number on it |
 | `alt+0` | reset zoom, and unpin the width |
 | `alt+f` | fit-to-width on/off |
 | `cmd+c` | copy the page selection (needs one line of terminal config, below) |
 | `cmd+v` | paste into the page, or into the address bar when it is open |
 | `^X` | open or close the console |
 | mouse | click, drag to select, wheel to scroll |
+| tab bar | click to switch, middle-click to close, wheel to cycle |
 
 While reading:
 
@@ -101,6 +105,28 @@ is not in it.
 Zoom and the height of the inline window are remembered between runs, in
 `~/.config/web/state`. `--zoom` and `--rows` override them for one run without
 disturbing them.
+
+## Tabs
+
+`^T` opens one, with the address bar already waiting; `^W` closes it, and
+closing the last one closes the window. The bar is drawn above the page, one
+row of box drawing, and only once there is a second tab to name — a window
+showing the only tab it has is a window with no tabs, and the row is worth more
+to the picture. Click a tab to switch to it, middle-click to close it, or roll
+the wheel across the bar to cycle. `^N` and `^B` step, and `alt+1` to `alt+9`
+go straight to the number the bar draws beside each name.
+
+A tab is a page of the browser and nothing more. The devtools socket addresses
+one page at a time, so switching tabs moves that socket rather than asking
+anything to come forward — the page you left goes on running, with its
+screencast stopped, and comes back where you left it. Each one is opened in a
+window of its own for the same reason each `web` window is: Chrome paints only
+the tab in front of a window, so a background tab sharing one screencasts an
+empty picture.
+
+A link that asks for a new tab of its own still opens a page `web` does not
+know about, and the bar will not grow a tab for it. Tabs here are the ones you
+open.
 
 ## When nobody is looking
 

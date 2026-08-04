@@ -535,14 +535,14 @@ static int browser_call(Chrome *c, const char *method, const char *params,
 // the page out from under both. The separate window is what makes it drawable:
 // Chrome only paints the tab in front, so a second tab in the same window
 // screencasts nothing at all - a title, and no picture under it.
-static int chrome_new_target(Chrome *c, char *out, size_t cap) {
+int chrome_open_tab(Chrome *c, char *out, size_t cap) {
     Buf reply = {0};
     int rc = browser_call(c, "Target.createTarget",
                           "\"url\":\"about:blank\",\"newWindow\":true", &reply);
     size_t n = 0;
     const char *id = rc == 0 ? json_str(reply.p, "targetId", &n) : NULL;
-    if (id && n && n + 16 < cap)
-        snprintf(out, cap, "/devtools/page/%.*s", (int)n, id);
+    if (id && n && n < cap)
+        snprintf(out, cap, "%.*s", (int)n, id);
     else
         id = NULL;
     buf_free(&reply);
@@ -552,10 +552,43 @@ static int chrome_new_target(Chrome *c, char *out, size_t cap) {
     // the worse of the two. Everything after the ? is the address, and since
     // Chrome 111 /json/new answers nothing but PUT.
     Buf resp = {0};
+    char path[256];
     bool ok = http_req(c->port, "PUT", "/json/new?about:blank", &resp) == 0 &&
-              ws_path_at(resp.p, out, cap);
+              ws_path_at(resp.p, path, sizeof path);
+    if (ok) {
+        const char *slash = strrchr(path, '/');
+        snprintf(out, cap, "%s", slash ? slash + 1 : path);
+    }
     buf_free(&resp);
     return ok ? 0 : -1;
+}
+
+int chrome_switch_target(Chrome *c, const char *target) {
+    if (c->port <= 0 || !target || !*target) return -1;
+    char path[160];
+    snprintf(path, sizeof path, "/devtools/page/%s", target);
+    // Connected before the old one is dropped: a page that has gone away since
+    // the tab bar last drew it leaves the window on the page it was already on
+    // rather than on nothing at all.
+    int fd = ws_connect("127.0.0.1", c->port, path);
+    if (fd < 0) return -1;
+    ws_close(&c->ws);
+    c->ws = (WS){0};
+    c->ws.fd = fd;
+    // The new session numbers its replies from one, so everything outstanding
+    // on the old one is the caller's to forget.
+    c->next_id = 1;
+    snprintf(c->target, sizeof c->target, "%s", target);
+    return 0;
+}
+
+void chrome_close_id(Chrome *c, const char *target) {
+    if (c->port <= 0 || !target || !*target) return;
+    char path[160];
+    snprintf(path, sizeof path, "/json/close/%s", target);
+    Buf resp = {0};
+    http_get(c->port, path, &resp);
+    buf_free(&resp);
 }
 
 int chrome_attach(Chrome *c) {
@@ -563,8 +596,13 @@ int chrome_attach(Chrome *c) {
     Buf resp = {0};
     char ws_path[256] = {0};
 
-    if (c->adopted && chrome_new_target(c, ws_path, sizeof ws_path) != 0)
-        TRACE("no tab of our own; sharing the browser's");
+    if (c->adopted) {
+        char id[96];
+        if (chrome_open_tab(c, id, sizeof id) == 0)
+            snprintf(ws_path, sizeof ws_path, "/devtools/page/%s", id);
+        else
+            TRACE("no tab of our own; sharing the browser's");
+    }
 
     double deadline = now_sec() + 10.0;
     while (now_sec() < deadline && !ws_path[0]) {
@@ -642,11 +680,7 @@ void chrome_park(Chrome *c) {
 
 void chrome_close_target(Chrome *c) {
     if (c->port <= 0 || !c->target[0]) return;
-    char path[160];
-    snprintf(path, sizeof path, "/json/close/%s", c->target);
-    Buf resp = {0};
-    http_get(c->port, path, &resp);
-    buf_free(&resp);
+    chrome_close_id(c, c->target);
     c->target[0] = 0;
 }
 

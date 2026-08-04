@@ -91,6 +91,14 @@ void chrome_kill_bg(Chrome *c);
 int  chrome_other_pages(Chrome *c);
 void chrome_close_target(Chrome *c);
 
+// A further page of our own, in a window of its own, and the id it answers to.
+int  chrome_open_tab(Chrome *c, char *out, size_t cap);
+
+// Move the session onto another page of this browser. The new socket is up
+// before the old one goes, so a failure leaves the window where it was.
+int  chrome_switch_target(Chrome *c, const char *target);
+void chrome_close_id(Chrome *c, const char *target);
+
 // Leave a tab behind that holds the browser open for the next run to adopt.
 void chrome_park(Chrome *c);
 
@@ -259,6 +267,24 @@ typedef struct {
     int      failures;
 } Script;
 
+// ---------------------------------------------------------------- tabs
+
+// One page of the browser, drawn as one tab of the bar. The window drives
+// exactly one of them at a time: the CDP socket is per page, so switching is
+// moving that socket rather than telling anything to come forward.
+typedef struct {
+    char target[96];    // the devtools page id, which is what a tab really is
+    char url[1024];     // where it was when the window last looked away
+    char title[256];
+    bool ours;          // we opened it, so it is ours to close on the way out
+    bool inited;        // the once-per-page CDP setup has been done
+    int  x0, x1;        // cells the bar last drew it on, for clicks
+} Tab;
+
+// Nine, because that is how many alt+<n> can reach, and a tenth tab in a
+// terminal-sized bar would be a number with no room for a name beside it.
+#define TAB_MAX 9
+
 typedef struct {
     Term    term;
     Kitty   kitty;
@@ -374,6 +400,16 @@ typedef struct {
     int     console_rows;         // how many rows it occupies
     int     console_row;          // 1-based row it starts on
     Buf     console_buf, console_last;
+
+    // The tab bar. It takes a row above the page, and only once there is more
+    // than one page to name: a window showing the only tab it has is a window
+    // with no tabs, and the row is worth more to the picture.
+    Tab     tabs[TAB_MAX];
+    int     ntabs;
+    int     tab;                  // the one the socket is on
+    bool    tabs_open;            // whether the bar has a row right now
+    int     tabs_row;             // 1-based row it is drawn on
+    Buf     tabs_buf, tabs_last;
 } App;
 
 // Note an outstanding call so its reply can be recognised, and claim the reply.
@@ -385,6 +421,13 @@ int  app_req_take(App *a, int id);
 int  app_cdp(App *a, const char *method, const char *fmt, ...);
 
 void notify(App *a, const char *s);
+
+// The CDP setup a page needs before it is worth drawing, where the window is
+// now, and the note on disk that says how to reach it. Shared with the tab
+// code, which moves the socket between pages and has to do all three again.
+void session_init(App *a);
+void session_write(App *a);
+void ask_where(App *a);
 
 // Move the session onto a browser listening on `port`, whoever started it, and
 // write what happened into msg. 0 = attached.
@@ -431,5 +474,35 @@ bool console_mouse(App *a, Event *ev);// transcript wheel/click handling
 void console_paint(App *a);
 void console_log(App *a, const char *line);
 void console_history_add(App *a, const char *line);
+
+// ---------------------------------------------------------------- tabs
+
+// Start the list over on whatever page the socket is on now: one tab, the one
+// in front. Called after every attach, since none of the old browser's pages
+// survive a change of browser.
+void tabs_init(App *a);
+void tabs_free(App *a);
+
+bool tabs_wanted(const App *a);        // whether the bar has earned its row
+void tabs_paint(App *a);
+bool tabs_mouse(App *a, Event *ev);    // true when the bar consumed the click
+
+void tab_new(App *a);
+void tab_close(App *a);
+void tab_go(App *a, int idx);          // 0-based
+void tab_step(App *a, int delta);      // wraps
+
+// The page the socket was on has gone. Fall back to another tab if there is
+// one; false means there is nothing left to draw and the window is over.
+bool tab_lost(App *a);
+
+// Close every tab of ours but the one in front, which the caller deals with.
+void tabs_close_others(App *a);
+
+// Whether the page in front is one this window has not set up before. The
+// per-session half of that setup is done every time the socket moves; the half
+// that sticks to the page itself must not be done twice, or a tab switched
+// back to a dozen times carries a dozen copies of the watcher script.
+bool tab_session_new(App *a);
 
 #endif
