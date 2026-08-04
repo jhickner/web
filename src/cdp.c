@@ -693,18 +693,38 @@ static bool chrome_alive(Chrome *c) {
 }
 
 void chrome_kill(Chrome *c) {
-    forget_browser(c);      // whatever is left of it, nothing should adopt it
     // Ask the browser to close before signalling it. Chrome batches its cookie
     // writes and commits them on a clean shutdown; killed instead, it can lose
     // the session that was just established, which reads as being signed out
     // again on the next run.
-    if (c->pid > 0 && c->ws.fd > 0 && !c->ws.closed) {
+    //
+    // Asked whether or not its pid is known. A browser adopted from a run that
+    // left no lock behind has none here, and the socket is then the only handle
+    // on it: without this it was neither asked nor signalled, while the note
+    // saying where it is went anyway. That leaves it running and unfindable,
+    // holding the profile, and every later start launches a second browser
+    // beside it - 0.09s to adopt one becomes 8.6s to start one.
+    bool asked = false;
+    if (c->ws.fd > 0 && !c->ws.closed) {
         // Nothing is going to draw these, and a page still being screencast is
         // work the browser has to finish before it can attend to shutting down.
         cdp_call(c, "Page.stopScreencast", "");
-        cdp_call(c, "Browser.close", "");
+        asked = cdp_call(c, "Browser.close", "") > 0;
+    }
+
+    // The note is what makes a browser findable again, so it only goes once the
+    // browser is really going. One we could neither ask nor signal is still
+    // running, and is better left adoptable than stranded.
+    if (asked || c->pid > 0)
+        forget_browser(c);      // whatever is left of it, nothing should adopt it
+
+    if (asked) {
         for (int i = 0; i < 120; i++) {          // up to three seconds
-            if (!chrome_alive(c)) { c->pid = 0; break; }
+            // With no pid, the endpoint going quiet is the only sign of death
+            // available - which is the whole of what we know about a browser
+            // reached over the socket alone.
+            bool gone = c->pid > 0 ? !chrome_alive(c) : chrome_probe(c->port) != 0;
+            if (gone) { c->pid = 0; break; }
             struct timespec ts = {0, 25 * 1000000};
             nanosleep(&ts, NULL);
         }
@@ -734,11 +754,15 @@ void chrome_kill(Chrome *c) {
 // terminal already belongs to the shell again - the only thing those seconds
 // cost is the prompt coming back.
 void chrome_kill_bg(Chrome *c) {
-    if (c->pid <= 0) {
-        chrome_kill(c);                 // nothing to wait for; just the socket
+    // Nothing to end and nobody to tell it to: just the socket.
+    if (c->pid <= 0 && (c->ws.fd <= 0 || c->ws.closed)) {
+        chrome_kill(c);
         return;
     }
-    forget_browser(c);
+    // Only when we know which process it is. Without a pid the shutdown is a
+    // request over the socket, and the note has to outlive it long enough for
+    // the child below to find the browser still answering.
+    if (c->pid > 0) forget_browser(c);
 
     pid_t pid = fork();
     if (pid < 0) { chrome_kill(c); return; }
