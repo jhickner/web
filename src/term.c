@@ -187,6 +187,10 @@ void term_clear_inline(Term *t) {
     if (!t->inline_mode || t->inline_rows < 1) return;
     char buf[32];
     for (int i = 0; i < t->inline_rows; i++) {
+        // A pane that just shrank leaves the block hanging off the bottom, and
+        // a cursor move past the last row lands on the last row: kept going, it
+        // would blank that one over and over and leave the rest behind.
+        if (t->inline_origin + i > t->rows) break;
         int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[2K", t->inline_origin + i);
         writeall(t->fd, buf, (size_t)n);
     }

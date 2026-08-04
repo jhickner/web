@@ -2390,6 +2390,13 @@ int main(int argc, char **argv) {
             g_resized = 0;
             if (a.inline_mode) {
                 term_size(&a.term);
+                // Blank the rows the block owns before it goes anywhere. The
+                // status line is ordinary text, so a block that lands on
+                // different rows - which is what relayout does when the pane no
+                // longer fits it - leaves the old one behind, and a few resizes
+                // leave a stack of them. The picture below is taken down by
+                // name rather than by row, so only this has to go by row.
+                term_clear_inline(&a.term);
                 // The block stays on the rows it was already on: a terminal
                 // keeps what is on its screen where it is, and a pane that
                 // grew has only put empty rows underneath. Pinning it to the
