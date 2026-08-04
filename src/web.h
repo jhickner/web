@@ -322,6 +322,13 @@ typedef struct {
     int     want_width;        // width pinned by w/W, 0 = derived from the cells
     bool    scale_locked;      // the render scale was chosen by hand
 
+    // --scale auto: a picture that is moving is drawn at fewer pixels, which
+    // are the same pixels Chrome encodes, we write and the terminal decodes.
+    bool    motion_auto;
+    bool    in_motion;         // whether it is doing so right now
+    int     motion_run;        // quick frames in a row seen so far
+    double  motion_scale;      // how far down, harder over ssh than locally
+
     bool    fit_width;         // widen the viewport so no page is cut off
     int     fit_w;             // width the page says it needs
     size_t  last_bytes;        // base64 size of the frame just drawn

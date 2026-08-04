@@ -196,6 +196,24 @@ void notify(App *a, const char *s) {
 #define WIDTH_MAX  2560
 #define WIDTH_STEP 40
 
+// A moving picture is worth fewer pixels than a still one. The pixel count is
+// paid three times over - Chrome's encode, our write, the terminal's decode -
+// and measured on a scroll it is 86% of the frame time, nearly all of it
+// Chrome's. Dropping it while the page slides past and putting it back the
+// moment it stops is the one lever that shortens all three at once.
+// It is spent on the screencast cap rather than on the device scale factor:
+// the frame that arrives is the viewport in CSS pixels whatever the scale
+// factor says, so the cap is the only end of it Chrome listens to - and this
+// way the page is never re-rastered on the way in or out, only re-scaled.
+// The linear scale; the pixels are its square, so 0.65 is 42% of them.
+#define MOTION_SCALE 0.65
+// Over ssh the bytes are the whole of the cost rather than a third of it, so
+// the same trade is worth making harder: half the width is a quarter of them.
+#define MOTION_SCALE_SSH 0.5
+#define MOTION_RUN   3       // quick frames in a row before it is a scroll
+#define MOTION_GAP   0.20    // a frame this soon after the last is still moving
+#define MOTION_IDLE  0.30    // and this long without one is stopped
+
 static int box_cols_for(App *a, int rows) {
     Term *t = &a->term;
     int want = (int)((double)(rows * t->cell_h) * BOX_ASPECT / t->cell_w + 0.5);
@@ -341,10 +359,24 @@ void relayout(App *a) {
     app_cdp(a, "Emulation.setDeviceMetricsOverride",
              "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":%.6f,\"mobile\":false",
              a->css_w, a->css_h, dsf);
-    // Whole pixels, and at least one of them: a ratio below 1 shrinks the frame
-    // Chrome is asked for, and a pane narrow enough would otherwise ask for none.
-    a->cast_w = (int)((double)rect_w * a->scale + 0.5);
-    a->cast_h = (int)((double)rect_h * a->scale + 0.5);
+    // The cap Chrome is given is measured against the viewport in CSS pixels,
+    // and it only ever scales a frame down: `scale = 1` and then a min against
+    // each limit, so anything above the viewport is the viewport. Struck
+    // against the cell rect instead, as it was, the number meant nothing at any
+    // zoom - at 2.3x a request for 842 came back 560 wide, unchanged - and
+    // --scale did nothing until it fell under 1/zoom. Against css_w it means
+    // what it says: half is half the width and a quarter of the pixels.
+    // Above 1 it cannot mean anything, here or anywhere: the screencast has no
+    // way to hand over more pixels than the viewport has.
+    a->cast_w = (int)((double)a->css_w * a->scale + 0.5);
+    a->cast_h = (int)((double)a->css_h * a->scale + 0.5);
+    if (a->in_motion) {
+        double ms = a->motion_scale > 0 ? a->motion_scale : MOTION_SCALE;
+        int mw = (int)(a->css_w * ms + 0.5);
+        int mh = (int)(a->css_h * ms + 0.5);
+        if (mw < a->cast_w) a->cast_w = mw;
+        if (mh < a->cast_h) a->cast_h = mh;
+    }
     if (a->cast_w < 1) a->cast_w = 1;
     if (a->cast_h < 1) a->cast_h = 1;
     screencast_start(a);
@@ -675,17 +707,23 @@ static void draw_status(App *a) {
         static const char KEYS_S[] = "^L url  ^Y copy  ^Q quit";
 
         const char *left = a->title[0] ? a->title : a->url;
-        char stats[96];
+        char stats[160];
         const char *hint;
         if (a->show_stats) {
             // The port leads: it is the one number here that something outside
             // this process needs, and it is how playwright finds the browser.
+            // The cell and the frame it implies come last: they are what says
+            // whether the size everything else is derived from was measured or
+            // guessed, which is not visible from any of the numbers before them.
             snprintf(stats, sizeof stats,
-                     "cdp:%d  %zuKB %.0fms %.1ffps  %dx%d@%gx z%.0f%%",
+                     "cdp:%d  %zuKB %.0fms %.1ffps  %dx%d@%gx z%.0f%%  "
+                     "cell %dx%d cast %dx%d%s",
                      a->chrome.port,
                      a->last_bytes / 1024, a->last_write_ms, a->fps,
                      a->css_w, a->css_h, a->scale,
-                     100.0 * (sw * a->term.cell_w) / (a->css_w ? a->css_w : 1));
+                     100.0 * (sw * a->term.cell_w) / (a->css_w ? a->css_w : 1),
+                     a->term.cell_w, a->term.cell_h, a->cast_w, a->cast_h,
+                     a->in_motion ? " moving" : "");
             hint = stats;
         } else {
             hint = sw > (int)sizeof KEYS + 3 ? KEYS : KEYS_S;
@@ -1003,18 +1041,52 @@ static void resize_box(App *a, int drows, int dcols) {
     request_fit(a);
 }
 
-// How many pixels Chrome renders per pixel the terminal will show. Above 1 it
-// is supersampling: the page is drawn larger and comes down to the cell rect,
-// which is the only way to get detail past what the cells can hold. It costs
-// the square of itself in bytes across the terminal, so it is a choice.
-// The key steps whole ratios whatever --scale started at: it is a quick look at
-// more detail or less, not a way to land on a fraction.
+// How big a frame to ask for, against the viewport. This used to step upwards,
+// on the idea that drawing larger and coming back down to the cell rect would
+// buy detail past what the cells can hold. It cannot: the screencast starts at
+// a scale of one and only ever takes the smaller of that and what it was asked
+// for, so the viewport is the ceiling and every step above it was a no-op.
+// Downwards is the direction that does something, and on a slow link it is the
+// direction worth having under a key.
+// Auto leads because it is where the key starts and where it comes back to:
+// held sizes are the exception, and one of them has to be leaveable.
 static void cycle_scale(App *a) {
-    a->want_scale = a->want_scale >= 3.0 ? 1.0 : (double)((int)a->want_scale + 1);
-    a->scale_locked = true;         // an explicit ask outranks the width cap
+    static const double SCALES[] = {1.0, 0.75, 0.5};
+    int n = (int)(sizeof SCALES / sizeof *SCALES);
+
+    if (a->motion_auto) {
+        a->motion_auto = false;
+        a->want_scale = SCALES[0];
+    } else {
+        // Nearest rather than equal: --scale takes any fraction it likes, and
+        // the key has to start from wherever that left it.
+        int idx = 0;
+        double best = 1e9;
+        for (int i = 0; i < n; i++) {
+            double d = a->want_scale - SCALES[i];
+            if (d < 0) d = -d;
+            if (d < best) { best = d; idx = i; }
+        }
+        if (idx == n - 1) {
+            a->motion_auto = true;      // round the end and back to auto
+            a->want_scale = 1.0;
+        } else {
+            a->want_scale = SCALES[idx + 1];
+        }
+    }
+    a->in_motion = false;               // whichever way, start from full size
+    a->motion_run = 0;
+    a->scale_locked = true;             // an explicit ask outranks the width cap
     relayout(a);
-    char m[48];
-    snprintf(m, sizeof m, "render %gx", a->want_scale);
+    // The size it works out to, because a percentage of a viewport nobody has
+    // memorised is not something to picture.
+    char m[64];
+    if (a->motion_auto)
+        snprintf(m, sizeof m, "frame auto - %d%% while moving",
+                 (int)(a->motion_scale * 100 + 0.5));
+    else
+        snprintf(m, sizeof m, "frame %.0f%% - %dx%d", a->want_scale * 100,
+                 a->cast_w, a->cast_h);
     notify(a, m);
 }
 
@@ -1562,6 +1634,10 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
 
         double sid = json_num(msg, "sessionId", 0);
         a->expect_frame = 0;      // the page is still answering
+        // Taken before the hash rather than before the write: everything from
+        // here on is ours, and the point of the split below is to say how much
+        // of the gap between frames is us and how much is Chrome.
+        double t_arrive = now_sec();
 
         if (dlen) {
             uint64_t h = fnv1a(data, dlen);
@@ -1571,7 +1647,8 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
                 kitty_draw_png(&a->kitty, data, dlen);
                 double t1 = now_sec();
 
-                double gap = a->last_draw > 0 ? t1 - a->last_draw : 0;
+                double prev_draw = a->last_draw;
+                double gap = prev_draw > 0 ? t1 - prev_draw : 0;
                 if (gap > 0) {
                     double inst = 1.0 / gap;
                     a->fps = a->fps > 0 ? a->fps * 0.7 + inst * 0.3 : inst;
@@ -1583,8 +1660,26 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
                 a->last_write_ms = (t1 - t0) * 1000.0;
                 a->frames++;
                 a->last_draw = t1;
-                term_log("%.3f frame %u: %zu KB b64, write %.1f ms, %.1f fps",
-                         t1, a->frames, dlen / 1024, a->last_write_ms, a->fps);
+                // The gap splits in two at the moment the frame landed: what
+                // came before it is Chrome's - capture, encode and the wire -
+                // and what came after is ours. Which half is the larger is the
+                // whole question, and one number for the gap could not say.
+                double chrome_ms = prev_draw > 0
+                    ? (t_arrive - prev_draw) * 1000.0 : 0;
+                term_log("%.3f frame %u: %zu KB b64, chrome %.1f ms, "
+                         "ours %.1f ms (write %.1f), gap %.1f ms, %.1f fps%s",
+                         t1, a->frames, dlen / 1024, chrome_ms,
+                         (t1 - t_arrive) * 1000.0, a->last_write_ms,
+                         gap * 1000.0, a->fps, a->in_motion ? " [motion]" : "");
+
+                // One quick frame is a click landing; a run of them is the page
+                // sliding past. Waiting for the run is what keeps a single
+                // keypress from paying for a resolution change it cannot use.
+                if (gap > 0 && gap < MOTION_GAP) {
+                    if (a->motion_run < MOTION_RUN) a->motion_run++;
+                } else {
+                    a->motion_run = 0;
+                }
             } else {
                 a->skipped++;
             }
@@ -1593,8 +1688,19 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         // Ack only once the frame is on screen. Chrome holds the next frame
         // until then, which is the only thing keeping a slow terminal from
         // being buried in frames it cannot draw - and keeps the loop reaching
-        // the keyboard between frames.
+        // the keyboard between frames. Sending it early was tried, so that
+        // Chrome could encode the next frame under our write: it bought
+        // nothing, and the note in the README says what that means.
         app_cdp(a, "Page.screencastFrameAck", "\"sessionId\":%d", (int)sid);
+
+        // After the ack rather than before it: dropping the resolution restarts
+        // the screencast, and the frame just drawn is still owed an answer on
+        // the session it arrived on.
+        if (a->motion_auto && !a->in_motion && a->motion_run >= MOTION_RUN) {
+            a->in_motion = true;
+            term_log("%.3f motion on", now_sec());
+            relayout(a);
+        }
 
         // Going fullscreen throws the viewport override away and puts the page
         // back on the real screen, so the frames stop matching the cells they
@@ -1796,8 +1902,11 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
 static void usage(void) {
     fprintf(stderr,
         "usage: web [options] <url>\n"
-        "  --scale F   device pixel ratio (default 1; 2 is sharper but 4x the\n"
-        "              data, and 0.5 is a quarter of it and blurrier)\n"
+        "  --scale F   hold the frame at F of the viewport (0.5 is a quarter of\n"
+        "              the data and blurrier; above 1 does nothing, the\n"
+        "              screencast will not hand over more than the viewport).\n"
+        "              The default is 'auto': full size when the page is still,\n"
+        "              smaller while it is moving\n"
         "  --show      run Chrome with a visible window too\n"
         "  --zoom F    page magnification (default 1.0)\n"
         "  --full      take over the whole terminal instead of drawing a window\n"
@@ -1966,6 +2075,13 @@ int main(int argc, char **argv) {
     setlocale(LC_CTYPE, "");
     App a = {0};
     a.want_scale = 1.0;
+    // On by default: a third of the bytes and a third of our own time while the
+    // page is sliding past, for detail that is not being read at the time.
+    // Where the frame has to cross a network, the bytes are the whole cost and
+    // the blur is worth more of a bargain.
+    a.motion_auto = true;
+    a.motion_scale = (getenv("SSH_CONNECTION") || getenv("SSH_TTY"))
+        ? MOTION_SCALE_SSH : MOTION_SCALE;
     a.zoom = 1.0;
     a.pause_on_blur = a.pause_cfg = true;
     a.blur_cpu_rate = 20;
@@ -1987,7 +2103,15 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--scale") && i + 1 < argc) {
-            a.want_scale = atof(argv[++i]);
+            const char *v = argv[++i];
+            // "auto" asks for the full size when the picture is still and a
+            // cheaper one while it is moving, which is the only time the
+            // detail it drops is detail nobody could have read anyway.
+            if (!strcmp(v, "auto")) { a.motion_auto = true; continue; }
+            // A size asked for by number is a size to hold: the picture stays
+            // the one that was asked for whether it is moving or not.
+            a.motion_auto = false;
+            a.want_scale = atof(v);
             // Below 1 the page is rendered smaller than the pixels it is shown
             // in, which is a way to ask for a cheaper frame or a smaller
             // screenshot. The floor is where a viewport stops being a viewport.
@@ -2291,6 +2415,14 @@ int main(int argc, char **argv) {
         // Everything a pending shot waits for arrives as an event except the
         // deadlines, and those need the loop to come round on its own.
         if (a.shot_path && (wait < 0 || wait > 100)) wait = 100;
+        // The picture stopping is the absence of frames, which is the one thing
+        // poll cannot be woken by. One wakeup at the deadline is all it takes -
+        // and while frames are still arriving they do the waking themselves.
+        if (a.in_motion) {
+            double left = a.last_draw + MOTION_IDLE - now_sec();
+            int ms = left > 0 ? (int)(left * 1000.0) + 1 : 0;
+            if (wait < 0 || ms < wait) wait = ms;
+        }
         int rc = poll(fds, 3, wait);
         if (rc < 0 && !g_resized) continue;
 
@@ -2333,6 +2465,18 @@ int main(int argc, char **argv) {
             a.expect_frame = 0;
             term_log("no frame after acting on input; restarting screencast");
             a.kitty.grid_dirty = true;
+            relayout(&a);
+        }
+
+        // The page has stopped. Going back to full resolution restarts the
+        // screencast, which is what puts the sharp frame up: the last one drawn
+        // was a moving one, and nothing on the page has to change for it to be
+        // replaced.
+        if (a.in_motion && now_sec() - a.last_draw > MOTION_IDLE) {
+            a.in_motion = false;
+            a.motion_run = 0;
+            term_log("%.3f motion off", now_sec());
+            a.last_hash = 0;        // the same picture, at a size worth drawing
             relayout(&a);
         }
 

@@ -58,7 +58,7 @@ While reading:
 | `[` / `]` | zoom out / in — or resize the window, inline |
 | `shift`+`↑↓←→` | drag the window's bottom right corner (`U`/`D`/`L`/`R` too) |
 | `w` / `W` | widen / narrow the width the page is told it has |
-| `s` | render scale: 1x, 2x, 3x |
+| `s` | frame size: auto, then 100%, 75%, 50% held |
 | `t` | frame transport: png, then two jpeg settings that only time it |
 | `/` | find in page, then `n` / `N` for next and previous |
 | `P` | picking: click the page for a CSS selector, into the console |
@@ -167,12 +167,40 @@ photographed as large as the terminal allows. It also outlives the run, and it
 comes back as a width rather than as a ratio, so it means the same thing in the
 next terminal. `alt+0` unpins it, and the zoom keys take it off the pin too —
 they are the same knob from the other end, and only one end can be held.
-`s` sets how many pixels Chrome renders per pixel the terminal shows: above 1x
-it draws larger and comes back down, which is the only way to get detail finer
-than the cells, at the square of the cost in bytes. The key steps whole ratios,
-but `--scale` takes a fraction: below 1 the page is rendered *smaller* than the
-cells it lands in and the terminal stretches it, which trades sharpness for
+`s` sets how big a frame to ask for, against the viewport. It starts on **auto**
+— the default, described below — and stepping it moves through 100%, 75% and 50%
+*held*, then back to auto. Held sizes are the exception; auto is where it lives.
+
+It used to step *up*, on the idea that drawing larger and coming back down to
+the cell rect would buy detail past what the cells can hold. It cannot. The
+screencast starts at a scale of one and takes the smaller of that and what it
+was asked for, so it can shrink a frame and never enlarge one, and the most it
+will ever hand over is the viewport in CSS pixels. Supersampling was being set
+up, rendered, and thrown away at the last step.
+
+Downwards is the direction that does something: the page comes back smaller than
+the cells it lands in and the terminal stretches it, which trades sharpness for
 bytes — worth having on a slow link, and the way to ask for a small screenshot.
+The fraction is struck against the viewport, so 50% is half the width and a
+quarter of the data whatever the zoom is doing. `--scale` takes any fraction,
+not just the three the key steps through, and a number given that way is a size
+to *hold* — asked for one, it stays that size moving or still.
+
+**Auto** makes that trade only while it is free, and it is the default. A page sliding past is
+measured at 86% Chrome and 14% us, and the pixel count is what both are paid in,
+so the resolution drops once three quick frames say the picture is moving and
+goes back the moment it stops — 42% of the pixels while scrolling, all of them
+the instant you stop to read, and a quarter of them over ssh, where the bytes
+are the whole of the cost. The detail it drops is detail nobody could have read
+while it was moving. `^G` says `moving` while it is down, and `--scale 1` or one
+press of `s` holds the full size if you would rather it did not.
+
+It is spent on the screencast's size cap rather than on the device scale factor,
+because that is the only end of it Chrome listens to: the frame that arrives is
+the viewport in CSS pixels whatever the scale factor says, and the cap only ever
+scales one *down*. Asked for 842 pixels against a 560-pixel viewport, Chrome
+sends 560. So nothing happens until the cap goes under the viewport — and going
+that way, the page is never re-laid-out on the way in or out, only re-scaled.
 
 `cmd+v` needs nothing: the terminal turns it into a bracketed paste, which is
 ordinary input. `cmd+c` is the other way around — the terminal keeps that one
@@ -503,8 +531,9 @@ and `l`. Otherwise nothing could ever be looked at below its own minimum
 layout width, which is most of what a narrow width is for.
 
 Set `WEB_CHROME` to use a different Chrome build, and `WEB_CELL=WxH` if the
-page aspect looks stretched — inside tmux the terminal reports no pixel
-geometry, so the cell size is a guess (8x17 by default).
+page aspect looks stretched — a terminal that reports no pixel geometry leaves
+the cell size a guess (8x17 by default). Modern tmux passes the real numbers
+through, so this is rarer than it was; `^G` says which of the two you have.
 
 ## How it works
 
@@ -588,6 +617,21 @@ survive have more changed in them and cost more to write.
 The ack was already the frame throttle, and a better one than a number: it
 adapts continuously, to the terminal actually in front of it, with nothing to
 tune. So `web` asks for every frame and lets the ack pace them.
+
+Sending it *early* was the next idea, and it bought nothing. The ack goes out
+once the frame is on screen, which reads like Chrome and the terminal taking
+turns — 30 ms of Chrome and 5 ms of us, one after the other. Moving it above the
+write should have let Chrome encode the next frame under our write of this one,
+worth the whole 5 ms. Measured: 35.1 ms a frame against 34.7 before it, which is
+noise pointing the wrong way. So the two were never taking turns — either Chrome
+already keeps a frame in flight, or the thing setting the pace is not work at
+all. The gap sits at almost exactly two 60 Hz intervals, which is what a
+pipeline missing a vsync looks like rather than one short of CPU.
+
+That is the same answer resolution gave, twice: cutting the rastered area to 42%
+changed nothing, and cutting the delivered frame to 42% bought 6%. Three
+different ways of giving Chrome less to do, and none of them made it faster. The
+frame rate here is not ours to spend.
 
 Under tmux the picture cannot simply be placed at the cursor, because tmux
 neither tracks nor redraws it. The way through is the protocol's Unicode
