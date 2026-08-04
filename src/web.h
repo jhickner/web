@@ -68,6 +68,7 @@ typedef struct {
     char  profile[512];
     char  target[96];   // the page we are driving, so the others stay theirs
     WS    ws;
+    WS    watch;        // the browser's own socket: pages appearing and going
     int   next_id;
 } Chrome;
 
@@ -107,6 +108,14 @@ void chrome_close_target(Chrome *c);
 
 // A further page of our own, in a window of its own, and the id it answers to.
 int  chrome_open_tab(Chrome *c, char *out, size_t cap);
+
+// Ask to be told when a page appears in this browser or goes away, on a socket
+// of its own. A page is not the only thing that opens a page - a link asking for
+// a window, or a script calling open(), makes one nothing here asked for - and
+// the browser endpoint is the only place that news arrives. Nothing is sent on
+// this socket afterwards; every call the window makes still goes to its page.
+int  chrome_watch(Chrome *c);
+void chrome_unwatch(Chrome *c);
 
 // Move the session onto another page of this browser. The new socket is up
 // before the old one goes, so a failure leaves the window where it was.
@@ -314,6 +323,22 @@ typedef struct {
 // browser - a real cost - so it is not unbounded either.
 #define TAB_MAX 32
 
+// A page one of ours opened, seen appearing and not yet worth a tab. A popup is
+// made before it is sent anywhere, so the address it is created with is usually
+// still blank and the real one arrives a message later; this is the note kept in
+// between. Only a page seen appearing is ever taken - a popup that has been
+// sitting there for a while is somewhere the user has been, not somewhere a
+// click was just aimed - so the time it was first seen is half of what is kept.
+typedef struct {
+    char   target[96];
+    double at;
+} Popup;
+
+// Small on purpose: these are the popups of one moment, and a page opening more
+// than a handful at once is a page opening them at us.
+#define POPUP_MAX   8
+#define POPUP_GRACE 15.0   // seconds a popup has to say where it is going
+
 typedef struct {
     Term    term;
     Kitty   kitty;
@@ -458,6 +483,8 @@ typedef struct {
     Tab     tabs[TAB_MAX];
     int     ntabs;
     int     tab;                  // the one the socket is on
+    Popup   popups[POPUP_MAX];    // pages ours opened, waiting for an address
+    int     npopups;
     bool    tabs_open;            // whether the bar has a row right now
     int     tabs_row;             // 1-based row it is drawn on
     Buf     tabs_buf, tabs_last;
@@ -549,6 +576,12 @@ bool tab_lost(App *a);
 
 // Close every tab of ours but the one in front, which the caller deals with.
 void tabs_close_others(App *a);
+
+// Take over a page the browser opened for itself. The address is moved into a
+// tab of our own and the page it came from is closed: a popup is put in the
+// window that opened it, and Chrome paints only the tab in front of a window,
+// so the page as it stands is one we could hear but never draw.
+bool tab_from_popup(App *a, const char *target, const char *url);
 
 // Whether the page in front is one this window has not set up before. The
 // per-session half of that setup is done every time the socket moves; the half

@@ -150,9 +150,21 @@ cannot. Only when there are more tabs than the row has columns does anything
 come off it, and then it is the far ends that go, so the tab you are on stays
 on screen. Thirty-two is where the list itself stops.
 
-A link that asks for a new tab of its own still opens a page `web` does not
-know about, and the bar will not grow a tab for it. Tabs here are the ones you
-open.
+A link that asks for a window of its own gets a tab. Chrome opens the page
+either way, and it is a page `web` never asked for: it loads, and plays its
+audio, in a window nothing here is drawing. So `web` keeps a second socket open
+to the browser itself, which is the only place that news arrives, and when a
+page one of ours opened turns up it is brought into the bar and switched to —
+the click was aimed there.
+
+What comes across is the address rather than the page. Chrome puts a popup in
+the window of the page that asked for it, and paints only the tab in front of a
+window, so the page as it stands is one you could hear and never see; a tab of
+`web`'s own comes with a window of its own, which is what makes it drawable.
+The cost is the opener — a popup that talks back to the page that made it finds
+nobody there. Pages that never say where they are going keep to themselves, and
+a run with a job to do — a screenshot, a script — is left alone entirely, since
+those are aimed at the page they were given.
 
 ## When nobody is looking
 

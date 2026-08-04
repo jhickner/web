@@ -680,6 +680,44 @@ int chrome_attach(Chrome *c) {
     return 0;
 }
 
+// The browser's own socket, kept open beside the page one. Discovery is all it
+// is for: with it on, the browser says when a page appears and when one goes,
+// which is the only way to hear about a page nothing here asked for. A link
+// asking for a window makes one, and without this it loads, plays its audio and
+// is never seen.
+//
+// Nothing is sent afterwards and no reply is waited for, so this socket needs
+// none of the request bookkeeping the page one has - just an id the browser will
+// not complain about.
+int chrome_watch(Chrome *c) {
+    if (c->port <= 0) return -1;
+    Buf resp = {0};
+    char path[256];
+    bool have = http_get(c->port, "/json/version", &resp) == 0 &&
+                ws_path_at(resp.p, path, sizeof path);
+    buf_free(&resp);
+    if (!have) return -1;
+
+    int fd = ws_connect("127.0.0.1", c->port, path);
+    if (fd < 0) return -1;
+    c->watch = (WS){0};
+    c->watch.fd = fd;
+
+    static const char ask[] = "{\"id\":1,\"method\":\"Target.setDiscoverTargets\","
+                              "\"params\":{\"discover\":true}}";
+    if (ws_send_text(&c->watch, ask, sizeof ask - 1) < 0) {
+        chrome_unwatch(c);
+        return -1;
+    }
+    TRACE("watching for pages on port %d", c->port);
+    return 0;
+}
+
+void chrome_unwatch(Chrome *c) {
+    if (c->watch.fd > 0) ws_close(&c->watch);
+    c->watch.fd = -1;
+}
+
 // A tab left behind by --keep, holding the browser open for the next run. The
 // address is the marker: a live run is never sitting on it, so a later run can
 // tell a parked browser from one somebody is using.

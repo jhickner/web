@@ -221,19 +221,21 @@ void tab_step(App *a, int delta) {
     tab_show(a, idx);
 }
 
-void tab_new(App *a) {
+// A blank page of the browser, on the end of the list and with the window moved
+// onto it. False leaves the list exactly as it was, and has already said why.
+static bool tab_add(App *a) {
     // Not about the bar, which copes with whatever it is given: this is the
     // list itself running out, and every entry is a page of the browser.
     if (a->ntabs >= TAB_MAX) {
         char m[48];
         snprintf(m, sizeof m, "%d tabs is the limit", TAB_MAX);
         notify(a, m);
-        return;
+        return false;
     }
     char target[96];
     if (chrome_open_tab(&a->chrome, target, sizeof target) < 0) {
         notify(a, "chrome would not open another page");
-        return;
+        return false;
     }
     tab_remember(a);
     Tab *t = &a->tabs[a->ntabs];
@@ -245,13 +247,44 @@ void tab_new(App *a) {
     if (!tab_show(a, a->ntabs - 1)) {         // it never came up; forget it
         chrome_close_id(&a->chrome, target);
         a->ntabs--;
-        return;
+        return false;
     }
+    return true;
+}
+
+void tab_new(App *a) {
+    if (!tab_add(a)) return;
     // A blank page is not somewhere to be, so the tab opens with the address
     // bar already waiting - the same key that would have been pressed next.
     a->editing = true;
     a->prompt = 1;
     a->edit_len = 0;
+}
+
+// A page the browser opened on its own account, taken over. It is where a click
+// was aimed, so the window moves onto it the way it would have moved onto a
+// window opening anywhere else.
+//
+// Its address is taken rather than the page itself, because of the window a
+// popup is put in: Chrome opens it inside the window of the page that asked, and
+// paints only the tab in front of a window, so screencasting it gives a title
+// and no picture under it. A tab of ours comes with a window of its own, which
+// is the whole of what makes it drawable. What that costs is the opener - a
+// popup that talks back to the page that made it now finds nobody there - and
+// what it buys is a page that can be seen at all.
+bool tab_from_popup(App *a, const char *target, const char *url) {
+    if (!tab_add(a)) return false;
+    // Closed only now: until the tab is up this is still the only copy of the
+    // page, and a tab that never came up would have left nothing behind.
+    chrome_close_id(&a->chrome, target);
+    // Where it is going, said before it has got there: the page is still blank,
+    // and a tab named "new tab" for the length of a load is a tab that looks
+    // like it was opened by mistake.
+    snprintf(a->url, sizeof a->url, "%s", url);
+    snprintf(a->tabs[a->tab].url, sizeof a->tabs[a->tab].url, "%s", url);
+    navigate(a, url);
+    notify(a, "that page opened a window - it is this tab");
+    return true;
 }
 
 static void tab_close_at(App *a, int idx) {

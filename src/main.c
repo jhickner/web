@@ -2426,6 +2426,114 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
     }
 }
 
+// ------------------------------------------------------------------ popups
+
+// Whether a target id is one of the pages this window is driving.
+static bool tab_target_is(const App *a, const char *id, size_t n) {
+    for (int i = 0; i < a->ntabs; i++) {
+        const char *t = a->tabs[i].target;
+        if (strlen(t) == n && memcmp(t, id, n) == 0) return true;
+    }
+    return false;
+}
+
+static int popup_find(const App *a, const char *id, size_t n) {
+    for (int i = 0; i < a->npopups; i++) {
+        const char *t = a->popups[i].target;
+        if (strlen(t) == n && memcmp(t, id, n) == 0) return i;
+    }
+    return -1;
+}
+
+static void popup_drop(App *a, int i) {
+    if (i < 0 || i >= a->npopups) return;
+    for (; i + 1 < a->npopups; i++) a->popups[i] = a->popups[i + 1];
+    a->npopups--;
+}
+
+// The oldest goes when the list is full: a popup that has not said where it is
+// going by then has had its fifteen seconds, and the one that just appeared is
+// the one a click is waiting on.
+static void popup_note(App *a, const char *id, size_t n) {
+    if (popup_find(a, id, n) >= 0) return;
+    if (a->npopups >= POPUP_MAX) popup_drop(a, 0);
+    Popup *p = &a->popups[a->npopups++];
+    snprintf(p->target, sizeof p->target, "%.*s", (int)n, id);
+    p->at = now_sec();
+}
+
+// An address a tab can be pointed at. A popup is made before it is sent
+// anywhere, so this is usually blank at first and answered a message later;
+// anything else - a blob, a javascript: url, a page written into by the opener -
+// belongs to the page that made it and does not survive being reopened.
+static bool popup_navigable(const char *url, size_t n) {
+    return (n > 8 && memcmp(url, "https://", 8) == 0) ||
+           (n > 7 && memcmp(url, "http://", 7) == 0) ||
+           (n > 7 && memcmp(url, "file://", 7) == 0);
+}
+
+// News off the browser socket: a page appearing, moving, or going away. Only
+// the pages our own pages opened are any of this window's business - the rest
+// belong to another window sharing this browser, or to the user.
+//
+// A page is taken only if it was seen appearing, and only for as long as the
+// grace: every title change on every page of the browser comes through here, and
+// without that a popup left open for an hour would be yanked into a tab the
+// moment it happened to navigate.
+static void on_target_message(App *a, const char *msg) {
+    bool made = strstr(msg, "Target.targetCreated") != NULL;
+    bool moved = !made && strstr(msg, "Target.targetInfoChanged") != NULL;
+    bool gone = !made && !moved && strstr(msg, "Target.targetDestroyed") != NULL;
+    if (!made && !moved && !gone) return;
+
+    size_t n = 0;
+    const char *id = json_str(msg, "targetId", &n);
+    if (!id || !n || n >= sizeof a->popups[0].target) return;
+
+    if (gone) { popup_drop(a, popup_find(a, id, n)); return; }
+    if (tab_target_is(a, id, n)) return;      // one of ours, and already drawn
+
+    size_t tn = 0;
+    const char *type = json_str(msg, "type", &tn);
+    if (!type || tn != 4 || memcmp(type, "page", 4) != 0) return;
+
+    if (made) {
+        // Whose page it is. Discovery replays everything already open, so a
+        // browser we adopted arrives as a handful of these; only a page opened
+        // by one of ours has an opener we know. The opener survives the implicit
+        // noopener of target=_blank - that clears the page's own handle on it,
+        // which is a different field - so this holds for ordinary links too.
+        size_t on = 0;
+        const char *opener = json_str(msg, "openerId", &on);
+        bool mine = opener && on && tab_target_is(a, opener, on);
+        term_log("%.3f page target %.*s appeared, opener %.*s (%s)", now_sec(),
+                 (int)n, id, (int)(opener ? on : 1), opener ? opener : "-",
+                 mine ? "ours" : "not ours");
+        if (!mine) return;
+    }
+    int i = popup_find(a, id, n);
+    if (!made && i < 0) return;               // not one we saw appear
+    if (i >= 0 && now_sec() - a->popups[i].at > POPUP_GRACE) {
+        popup_drop(a, i);
+        return;
+    }
+
+    size_t un = 0;
+    const char *u = json_str(msg, "url", &un);
+    char url[1100];
+    if (!u || !un || !popup_navigable(u, un)) {
+        if (made) popup_note(a, id, n);       // it will say in a moment
+        return;
+    }
+    json_unescape(url, sizeof url, u, un);
+
+    char target[96];
+    snprintf(target, sizeof target, "%.*s", (int)n, id);
+    popup_drop(a, popup_find(a, id, n));
+    term_log("%.3f page opened a window at %s", now_sec(), url);
+    tab_from_popup(a, target, url);
+}
+
 // -------------------------------------------------------------------- main
 
 static void usage(void) {
@@ -2551,6 +2659,7 @@ void ask_where(App *a) {
 // and its memory for nothing.
 static void leave_browser(App *a) {
     Chrome *c = &a->chrome;
+    chrome_unwatch(c);
     // Nothing here is going to draw another frame, and a page still being
     // captured is work the browser has to get through before it can answer any
     // of the questions below - or shut down when it is told to. On a page that
@@ -2893,6 +3002,17 @@ int main(int argc, char **argv) {
     if (chrome_attach(&a.chrome) < 0) { chrome_kill(&a.chrome); return 1; }
     term_log("%.3f attached", now_sec());
     tabs_init(&a);              // one tab: whatever the attach landed on
+    // Taking over a page the browser opened moves the session onto it, which is
+    // what a person clicking a link wanted and the last thing a run with a job
+    // to do wants: a shot, or a script, is aimed at the page it was given, and
+    // an advert calling open() would have it aimed somewhere else. So only a run
+    // that is somebody sitting there watches for them.
+    //
+    // Best effort, and after the list exists: the first thing the browser says
+    // is what is already open, and a page only means something against the tabs.
+    if (a.has_tty && !a.shot_path && !a.script.drain_exit &&
+        chrome_watch(&a.chrome) < 0)
+        term_log("no browser socket; pages that open windows will be missed");
     // Marked now rather than on the way out, so a window that quits before this
     // one already knows the browser has been asked to stay. Somebody else's is
     // never ours to mark: we do not shut it down either way.
@@ -3019,7 +3139,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        struct pollfd fds[3] = {{0}};   // poll leaves revents alone on EINTR
+        struct pollfd fds[4] = {{0}};   // poll leaves revents alone on EINTR
         // Without a terminal, term.fd fell back to stdin - which in that case is
         // a script rather than keystrokes. poll ignores a negative fd.
         fds[0].fd = a.has_tty ? a.term.fd : -1;
@@ -3028,6 +3148,10 @@ int main(int argc, char **argv) {
         fds[1].events = POLLIN;
         fds[2].fd = a.exec_fd;
         fds[2].events = POLLIN;
+        // Never opened, or given up on: the window goes on working without it,
+        // and a page that opens a window is simply not heard about again.
+        fds[3].fd = a.chrome.watch.fd > 0 ? a.chrome.watch.fd : -1;
+        fds[3].events = POLLIN;
 
         // Nothing here is on a timer except an undecided ESC and an expiring
         // notice, so the loop sleeps until something actually happens.
@@ -3056,7 +3180,7 @@ int main(int argc, char **argv) {
             int ms = left > 0 ? (int)(left * 1000.0) + 1 : 0;
             if (wait < 0 || ms < wait) wait = ms;
         }
-        int rc = poll(fds, 3, wait);
+        int rc = poll(fds, 4, wait);
         if (rc < 0 && !g_resized) continue;
 
         if (fds[2].revents & (POLLIN | POLLHUP)) {
@@ -3144,6 +3268,28 @@ int main(int argc, char **argv) {
             draw_panes(&a);
         }
         if (a.chrome.ws.closed && !tab_lost(&a)) break;
+
+        // Read after the page socket, because taking over a popup moves the
+        // session onto a page of its own: the frame the old one had already
+        // handed over is drawn first, rather than thrown away by the move.
+        if (fds[3].revents & (POLLIN | POLLHUP)) {
+            char *msg;
+            size_t len;
+            if (ws_fill(&a.chrome.watch) >= 0) {
+                while (ws_next(&a.chrome.watch, &msg, &len) == 1) {
+                    on_target_message(&a, msg);
+                    a.chrome.watch.msg.len = 0;
+                }
+            }
+            // Losing this socket is not losing the window: it costs the news
+            // about pages opening, and nothing else.
+            if (a.chrome.watch.closed) {
+                chrome_unwatch(&a.chrome);
+                term_log("%.3f browser socket closed; not watching for popups",
+                         now_sec());
+            }
+            draw_panes(&a);
+        }
 
         // The page has stopped. Going back to full resolution restarts the
         // screencast, which is what puts the sharp frame up: the last one drawn
