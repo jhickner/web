@@ -506,6 +506,12 @@ web --exec 'npx playwright test examples/hn.spec.mjs' about:blank
   page of its own, which the window takes into the tab bar as it appears and
   drops again when it goes. `--workers=4` is four tabs, and `alt+g` is four
   tiles — one per worker, all running at once. See [The grid](#the-grid).
+- Playwright's unit of parallelism is the *file*: four tests in one file are one
+  worker however many `--workers` allows, and so one tile. `test.describe
+  .configure({ mode: 'parallel' })` in the file, or `fullyParallel` in the
+  config, is what spreads them. `examples/fleet.spec.mjs` is four pages at once;
+  `examples/hn.spec.mjs` is deliberately the other way, its tests handing the
+  same page on to each other.
 - The tab is the context, so cookies, storage and the page itself carry from one
   test to the next; there is no fresh context per test.
 - The viewport is the window's — `--cols`, `--rows`, `[` and `]` set it, not
