@@ -142,6 +142,20 @@ int  cdp_vcall(Chrome *c, const char *method, const char *params_fmt, va_list ap
 
 // ---------------------------------------------------------------- graphics
 
+// How many pages the grid draws at once. Nine because a tile smaller than a
+// third of the window is a colour, not a page.
+#define GRID_MAX 9
+
+// Everything one tile has to remember while another is being drawn. The rect
+// and the name go together: a tile put up under one name and moved is a tile
+// whose old cells still name the picture where it used to be.
+typedef struct {
+    int  x, y, cols, rows;
+    unsigned gen;
+    bool grid_dirty;
+    bool live;               // something has been sent under this name
+} KittyTile;
+
 typedef struct {
     int  ttyfd;
     bool tmux;
@@ -149,10 +163,16 @@ typedef struct {
     bool grid_dirty;
     unsigned grid_draws;     // grids laid down, for anything drawn over them
     unsigned gen;            // which name the picture is going up under
+    int  slot;               // which tile the fields above are describing
+    KittyTile tiles[GRID_MAX + 1];
     Buf  out;
 } Kitty;
 
 void kitty_init(Kitty *k, int ttyfd, bool tmux);
+// Which tile the calls below are about; 0 is the whole picture.
+void kitty_use(Kitty *k, int slot);
+bool kitty_tile_live(const Kitty *k, int slot);
+void kitty_area(const Kitty *k, int *x, int *y, int *cols, int *rows);
 void kitty_set_rect(Kitty *k, int x, int y, int cols, int rows);
 int  kitty_draw_png(Kitty *k, const char *b64, size_t len);
 void kitty_clear(Kitty *k);
@@ -194,6 +214,7 @@ typedef enum {
     ACT_ADDRESS, ACT_ADDRESS_BLANK, ACT_ADDRESS_TAB, ACT_BACK, ACT_FORWARD,
     ACT_RELOAD, ACT_RELOAD_HARD,
     ACT_COPY, ACT_COPY_URL, ACT_COPY_CONSOLE, ACT_EXTERNAL, ACT_RESUME,
+    ACT_GRID,
     ACT_FIND, ACT_FIND_NEXT, ACT_FIND_PREV,
     ACT_HINT, ACT_HINT_TAB, ACT_HINT_COPY, ACT_HINT_ALL,
     ACT_INSERT, ACT_INSERT_OFF, ACT_FOCUS_INPUT, ACT_PICK,
@@ -378,6 +399,7 @@ typedef struct {
     bool ours;          // we opened it, so it is ours to close on the way out
     bool inited;        // the once-per-page CDP setup has been done
     int  x0, x1;        // cells the bar last drew it on, for clicks
+    Buf  shot;          // the last frame seen of it, for its tile in the grid
 } Tab;
 
 // Well past what a bar can name comfortably, because the bar's job is to cope
@@ -562,6 +584,8 @@ typedef struct {
     Tab     tabs[TAB_MAX];
     int     ntabs;
     int     tab;                  // the one the socket is on
+    bool    grid_on;              // every tab at once, each in a tile
+    int     grid_shown_tab;       // which tile the labels were last drawn for
     Popup   popups[POPUP_MAX];    // pages ours opened, waiting for an address
     int     npopups;
     bool    tabs_open;            // whether the bar has a row right now
@@ -745,6 +769,7 @@ void tabs_free(App *a);
 
 bool tabs_wanted(const App *a);        // whether the bar has earned its row
 void tabs_paint(App *a);
+void tab_label(const App *a, int i, char *out, size_t cap);
 bool tabs_mouse(App *a, Event *ev);    // true when the bar consumed the click
 
 void tab_new(App *a);
@@ -763,6 +788,19 @@ bool tab_lost(App *a);
 
 // Close every tab of ours but the one in front, which the caller deals with.
 void tabs_close_others(App *a);
+
+// ---------------------------------------------------------------- the grid
+//
+// Every tab at once, each in a tile of its own, the one in front live and the
+// rest showing the last frame this window saw of them.
+void grid_toggle(App *a);
+void grid_off(App *a, const char *why);   // safe when it is not on
+void grid_paint(App *a);
+bool grid_mouse(App *a, Event *ev);       // true when a tile took the click
+void grid_remember(App *a, const char *b64, size_t len);
+bool grid_tile_rect(const App *a, int i, int *x, int *y, int *cols, int *rows);
+int  grid_tile_at(const App *a, int col, int row);
+int  grid_count(const App *a);
 
 // Take over a page the browser opened for itself. The address is moved into a
 // tab of our own and the page it came from is closed: a popup is put in the

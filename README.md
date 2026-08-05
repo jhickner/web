@@ -91,6 +91,7 @@ window started from there inherits.
 | `^X` | open or close the console |
 | `alt+y` | copy the console transcript |
 | `alt+enter` | let a frozen run carry on |
+| `alt+g` | every tab at once, in a grid — see [The grid](#the-grid) |
 | `?` | key list over the page; any key dismisses it |
 | mouse | click, drag to select, wheel to scroll |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
@@ -191,6 +192,21 @@ The host matches the end of the page's own on a dot, so `ycombinator.com`
 covers `news.ycombinator.com`; the first rule of each kind that matches wins.
 `hint-all` labels everything whatever the rules say — `gf` under the vim keys,
 bindable anywhere else.
+
+## The grid
+
+`alt+g` draws every tab at once, up to nine, each in a tile with its name under
+it. The tab in front is live and named in reverse; the others show the last
+frame this window saw of them.
+
+| Key | Action |
+|---|---|
+| `alt+g` | open the grid, or close it |
+| `alt+1`…`alt+9` | that tile goes live |
+| click a tile | the same, and clicking the live one closes the grid |
+
+Nothing extra is asked of Chrome for the tiles that are not live, so a grid of
+nine pages costs what one page costs.
 
 ## Finding a page
 

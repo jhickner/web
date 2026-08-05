@@ -31,12 +31,22 @@
 // Kept even so it can never collide with the two odd bytes below, and stepped
 // by two so it stays that way; the modulo keeps it clear of zero, which would
 // cost the id the third distinct byte it needs.
+// The tile goes in the fourth byte, which is the one place it can go without
+// disturbing any of the above: the three bytes below are all the foreground
+// colour can carry, and the placeholder cells say the fourth in a diacritic of
+// their own. A window that never opens the grid is on slot 0, whose id and
+// whose cells are byte for byte what they were before tiles existed.
+//
+// If a terminal ignores that diacritic the tiles collide on one id and every
+// one of them shows the same page, which is a loud enough failure to find.
 #define IMAGE_ID_BASE(gen) ((0x0Au + 2u * ((gen) % 100u)) << 16)
-static unsigned image_id_for(unsigned gen) {
+static unsigned image_id_for(unsigned gen, int slot) {
     unsigned pid = (unsigned)getpid();
     unsigned hi = ((pid >> 8) & 0xff) | 1;
     unsigned lo = (pid & 0xff) | 1;
-    return IMAGE_ID_BASE(gen) | (hi << 8) | lo;
+    unsigned id = IMAGE_ID_BASE(gen) | (hi << 8) | lo;
+    if (slot > 0) id |= ((unsigned)slot & 0xffu) << 24;
+    return id;
 }
 #define PLACEMENT  1
 #define CHUNK      4096
@@ -138,6 +148,44 @@ void kitty_init(Kitty *k, int ttyfd, bool tmux) {
     k->grid_dirty = true;
 }
 
+// Point everything below at one tile. The current tile's rect and name are put
+// away and the new one's taken out, so every call after this one draws, places
+// and deletes under that tile's name without knowing there are others. Slot 0
+// is the whole picture, which is what a window not showing a grid draws.
+void kitty_use(Kitty *k, int slot) {
+    if (slot < 0) slot = 0;
+    if (slot > GRID_MAX) slot = GRID_MAX;
+    if (slot == k->slot) return;
+
+    KittyTile *was = &k->tiles[k->slot];
+    was->x = k->x; was->y = k->y; was->cols = k->cols; was->rows = k->rows;
+    was->gen = k->gen;
+    was->grid_dirty = k->grid_dirty;
+
+    KittyTile *now = &k->tiles[slot];
+    k->slot = slot;
+    k->x = now->x; k->y = now->y; k->cols = now->cols; k->rows = now->rows;
+    k->gen = now->gen;
+    k->grid_dirty = now->grid_dirty;
+}
+
+// The whole picture's rect, whichever tile happens to be current: slot 0's
+// fields are only put away in the array while another tile is being drawn.
+void kitty_area(const Kitty *k, int *x, int *y, int *cols, int *rows) {
+    const KittyTile *t = &k->tiles[0];
+    bool now = k->slot == 0;
+    *x    = now ? k->x    : t->x;
+    *y    = now ? k->y    : t->y;
+    *cols = now ? k->cols : t->cols;
+    *rows = now ? k->rows : t->rows;
+}
+
+// Whether anything has been drawn under this tile's name.
+bool kitty_tile_live(const Kitty *k, int slot) {
+    if (slot < 0 || slot > GRID_MAX) return false;
+    return k->tiles[slot].live;
+}
+
 void kitty_set_rect(Kitty *k, int x, int y, int cols, int rows) {
     if (k->x == x && k->y == y && k->cols == cols && k->rows == rows) return;
     k->x = x;
@@ -157,7 +205,7 @@ static void draw_grid(Kitty *k) {
     char enc[8], cell[8];
     size_t celln = utf8_encode(PLACEHOLDER_CP, cell);
 
-    unsigned id = image_id_for(k->gen);
+    unsigned id = image_id_for(k->gen, k->slot);
     buf_addf(&k->out, "\x1b[38;2;%u;%u;%um", (id >> 16) & 0xff,
              (id >> 8) & 0xff, id & 0xff);
     for (int r = 0; r < rows; r++) {
@@ -166,6 +214,11 @@ static void draw_grid(Kitty *k) {
             buf_add(&k->out, cell, celln);
             buf_add(&k->out, enc, utf8_encode(rowcolumn_diacritics[r], enc));
             buf_add(&k->out, enc, utf8_encode(rowcolumn_diacritics[c], enc));
+            // The fourth byte of the id, and only when there is one to say:
+            // a cell with two diacritics is what every terminal that draws
+            // these has always been given.
+            if (k->slot > 0)
+                buf_add(&k->out, enc, utf8_encode(rowcolumn_diacritics[k->slot], enc));
         }
     }
     buf_add(&k->out, "\x1b[39m", 5);
@@ -193,7 +246,7 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
         int hn;
         if (first)
             hn = snprintf(hdr, sizeof hdr, "\x1b_Ga=t,f=100,t=d,i=%u,q=2,m=%d;",
-                          image_id_for(k->gen), more);
+                          image_id_for(k->gen, k->slot), more);
         else
             hn = snprintf(hdr, sizeof hdr, "\x1b_Gm=%d;", more);
 
@@ -212,7 +265,7 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
     char place[128];
     int pn = snprintf(place, sizeof place,
                       "\x1b_Ga=p,U=1,i=%u,p=%d,c=%d,r=%d,q=2\x1b\\",
-                      image_id_for(k->gen), PLACEMENT, k->cols, k->rows);
+                      image_id_for(k->gen, k->slot), PLACEMENT, k->cols, k->rows);
     emit_esc(k, place, (size_t)pn);
 
     if (k->grid_dirty) {
@@ -230,17 +283,20 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
         if (g_input_pump) g_input_pump();
         if (g_quit) { esc_abort(k); return -1; }
     }
+    k->tiles[k->slot].live = true;
     return 0;
 }
 
 void kitty_clear(Kitty *k) {
     k->out.len = 0;
     char seq[64];
-    int n = snprintf(seq, sizeof seq, "\x1b_Ga=d,d=I,i=%u,q=2\x1b\\", image_id_for(k->gen));
+    int n = snprintf(seq, sizeof seq, "\x1b_Ga=d,d=I,i=%u,q=2\x1b\\",
+                     image_id_for(k->gen, k->slot));
     emit_esc(k, seq, (size_t)n);
     writeall(k->ttyfd, k->out.p, k->out.len);
     k->out.len = 0;
     k->grid_dirty = true;
+    k->tiles[k->slot].live = false;
 }
 
 void kitty_renew(Kitty *k) {
