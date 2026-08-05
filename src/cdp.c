@@ -996,7 +996,7 @@ int cdp_session_call(Chrome *c, const char *session, const char *method,
     int id = c->next_id++;
     buf_addf(&b, "{\"id\":%d,\"method\":\"%s\"", id, method);
     if (session && *session) buf_addf(&b, ",\"sessionId\":\"%s\"", session);
-    buf_add(&b, ",\"params\":{", 10);
+    buf_addf(&b, ",\"params\":{");
     if (params_fmt && *params_fmt) {
         va_list ap;
         va_start(ap, params_fmt);

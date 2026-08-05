@@ -155,6 +155,8 @@ void grid_tick(App *a) {
     a->grid_req = id;
     a->grid_req_tab = i;
     a->grid_req_at = t;
+    term_log("grid: turn %d asks tile %d for %dx%d (req %d)",
+             a->grid_turn, i, w, h, id);
 }
 
 // A tile's picture has arrived, or a session it was waiting on has. True when
@@ -174,6 +176,8 @@ bool grid_reply(App *a, const char *msg) {
             memcpy(a->tabs[i].session, s, n);
             a->tabs[i].session[n] = 0;
         }
+        term_log("grid: tile %d session %.180s", i,
+                 a->tabs[i].session[0] ? a->tabs[i].session : "REFUSED");
         return true;
     }
 
@@ -187,6 +191,7 @@ bool grid_reply(App *a, const char *msg) {
 
     size_t n = 0;
     const char *b64 = json_str(msg, "data", &n);
+    term_log("grid: tile %d picture %zu b64", i, n);
     if (!b64 || !n) return true;              // it refused; its turn comes again
 
     Tab *t = &a->tabs[i];
@@ -312,6 +317,7 @@ void grid_toggle(App *a) {
         return;
     }
 
+    term_log("grid: on, %d tabs, watch fd %d", a->ntabs, a->chrome.watch.fd);
     a->grid_on = true;
     a->grid_shown_tab = -1;
     a->grid_turn = 0;
