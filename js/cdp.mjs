@@ -7,12 +7,57 @@
 // them use.
 
 import { execFileSync } from 'node:child_process';
+import { unlinkSync, writeFileSync } from 'node:fs';
+
+// Tell the window it is being worked, and take it back when this process ends.
+//
+// A window stops drawing when its pane loses the focus - every frame costs a
+// PNG and a write across the terminal, and both are wasted on something nobody
+// is looking at. A run driven from the pane next door is exactly the case that
+// breaks: the window is in plain sight and, as far as the terminal is
+// concerned, not being looked at. Chrome tells nobody who else is attached to a
+// page, so the driver is the only one who can say. `web --exec` needs none of
+// this - the window can see its own child.
+function mark(window) {
+  attached = window;
+  if (!window?.drive || !window.pid) return;
+  try {
+    writeFileSync(window.drive, `${process.pid}\n`);
+  } catch {
+    return;                                   // an older window, with nowhere to say it
+  }
+  // The window is asleep in a poll: the signal is what makes it look now
+  // rather than whenever something else happens to wake it.
+  const nudge = () => { try { process.kill(window.pid, 'SIGUSR1'); } catch {} };
+  nudge();
+  const done = () => {
+    try { unlinkSync(window.drive); } catch {}
+    nudge();
+  };
+  process.on('exit', done);
+  // Neither of these runs `exit` handlers by itself, and a window left drawing
+  // for a driver that has gone is the thing this is meant to avoid. The pid in
+  // the file is the backstop for the ways a process can go without either.
+  process.on('SIGINT', () => { done(); process.exit(130); });
+  process.on('SIGTERM', () => { done(); process.exit(143); });
+}
+
+// The window this process settled on, for the things asked about later: where
+// to say it has stopped, above all, which the window only publishes when it was
+// started with --freeze.
+let attached;
+export const attachedWindow = () => attached;
 
 // Under --exec the endpoint is already in the environment. Otherwise ask the
 // windows that are running - one of them, or say which.
 export function endpoint() {
   if (process.env.WEB_CDP_URL && process.env.WEB_TARGET_ID) {
-    return { cdp: process.env.WEB_CDP_URL, target: process.env.WEB_TARGET_ID };
+    // Nothing to mark: a window can see the child it started itself.
+    return (attached = {
+      cdp: process.env.WEB_CDP_URL,
+      target: process.env.WEB_TARGET_ID,
+      freeze: process.env.WEB_FREEZE || '',
+    });
   }
   const out = execFileSync(process.env.WEB_BIN || 'web', ['--endpoint'], {
     encoding: 'utf8',
@@ -25,6 +70,7 @@ export function endpoint() {
   if (want) {
     const found = windows.find((w) => w.pid === want);
     if (!found) throw new Error(`no window with pid ${want}`);
+    mark(found);
     return found;
   }
   if (windows.length > 1) {
@@ -33,6 +79,7 @@ export function endpoint() {
         windows.map((w) => `  ${w.pid}  ${w.url}`).join('\n'),
     );
   }
+  mark(windows[0]);
   return windows[0];
 }
 

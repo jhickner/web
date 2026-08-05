@@ -72,6 +72,7 @@ static const struct { const char *name; Act act; const char *section; } ACTS[] =
     {"copy",           ACT_COPY, NULL},
     {"copy-url",       ACT_COPY_URL, NULL},
     {"copy-console",   ACT_COPY_CONSOLE, NULL},
+    {"resume",         ACT_RESUME, NULL},
     {"external",       ACT_EXTERNAL, NULL},
     {"find",           ACT_FIND, NULL},
     {"find-next",      ACT_FIND_NEXT, NULL},
@@ -405,6 +406,7 @@ static const KeyDef DEFAULTS[] = {
     // alt rather than ctrl: the console's own editor uses most of the control
     // keys, and this one has to work from inside it.
     {MOD_ALT, 'y', ACT_COPY_CONSOLE},
+    {MOD_ALT, KEY_ENTER, ACT_RESUME},
 
     {MOD_ALT | MOD_SHIFT, KEY_RIGHT, ACT_TAB_NEXT},
     {MOD_ALT | MOD_SHIFT, KEY_LEFT, ACT_TAB_PREV},
@@ -550,6 +552,7 @@ static const struct {
     {"rows",          S_COUNT,    offsetof(App, want_rows)},
     {"cols",          S_COUNT,    offsetof(App, want_cols)},
     {"slowmo",        S_MS,       offsetof(App, slowmo)},
+    {"freeze",        S_BOOL,     offsetof(App, freeze)},
 };
 #define NSETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))
 

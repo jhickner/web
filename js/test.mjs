@@ -11,7 +11,12 @@
 // run by the ordinary runner. What changes is which browser it lands in.
 
 import { test as base, expect } from '@playwright/test';
-import { connect, pageFor } from './playwright.mjs';
+import { connect, freeze, freezing, pageFor } from './playwright.mjs';
+
+// The window has one line to say why it stopped. Playwright's message carries
+// the call log and a rendered diff after it, which is a screenful.
+const firstLine = (s) =>
+  (s ?? 'failed').replace(/\x1b\[[0-9;]*m/g, '').split('\n')[0].slice(0, 120);
 
 export const test = base.extend({
   // The connection, once per worker: the browser, the context the tab is in,
@@ -64,6 +69,14 @@ export const test = base.extend({
       });
     } catch {
       // The page went with the window, which the failure above already says.
+    }
+    // Before the next test navigates away, and before anything is torn down.
+    // Does nothing unless the window asked to freeze - and when it did, the
+    // clock has to stop too: teardown is spent out of what is left of the
+    // test's own timeout, and a test that failed by timing out has none left.
+    if (freezing()) {
+      testInfo.setTimeout(0);
+      await freeze(`${testInfo.title}: ${firstLine(testInfo.error?.message)}`);
     }
   },
 });

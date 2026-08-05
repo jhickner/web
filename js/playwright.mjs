@@ -4,8 +4,9 @@
 // one, so nothing here downloads a browser: playwright-core is enough, and the
 // full playwright package resolves to it anyway.
 
+import { unlinkSync, writeFileSync } from 'node:fs';
 import { chromium } from 'playwright-core';
-import { endpoint } from './cdp.mjs';
+import { endpoint, attachedWindow } from './cdp.mjs';
 
 // What makes a run watchable: automation moves faster than a screencast can be
 // read, so a test that passes looks like a flicker. `--slowmo 200`, or `slowmo`
@@ -53,4 +54,38 @@ export async function pageFor(context, target) {
 export async function attach(opts) {
   const { context, target } = await connect(opts);
   return pageFor(context, target);
+}
+
+// Whether this window freezes, and where to say so - a window says nothing
+// there unless it was started with `--freeze`. Under `--exec` it is in the
+// environment; a runner started from another pane reads it off the window.
+//
+// A run nothing is watching must never stop and wait for a key that is not
+// coming, which is every run in CI, so the window asking for it is the whole of
+// the permission.
+export const freezing = () =>
+  process.env.WEB_FREEZE || attachedWindow()?.freeze || '';
+
+// Stop here and leave the page exactly as it is, until the window says carry on.
+//
+// The value is in what does not happen: no teardown, no next test navigating
+// away, no context closed. The failure is still on screen and still live, so
+// the console can query it, `P` can pick a selector off the thing that was not
+// found, and the labels can show what was actually clickable.
+//
+// Two files rather than stdout: a runner captures what a worker prints and
+// holds a failing test's output back until the test is over, which is after the
+// freeze it was announcing.
+export async function freeze(why = '') {
+  const base = freezing();
+  if (!base) return false;
+  writeFileSync(`${base}.pause`, `${String(why).replace(/\s+/g, ' ')}\n`);
+  for (;;) {
+    try {
+      unlinkSync(`${base}.resume`);           // it appeared, and is ours to clear
+      return true;
+    } catch {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
 }

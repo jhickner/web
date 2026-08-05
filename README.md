@@ -90,6 +90,7 @@ window started from there inherits.
 | `cmd+v` | paste into the page, or into the address bar when it is open |
 | `^X` | open or close the console |
 | `alt+y` | copy the console transcript |
+| `alt+enter` | let a frozen run carry on |
 | `?` | key list over the page; any key dismisses it |
 | mouse | click, drag to select, wheel to scroll |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
@@ -238,6 +239,7 @@ The history is Chrome's own, read from `History` in the profile
 | `rows` | `40` | `auto`, a count | cell rows a new window opens at |
 | `cols` | `80` | `auto`, a count | cell columns a new window opens at |
 | `slowmo` | `0` | 0–60000 | milliseconds between the actions of what `--exec` starts |
+| `freeze` | `no` | yes/no | hold the page where a driver failed until `alt+enter` |
 
 Booleans also take `true`, `on` and `1`. Each setting is the command line
 option of the same name, which wins for that run. `hint-only` and `hint-skip`
@@ -306,6 +308,8 @@ web [options] <url>...
 --exec CMD  run CMD against this window, its output in the console
 --slowmo MS pause MS between the actions of what --exec starts, so a run
             can be watched rather than only finished
+--freeze    hold the page where a driver failed instead of tearing it
+            down; alt+enter lets the run carry on
 --profile N run in a profile of its own: its own logins, history and
             browser, and none of the windows already up. "-" is a
             throwaway one, removed on exit
@@ -417,7 +421,7 @@ per line, without starting a browser:
 
 ```console
 $ web --endpoint
-{"pid":4123,"port":9222,"cdp":"http://127.0.0.1:9222","target":"0A32…","url":"https://example.com/","title":"Example Domain","handoff":true}
+{"pid":4123,"port":9222,"cdp":"http://127.0.0.1:9222","target":"0A32…","url":"https://example.com/","title":"Example Domain","handoff":true,"drive":"…/driving/4123","freeze":""}
 ```
 
 Playwright has no accessor for a target id, so match it per page:
@@ -482,11 +486,30 @@ web --exec 'npx playwright test examples/hn.spec.mjs --workers=1' about:blank
   `test.use({ viewport })`.
 - `--slowmo 200` puts a pause between actions, which is what makes a run
   something to watch.
-- A run under `--exec` keeps drawing while the terminal is not focused, so the
-  window is live in one pane while the tests are watched from another. A runner
-  started outside `web` cannot be seen from in here: use `--no-pause` for that.
+- A window being driven keeps drawing while the terminal is not focused, so it
+  stays live in one pane while the run is watched from another. `--exec` is seen
+  directly; a runner started anywhere else says so through the package.
+- `--freeze` holds the page where a test failed — see [Freezing](#freezing).
 - `WEB_PROFILE=ci`, or `--profile ci`, keeps a run off the browser you are using.
 - A failing test attaches a screenshot of the page as it was left.
+
+### Freezing
+
+`--freeze` stops a failing test where it failed and holds the page there:
+
+```sh
+web --freeze --exec 'npx playwright test --workers=1' about:blank
+web --freeze news.ycombinator.com          # for a runner in another pane
+```
+
+The status line says `FROZEN` and the console says which test and why. Nothing
+has been torn down: the console runs JavaScript against that page, `P` picks a
+CSS selector off the element that was not found, `f` labels what was actually
+clickable. `alt+enter` lets the run carry on to the next test.
+
+The test's timeout is lifted while it waits. Only a window started with
+`--freeze` freezes anything, so a run with nothing watching it — CI — never
+stops.
 
 ### --exec
 

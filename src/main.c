@@ -543,27 +543,52 @@ static void session_file(App *a, char *out, size_t cap) {
     snprintf(out, cap, "%s/sessions/%d.json", a->chrome.profile, (int)getpid());
 }
 
+// Where something driving this window from outside says so. A file rather than
+// anything cleverer because there is nothing to ask: a second client on the
+// devtools port is invisible from here - Chrome tells nobody who else is
+// attached - and a window that cannot tell it is being driven stops drawing the
+// moment the pane beside it takes the focus, which is every run worth watching.
+// The driver writes its own pid in it, so one that died without tidying up can
+// be told from one still working.
+static void drive_file(App *a, char *out, size_t cap) {
+    snprintf(out, cap, "%s/driving/%d", a->chrome.profile, (int)getpid());
+}
+
+static void freeze_base(App *a, char *out, size_t cap);
+static bool being_driven(App *a);
+
 void session_write(App *a) {
     if (!a->chrome.profile[0] || a->chrome.port <= 0 || !a->chrome.target[0])
         return;
     char dir[600], path[700];
     snprintf(dir, sizeof dir, "%s/sessions", a->chrome.profile);
     mkdirs(dir);
+    snprintf(dir, sizeof dir, "%s/driving", a->chrome.profile);
+    mkdirs(dir);
     session_file(a, path, sizeof path);
     FILE *f = fopen(path, "w");
     if (!f) return;
-    char url[2100], title[600];
+    char url[2100], title[600], drive[700], drive_esc[1400];
+    char freeze[700] = "", freeze_esc[1400] = "";
     json_escape(url, sizeof url, a->url);
     json_escape(title, sizeof title, a->title);
+    drive_file(a, drive, sizeof drive);
+    json_escape(drive_esc, sizeof drive_esc, drive);
+    // Said only when this window asked to freeze, so a driver run from another
+    // pane knows whether stopping would be watched or would simply hang.
+    if (a->freeze) {
+        freeze_base(a, freeze, sizeof freeze);
+        json_escape(freeze_esc, sizeof freeze_esc, freeze);
+    }
     // "handoff" says this window listens for a url handed to it. Nothing but
     // its presence matters: a window from a version that predates the signal
     // would be killed by it, and the file it left behind is the only place a
     // sender can find that out before sending.
     fprintf(f, "{\"pid\":%d,\"port\":%d,\"cdp\":\"http://127.0.0.1:%d\","
                "\"target\":\"%s\",\"url\":\"%s\",\"title\":\"%s\","
-               "\"handoff\":true}\n",
+               "\"handoff\":true,\"drive\":\"%s\",\"freeze\":\"%s\"}\n",
             (int)getpid(), a->chrome.port, a->chrome.port,
-            a->chrome.target, url, title);
+            a->chrome.target, url, title, drive_esc, freeze_esc);
     fclose(f);
 }
 
@@ -1039,9 +1064,35 @@ static int kill_everything(void) {
 // with them a playwright script attaches to the page on screen rather than
 // guessing among the browser's tabs. Its output goes to the console, which
 // is where everything else this window has to say already goes.
+// The two files a freeze is made of: `.pause`, written by the driver when it
+// has stopped somewhere, and `.resume`, written back when it may carry on.
+//
+// Files rather than the pipe the child's output already comes down. A test
+// runner puts the spec in a worker process of its own and captures whatever
+// that worker prints - a failing test's output is held back and shown with the
+// failure, which is after the freeze it was trying to announce. Its stdin
+// belongs to the runner too. What is left is a name both sides know.
+static void freeze_base(App *a, char *out, size_t cap) {
+    char profile[512];
+    chrome_profile_path(profile, sizeof profile);
+    snprintf(out, cap, "%s/freeze-%d", profile, (int)getpid());
+}
+
+static void freeze_files(App *a, char *pause, size_t pn, char *resume, size_t rn) {
+    char base[560];
+    freeze_base(a, base, sizeof base);
+    snprintf(pause, pn, "%s.pause", base);
+    snprintf(resume, rn, "%s.resume", base);
+}
+
 static void exec_start(App *a, const char *cmd) {
     int fds[2];
     if (pipe(fds) < 0) return;
+
+    char pause[600], resume[600];
+    freeze_files(a, pause, sizeof pause, resume, sizeof resume);
+    unlink(pause);               // nothing left over from a run that was killed
+    unlink(resume);
 
     pid_t pid = fork();
     if (pid < 0) { close(fds[0]); close(fds[1]); return; }
@@ -1080,6 +1131,14 @@ static void exec_start(App *a, const char *cmd) {
             snprintf(ms, sizeof ms, "%d", a->slowmo);
             setenv("WEB_SLOWMO", ms, 0);
         }
+        // Set only when freezing was asked for, and it is the place as well as
+        // the permission: a driver that knows how to freeze but is run by a
+        // window that never asked simply carries on, which is every run in CI.
+        if (a->freeze) {
+            char base[560];
+            freeze_base(a, base, sizeof base);
+            setenv("WEB_FREEZE", base, 1);
+        }
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
@@ -1104,6 +1163,13 @@ static void exec_start(App *a, const char *cmd) {
 static void exec_done(App *a) {
     close(a->exec_fd);
     a->exec_fd = -1;
+    // Whatever it was waiting for, it is not waiting any more.
+    a->exec_paused = false;
+    a->exec_note[0] = 0;
+    char pause[600], resume[600];
+    freeze_files(a, pause, sizeof pause, resume, sizeof resume);
+    unlink(pause);
+    unlink(resume);
     int st = 0;
     char m[64];
     if (waitpid(a->exec_pid, &st, 0) == a->exec_pid && WIFEXITED(st))
@@ -1112,6 +1178,55 @@ static void exec_done(App *a) {
         snprintf(m, sizeof m, "[stopped]");
     a->exec_pid = 0;
     console_log(a, m);
+}
+
+// The child has stopped somewhere and is waiting to be told to carry on - a
+// test that failed, holding the page exactly as it left it. The window is
+// ordinary while it waits: the console runs javascript against that page, `P`
+// picks selectors off it, the links can be labelled. What it is not is over,
+// which is the difference between this and reading the same failure afterwards
+// against a page that has since been torn down.
+static void exec_check_pause(App *a) {
+    // Whoever is driving: the child this window started, or a runner in the
+    // pane next door that read where to say it out of --endpoint.
+    if (!a->freeze || a->exec_paused) return;
+    if (a->exec_fd < 0 && !being_driven(a)) return;
+    static double next;
+    double t = now_sec();
+    if (t < next) return;
+    next = t + 0.2;
+
+    char pause[600], resume[600];
+    freeze_files(a, pause, sizeof pause, resume, sizeof resume);
+    FILE *f = fopen(pause, "r");
+    if (!f) return;
+    char why[160] = {0};
+    if (fgets(why, sizeof why, f)) why[strcspn(why, "\r\n")] = 0;
+    fclose(f);
+
+    a->exec_paused = true;
+    snprintf(a->exec_note, sizeof a->exec_note, "%s", why);
+    char m[220];
+    snprintf(m, sizeof m, "-- frozen: %.150s", why[0] ? why : "the run is waiting");
+    console_log(a, m);
+    notify(a, "frozen - the page is as it was left; alt+enter lets it go");
+}
+
+// Let it go: the file it is waiting on appears, and it takes that one away
+// itself. Ours is the one that said it was waiting.
+static void exec_resume(App *a) {
+    if (!a->exec_paused) {
+        notify(a, "nothing is waiting");
+        return;
+    }
+    char pause[600], resume[600];
+    freeze_files(a, pause, sizeof pause, resume, sizeof resume);
+    FILE *f = fopen(resume, "w");
+    if (f) { fprintf(f, "go\n"); fclose(f); }
+    unlink(pause);
+    a->exec_paused = false;
+    a->exec_note[0] = 0;
+    console_log(a, "-- carrying on");
 }
 
 // Whole lines only: the console's transcript is a list of lines, and half of one
@@ -1390,7 +1505,12 @@ static void draw_status(App *a) {
         int avail = show_hint ? sw - hintlen - 3 : sw - 2;
         if (avail < 8) avail = 8;
 
-        if (a->insert)
+        // Ahead of the rest: a window that is waiting looks exactly like one
+        // that has finished, and which of the two it is decides whether there
+        // is any point in looking at the page it is showing.
+        if (a->exec_paused)
+            buf_addf(&b, "\x1b[1;31m FROZEN\x1b[0m ");
+        else if (a->insert)
             buf_addf(&b, "\x1b[1;33m INSERT\x1b[0m ");
         else if (a->hint_on)
             buf_addf(&b, "\x1b[1;36m LINKS %s\x1b[0m ", a->hint_typed);
@@ -2106,8 +2226,40 @@ static const char KEY_CLAIMER[] =
 // by definition not the one being typed in. tmux makes that literal: focus goes
 // to the active pane, so a window sitting in plain sight beside the shell
 // running the test is told it is not being looked at.
-static bool being_driven(const App *a) {
-    return a->exec_fd >= 0 || script_busy(a);
+//
+// A driver of our own starting is not the only kind: one run from another pane
+// leaves the file drive_file names, which is the only way a window can be told
+// it is being worked from outside.
+static bool driver_attached(App *a) {
+    char path[700];
+    drive_file(a, path, sizeof path);
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    int pid = 0;
+    if (fscanf(f, "%d", &pid) != 1) pid = 0;
+    fclose(f);
+    // Killed mid-run, its file left behind: a window drawing forever for a
+    // driver that is not there is worse than one that never drew for it.
+    if (pid > 0 && kill((pid_t)pid, 0) != 0 && errno == ESRCH) {
+        unlink(path);
+        return false;
+    }
+    return true;
+}
+
+static bool being_driven(App *a) {
+    if (a->exec_fd >= 0 || script_busy(a)) return true;
+    // Only ever asked while the window is not being looked at, and rate limited
+    // even then: this is a file being opened, and the answer cannot change
+    // between one frame and the next in any way that matters.
+    static double next = 0;
+    static bool    was;
+    double t = now_sec();
+    if (t >= next) {
+        next = t + 0.25;
+        was = driver_attached(a);
+    }
+    return was;
 }
 
 static void resume_drawing(App *a) {
@@ -2414,6 +2566,7 @@ static bool do_action(App *a, Event *ev, Act act) {
         notify(a, n ? "console copied" : "the console has said nothing yet");
         return true;
     }
+    case ACT_RESUME: exec_resume(a); return true;
     case ACT_COPY_URL:
         clipboard_put(a->url);
         notify(a, "copied url");
@@ -2540,7 +2693,9 @@ static void handle_key(App *a, Event *ev) {
             if (in_console == ACT_CONSOLE) { console_toggle(a); return; }
             // Taking the transcript away with you is a thing to do from inside
             // the console above all, where the editor would otherwise eat it.
-            if (in_console == ACT_COPY_CONSOLE) {
+            // Letting a frozen run go is the same: the console is where the
+            // page was being looked at while it waited.
+            if (in_console == ACT_COPY_CONSOLE || in_console == ACT_RESUME) {
                 do_action(a, ev, in_console);
                 return;
             }
@@ -3190,6 +3345,9 @@ static void usage(void) {
         "  --exec CMD  run CMD against this window, its output in the console\n"
         "  --slowmo MS pause MS between the actions of what --exec starts, so\n"
         "              a run can be watched rather than only finished\n"
+        "  --freeze    hold the page where a driver failed instead of tearing\n"
+        "              it down: the console, `P` and the labels all work on it,\n"
+        "              and alt+enter lets the run carry on\n"
         "  --profile N run in a profile of its own - its own logins, history\n"
         "              and browser, and none of the windows already up. \"-\"\n"
         "              is a throwaway one, taken away again on exit\n"
@@ -3532,6 +3690,8 @@ int main(int argc, char **argv) {
             a.script.json = true;
         } else if (!strcmp(argv[i], "--profile") && i + 1 < argc) {
             i++;                      // already read, above the loop
+        } else if (!strcmp(argv[i], "--freeze")) {
+            a.freeze = true;
         } else if (!strcmp(argv[i], "--slowmo") && i + 1 < argc) {
             a.slowmo = atoi(argv[++i]);
             if (a.slowmo < 0) a.slowmo = 0;
@@ -3916,6 +4076,12 @@ int main(int argc, char **argv) {
             int ms = left > 0 ? (int)(left * 1000.0) + 1 : 0;
             if (wait < 0 || ms < wait) wait = ms;
         }
+        // A driver stopping to wait is a file appearing, which nothing wakes
+        // the loop for. Only while one is running, and only until it says it
+        // has stopped: a frozen window has nothing left to look for.
+        if (a.freeze && !a.exec_paused && (a.exec_fd >= 0 || being_driven(&a)) &&
+            (wait < 0 || wait > 200))
+            wait = 200;
         int rc = poll(fds, 4, wait);
         if (rc < 0 && !g_resized) continue;
 
@@ -3974,6 +4140,9 @@ int main(int argc, char **argv) {
         // A run that started or ended while the window was blurred: neither is
         // a focus event, and both change whether there is anything to draw for.
         check_driven(&a);
+        // A child that has stopped and is waiting says so in a file rather than
+        // down the pipe, so this is the only thing looking for it.
+        exec_check_pause(&a);
 
         double due = 3.0 * (1 << (a.unwedge_run < 3 ? a.unwedge_run : 3));
         if (a.expect_frame > 0 && !a.paused && now_sec() > a.expect_frame &&

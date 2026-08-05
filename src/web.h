@@ -193,7 +193,7 @@ typedef enum {
     ACT_PAGE_DOWN, ACT_PAGE_UP, ACT_TOP, ACT_BOTTOM,
     ACT_ADDRESS, ACT_ADDRESS_BLANK, ACT_ADDRESS_TAB, ACT_BACK, ACT_FORWARD,
     ACT_RELOAD, ACT_RELOAD_HARD,
-    ACT_COPY, ACT_COPY_URL, ACT_COPY_CONSOLE, ACT_EXTERNAL,
+    ACT_COPY, ACT_COPY_URL, ACT_COPY_CONSOLE, ACT_EXTERNAL, ACT_RESUME,
     ACT_FIND, ACT_FIND_NEXT, ACT_FIND_PREV,
     ACT_HINT, ACT_HINT_TAB, ACT_HINT_COPY, ACT_HINT_ALL,
     ACT_INSERT, ACT_INSERT_OFF, ACT_FOCUS_INPUT, ACT_PICK,
@@ -532,6 +532,9 @@ typedef struct {
     pid_t   exec_pid;
     Buf     exec_buf;          // what has arrived of the line being read
     int     slowmo;            // ms between a driver's actions, so it can be watched
+    bool    freeze;            // a driver that fails holds the page where it failed
+    bool    exec_paused;       // and is waiting to be let go of
+    char    exec_note[160];    // what it said it was waiting about
 
     // --screenshot. The picture is the whole point of such a run, so it is
     // what the exit waits for rather than something taken on the way past.
