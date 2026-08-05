@@ -333,6 +333,8 @@ web [options] <url>...
 --open URL  open URL in a tab of the window most recently used, and exit.
             Nothing running is an error, so a caller can start one
 --endpoint  print every running window as JSON and exit
+--mcp       drive the window on screen as an MCP server on stdio, for an
+            agent to work the page you are watching
 --browsers  list the Chrome processes web has running, with pids, and say
             which a new window could adopt
 --kill      quit this profile's windows and end its browsers, including
@@ -596,6 +598,33 @@ clickable. `alt+enter` lets the run carry on to the next test.
 The test's timeout is lifted while it waits. Only a window started with
 `--freeze` freezes anything, so a run with nothing watching it — CI — never
 stops.
+
+### MCP
+
+`--mcp` is an MCP server on stdio that drives the window you already have open
+— your browser, your logins, your tabs — on screen while it works:
+
+```sh
+claude mcp add web -- web --mcp
+```
+
+| Tool | |
+| --- | --- |
+| `snapshot` | everything on the page that can be acted on, each with a ref |
+| `click` | by ref, or by CSS selector |
+| `type` | into a field, as real key input; `submit` presses Enter after |
+| `press` | Enter, Tab, Escape, Backspace, Delete, arrows, PageUp, PageDown, Home, End |
+| `navigate` | an address in the tab on screen |
+| `new_tab` | an address in a new tab of the window |
+| `read` | the page as text |
+| `eval` | JavaScript in the page; promises are waited for |
+| `wait` | until a JavaScript expression is true |
+| `screenshot` | a picture of the page |
+
+The window keeps drawing while an agent works it, whether or not its pane is
+focused. `WEB_WINDOW` picks one by pid when several are up. Nothing is
+installed for any of this, and with `--record` what the agent does is written
+down as a spec.
 
 ### Recording
 

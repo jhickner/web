@@ -3523,6 +3523,8 @@ static void usage(void) {
         "              and exit. Nothing running is an error, so a caller can\n"
         "              fall back to starting one\n"
         "  --endpoint  print every running window as JSON and exit\n"
+        "  --mcp       drive the window on screen as an MCP server on stdio,\n"
+        "              for an agent to work the page you are watching\n"
         "  --browsers  list the chrome processes web has running, with pids,\n"
         "              and say which of them a new window could still adopt\n"
         "  --kill      quit this profile's windows and end its browsers,\n"
@@ -3788,8 +3790,8 @@ int main(int argc, char **argv) {
 
     // Read out of the arguments before the loop below, because everything
     // between here and there already wants to know where the profile is: the
-    // user agent is read out of it, and --endpoint, --browsers and --kill all
-    // answer for one profile rather than for the machine.
+    // user agent is read out of it, and --endpoint, --browsers, --kill and
+    // --mcp all answer for one profile rather than for the machine.
     // Inherited from the run that started this one - `--exec` puts it in the
     // environment - so a window opened by something a window started is in the
     // same profile rather than back in the shared one. An argument still wins.
@@ -3809,6 +3811,7 @@ int main(int argc, char **argv) {
     config_load(&a);
     bool show = false, login = false;
     bool endpoint_only = false, browsers_only = false, kill_only = false;
+    bool mcp_only = false;
     const char *exec_cmd = NULL, *hand_to_window = NULL, *rec_path = NULL;
     double drain_at = 0;              // when the queue first ran out
     int port = 0;                     // 0 = let chrome pick a free one
@@ -3873,6 +3876,8 @@ int main(int argc, char **argv) {
             browsers_only = true;
         } else if (!strcmp(argv[i], "--kill")) {
             kill_only = true;
+        } else if (!strcmp(argv[i], "--mcp")) {
+            mcp_only = true;
         } else if (!strcmp(argv[i], "--exec") && i + 1 < argc) {
             exec_cmd = argv[++i];
         } else if (!strcmp(argv[i], "--mute")) {
@@ -3936,6 +3941,9 @@ int main(int argc, char **argv) {
     // Questions about, and an end to, what is already running - all answered
     // without starting anything of our own.
     if (endpoint_only) return print_sessions();
+    // A driver rather than a window: the protocol owns stdin and stdout, and
+    // the page it works is one another window is already drawing.
+    if (mcp_only)      return mcp_serve();
     if (browsers_only) return print_browsers();
     if (kill_only)     return kill_everything();
     if (hand_to_window) return hand_url(hand_to_window);
@@ -4063,8 +4071,6 @@ int main(int argc, char **argv) {
     // one already knows the browser has been asked to stay. Somebody else's is
     // never ours to mark: we do not shut it down either way.
     if (a.keep && !a.chrome.foreign) chrome_mark_kept(&a.chrome);
-    session_write(&a);          // findable from the moment there is a page
-
     // Ask the browser what it is calling itself and keep the corrected answer
     // for next time. The launch flag above needs the string before there is a
     // browser to ask, so the first run of a new Chrome build is the one that
@@ -4162,13 +4168,19 @@ int main(int argc, char **argv) {
     }
     draw_panes(&a);
 
+    // After the first page is on its way, so the spec opens with where the
+    // window actually started rather than about:blank.
+    if (rec_path) record_start(&a, rec_path);
+    // Findable only now, rather than as soon as there was a page to find.
+    // Everything a driver could ask of this window is standing by here - the
+    // page, the helpers, the recorder - and a window that says it is ready
+    // before the recorder is in the document loses the first thing anything
+    // does to it.
+    session_write(&a);
     // Started once the page is on its way and the window has a shape, so a
     // script that attaches immediately finds the viewport it will be driving
     // rather than the one this run began with.
     if (exec_cmd) exec_start(&a, exec_cmd);
-    // After the first page is on its way, so the spec opens with where the
-    // window actually started rather than about:blank.
-    if (rec_path) record_start(&a, rec_path);
 
     // A script named on the command line, or one piped in. Reading stdin only
     // when it is not a terminal is what keeps `web url` interactive.

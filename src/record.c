@@ -36,33 +36,7 @@ static const char REC_WATCHER[] =
     "(function(){if(window.__webrecOn)return;window.__webrecOn=1;"
     "function q(s){return String(s).replace(/\\\\/g,'\\\\\\\\').replace(/'/g,\"\\\\'\")}"
     "function vis(e){return e&&e.nodeType===1}"
-    // The accessible name, near enough: what a user would call the thing.
-    "function nm(e){"
-    "var a=e.getAttribute&&(e.getAttribute('aria-label')||"
-    "(e.getAttribute('aria-labelledby')&&(document.getElementById("
-    "e.getAttribute('aria-labelledby'))||{}).textContent));"
-    "if(a)return a.trim();"
-    "if(e.labels&&e.labels[0])return e.labels[0].textContent.trim();"
-    "if(e.alt)return e.alt.trim();"
-    "if(e.tagName==='INPUT'&&(e.type==='submit'||e.type==='button'))"
-    "return (e.value||'').trim();"
-    // A field is not named by what is inside it: a select's text is its own
-    // options, and calling one 'alphabeta' names a thing nobody would look for.
-    "if(['INPUT','SELECT','TEXTAREA'].indexOf(e.tagName)>=0)return '';"
-    "return (e.textContent||'').trim().replace(/\\\\s+/g,' ').slice(0,80)}"
-    // The role, explicit or the one the tag implies.
-    "function rl(e){var r=e.getAttribute&&e.getAttribute('role');if(r)return r;"
-    "var t=e.tagName,y=(e.type||'').toLowerCase();"
-    "if(t==='A'&&e.href)return 'link';"
-    "if(t==='BUTTON'||(t==='INPUT'&&(y==='submit'||y==='button'||y==='reset')))"
-    "return 'button';"
-    "if(t==='INPUT'&&y==='checkbox')return 'checkbox';"
-    "if(t==='INPUT'&&y==='radio')return 'radio';"
-    "if(t==='SELECT')return 'combobox';"
-    "if(t==='TEXTAREA'||(t==='INPUT'&&['text','search','email','url','tel',"
-    "'password',''].indexOf(y)>=0))return 'textbox';"
-    "if(/^H[1-6]$/.test(t))return 'heading';"
-    "if(t==='IMG')return 'img';return ''}"
+    ROLE_NAME_FN
     // Whether one role-and-name picks out exactly one thing on the page.
     "function only(r,n){var c=0,l=document.querySelectorAll("
     "'a,button,input,select,textarea,img,h1,h2,h3,h4,h5,h6,[role]');"
@@ -94,15 +68,27 @@ static const char REC_WATCHER[] =
     "document.addEventListener('click',function(ev){"
     "if(chg(ev.target))return;"
     "var l=loc(ev.target);if(l)say({kind:'click',loc:l})},true);"
+    // A field says what is in it only when it is done with, and for a keyboard
+    // that is the enter key - which fires the change after the keydown it came
+    // from. Taken at the keydown instead, so the value is written down before
+    // the enter rather than after it; the change that follows says nothing new
+    // and is dropped, which is what `seen` is for.
+    "var seen=new WeakMap();"
+    "function typed(e){var y=(e.type||'').toLowerCase();"
+    "return e.tagName==='TEXTAREA'||(e.tagName==='INPUT'&&"
+    "['checkbox','radio','submit','button','reset','file'].indexOf(y)<0)}"
+    "function fill(e){var l=loc(e);if(!l||seen.get(e)===e.value)return;"
+    "seen.set(e,e.value);say({kind:'fill',loc:l,value:e.value})}"
     "document.addEventListener('change',function(ev){"
     "var e=ev.target,l=loc(e);if(!l)return;"
     "if(e.tagName==='SELECT')say({kind:'select',loc:l,value:e.value});"
     "else if(e.type==='checkbox'||e.type==='radio')"
     "say({kind:e.checked?'check':'uncheck',loc:l});"
-    "else say({kind:'fill',loc:l,value:e.value})},true);"
+    "else if(typed(e))fill(e)},true);"
     "document.addEventListener('keydown',function(ev){"
-    "if(ev.key!=='Enter')return;var l=loc(ev.target);"
-    "if(l)say({kind:'press',loc:l,value:'Enter'})},true);"
+    "if(ev.key!=='Enter')return;var e=ev.target;"
+    "if(typed(e))fill(e);"
+    "var l=loc(e);if(l)say({kind:'press',loc:l,value:'Enter'})},true);"
     "})()";
 
 // ------------------------------------------------------------------- file

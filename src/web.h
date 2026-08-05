@@ -365,6 +365,37 @@ enum {
     "var z=p.join(' > ');try{if(document.querySelectorAll(z).length===1)return z}catch(_){}" \
     "e=e.parentElement}return p.join(' > ')}"
 
+// What an element is and what a user would call it: `rl` the role, explicit or
+// the one the tag implies, and `nm` the accessible name, near enough. Shared,
+// so a locator written down by the recorder names the same thing an agent was
+// shown by the snapshot.
+#define ROLE_NAME_FN \
+    "function nm(e){" \
+    "var a=e.getAttribute&&(e.getAttribute('aria-label')||" \
+    "(e.getAttribute('aria-labelledby')&&(document.getElementById(" \
+    "e.getAttribute('aria-labelledby'))||{}).textContent));" \
+    "if(a)return a.trim();" \
+    "if(e.labels&&e.labels[0])return e.labels[0].textContent.trim();" \
+    "if(e.alt)return e.alt.trim();" \
+    "if(e.tagName==='INPUT'&&(e.type==='submit'||e.type==='button'))" \
+    "return (e.value||'').trim();" \
+    /* A field is not named by what is inside it: a select's text is its own \
+       options, and calling one 'alphabeta' names a thing nobody looks for. */ \
+    "if(['INPUT','SELECT','TEXTAREA'].indexOf(e.tagName)>=0)return '';" \
+    "return (e.textContent||'').trim().replace(/\\s+/g,' ').slice(0,80)}" \
+    "function rl(e){var r=e.getAttribute&&e.getAttribute('role');if(r)return r;" \
+    "var t=e.tagName,y=(e.type||'').toLowerCase();" \
+    "if(t==='A'&&e.href)return 'link';" \
+    "if(t==='BUTTON'||(t==='INPUT'&&(y==='submit'||y==='button'||y==='reset')))" \
+    "return 'button';" \
+    "if(t==='INPUT'&&y==='checkbox')return 'checkbox';" \
+    "if(t==='INPUT'&&y==='radio')return 'radio';" \
+    "if(t==='SELECT')return 'combobox';" \
+    "if(t==='TEXTAREA'||(t==='INPUT'&&['text','search','email','url','tel'," \
+    "'password',''].indexOf(y)>=0))return 'textbox';" \
+    "if(/^H[1-6]$/.test(t))return 'heading';" \
+    "if(t==='IMG')return 'img';return ''}"
+
 #define REQ_MAX 8
 
 typedef struct { int id, kind; } Req;
@@ -859,6 +890,12 @@ void record_toggle(App *a);
 void record_event(App *a, const char *json);   // one interaction, from the page
 void record_goto(App *a, const char *url);
 void record_install(App *a, bool fresh);       // the watcher, into a new document
+
+// -------------------------------------------------------------------- mcp
+//
+// The window on screen, as tools an agent can pick up. Not a window itself: it
+// speaks the protocol on stdio and drives the window somebody already has up.
+int mcp_serve(void);
 
 // Take over a page the browser opened for itself. The address is moved into a
 // tab of our own and the page it came from is closed: a popup is put in the
