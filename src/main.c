@@ -506,9 +506,16 @@ void relayout(App *a) {
     // Restarting the screencast is what usually makes Chrome hand over a fresh
     // frame, and it is the cheap way to ask - but it is only an ask, and the
     // still is what makes sure one arrives.
-    app_cdp(a, "Emulation.setDeviceMetricsOverride",
-             "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":%.6f,\"mobile\":false",
-             a->css_w, a->css_h, dsf);
+    //
+    // Not while the grid is up. Every page in a grid is laid out for the tile
+    // it is drawn in, and this is the whole window's size: sent here it would
+    // reach whichever page is in front - switching tabs is what calls this -
+    // and that page would lay itself out twice a second, once for the window
+    // it is not being shown in and once for the tile it is.
+    if (!a->grid_on)
+        app_cdp(a, "Emulation.setDeviceMetricsOverride",
+                 "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":%.6f,\"mobile\":false",
+                 a->css_w, a->css_h, dsf);
     // The cap Chrome is given is measured against the viewport in CSS pixels,
     // and it only ever scales a frame down: `scale = 1` and then a min against
     // each limit, so anything above the viewport is the viewport. Struck

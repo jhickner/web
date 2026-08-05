@@ -410,6 +410,7 @@ typedef struct {
     int  x0, x1;        // cells the bar last drew it on, for clicks
     Buf  shot;          // the last picture taken of it, for its tile in the grid
     uint64_t shot_hash; // and what it hashed to, so an unchanged page is not redrawn
+    int  shot_w, shot_h;// the size it was last told to lay itself out for
     char session[64];   // the flattened session its tile is captured through
 } Tab;
 

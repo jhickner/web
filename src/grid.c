@@ -143,12 +143,17 @@ void grid_tick(App *a) {
     tile_css(a, i, &w, &h);
     if (w < 1 || h < 1) return;
 
-    // Sent every turn rather than once: a resize, a zoom, or the main view's
-    // own relayout all move these numbers, and a turn that sets them itself
-    // needs to know nothing about any of that.
-    cdp_session_call(&a->chrome, tb->session, "Emulation.setDeviceMetricsOverride",
-                     "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":1,"
-                     "\"mobile\":false", w, h);
+    // Only when it has actually moved. An override is a relayout whether or
+    // not the numbers changed, so sending one every turn makes a page reflow
+    // several times a second - which is a page visibly rearranging itself in
+    // its tile for no reason at all.
+    if (tb->shot_w != w || tb->shot_h != h) {
+        cdp_session_call(&a->chrome, tb->session, "Emulation.setDeviceMetricsOverride",
+                         "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":1,"
+                         "\"mobile\":false", w, h);
+        tb->shot_w = w;
+        tb->shot_h = h;
+    }
     int id = cdp_session_call(&a->chrome, tb->session, "Page.captureScreenshot",
                               "\"format\":\"png\"");
     if (id < 0) { a->grid_turn++; return; }   // the socket went; try the next
@@ -341,6 +346,7 @@ void grid_toggle(App *a) {
     for (int i = 0; i < a->ntabs && i < GRID_MAX; i++) {
         Tab *t = &a->tabs[i];
         t->session[0] = 0;
+        t->shot_w = t->shot_h = 0;      // its metrics are the window's again
         a->grid_attach_req[i] = cdp_session_call(&a->chrome, NULL,
             "Target.attachToTarget", "\"targetId\":\"%s\",\"flatten\":true",
             t->target);
