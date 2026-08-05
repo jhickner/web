@@ -216,9 +216,9 @@ The history is Chrome's own, read from `History` in the profile
 | `raw-keys` | `no` | yes/no | let a key the page did not want reach the window system |
 | `keep` | `no` | yes/no | leave Chrome running on exit |
 | `scale` | `auto` | `auto`, 0.1–3 | frame size as a fraction of the viewport; `auto` is full size when the page is still, smaller while it moves |
-| `zoom` | `1` | 0.5–3 | page magnification a new window opens at |
-| `rows` | `auto` | `auto`, a count | cell rows a new window opens at |
-| `cols` | `auto` | `auto`, a count | cell columns a new window opens at |
+| `zoom` | `1.5` | 0.5–3 | page magnification a new window opens at |
+| `rows` | `40` | `auto`, a count | cell rows a new window opens at |
+| `cols` | `80` | `auto`, a count | cell columns a new window opens at |
 
 Booleans also take `true`, `on` and `1`. Each setting is the command line
 option of the same name, which wins for that run. `hint-only` and `hint-skip`
@@ -260,10 +260,10 @@ web [options] <url>...
 --scale F   hold the frame at F of the viewport (default auto: full size
             when the page is still, smaller while it moves). Above 1 does
             nothing; the screencast never exceeds the viewport
---zoom F    page magnification (default 1.0)
---rows N    how many cell rows the window gets
---cols N    how many cell columns the window gets (default: from the
-            proportion, and never wider than the terminal)
+--zoom F    page magnification (default 1.5)
+--rows N    how many cell rows the window gets (default 40)
+--cols N    how many cell columns the window gets (default 80, and
+            never wider than the terminal)
 --no-status start with the status line hidden (^S toggles it)
 --no-clear  leave the window on screen on exit instead of erasing it
 --full      take over the whole terminal instead of drawing a window

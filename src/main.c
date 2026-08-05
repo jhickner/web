@@ -3095,9 +3095,10 @@ static void usage(void) {
         "              The default is 'auto': full size when the page is still,\n"
         "              smaller while it is moving\n"
         "  --show      run Chrome with a visible window too\n"
-        "  --zoom F    page magnification (default 1.0)\n"
+        "  --zoom F    page magnification (default 1.5)\n"
         "  --full      take over the whole terminal instead of drawing a window\n"
-        "  --rows N    how many cell rows the window gets\n"
+        "  --rows N    how many cell rows the window gets (default 40)\n"
+        "  --cols N    how many cell columns the window gets (default 80)\n"
         "  --no-status start with the status line hidden (^S toggles it)\n"
         "  --no-clear  leave the window on screen on exit instead of erasing it\n"
         "  --mute      start with the page's audio switched off\n"
@@ -3342,7 +3343,9 @@ int main(int argc, char **argv) {
     a.motion_auto = true;
     a.motion_scale = (getenv("SSH_CONNECTION") || getenv("SSH_TTY"))
         ? MOTION_SCALE_SSH : MOTION_SCALE;
-    a.zoom = 1.0;
+    a.zoom = 1.5;
+    a.want_rows = 40;
+    a.want_cols = 80;
     a.pause_on_blur = true;
     a.claim_keys = true;              // --raw-keys hands them to the window system
     a.exec_fd = -1;
