@@ -261,6 +261,35 @@ static bool tab_add(App *a) {
     return true;
 }
 
+// A page somebody else made, taken into the bar without the window moving onto
+// it. A test runner working this browser opens a page per worker: each one is a
+// page of its own, and one tile of the grid is where it is watched. Not ours,
+// so whoever opened it is who closes it.
+bool tab_adopt(App *a, const char *target, const char *url) {
+    if (!target || !*target || a->ntabs >= TAB_MAX) return false;
+    for (int i = 0; i < a->ntabs; i++)
+        if (!strcmp(a->tabs[i].target, target)) return false;   // already have it
+    Tab *t = &a->tabs[a->ntabs];
+    memset(t, 0, sizeof *t);
+    snprintf(t->target, sizeof t->target, "%s", target);
+    snprintf(t->url, sizeof t->url, "%s", url && *url ? url : "about:blank");
+    t->ours = false;
+    a->ntabs++;
+    return true;
+}
+
+// One of those pages has gone. The tab in front is not this one's business:
+// its socket closing is what says it went, and tab_lost answers that.
+bool tab_forget(App *a, const char *target) {
+    if (!target || !*target) return false;
+    for (int i = 0; i < a->ntabs; i++) {
+        if (i == a->tab || strcmp(a->tabs[i].target, target)) continue;
+        tab_drop(a, i);
+        return true;
+    }
+    return false;
+}
+
 void tab_new(App *a) {
     if (!tab_add(a)) return;
     // A blank page is not somewhere to be, so the tab opens with the address

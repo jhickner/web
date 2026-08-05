@@ -797,6 +797,12 @@ void tab_new(App *a);
 bool tab_open_url(App *a, const char *url);
 
 void tab_close(App *a);
+// A page opened by whatever is driving this browser, taken into the bar as it
+// is - and dropped again when it goes. Neither moves the window off the tab it
+// is on.
+bool tab_adopt(App *a, const char *target, const char *url);
+bool tab_forget(App *a, const char *target);
+
 void tab_go(App *a, int idx);          // 0-based
 void tab_step(App *a, int delta);      // wraps
 

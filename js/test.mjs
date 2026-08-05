@@ -19,28 +19,28 @@ const firstLine = (s) =>
   (s ?? 'failed').replace(/\x1b\[[0-9;]*m/g, '').split('\n')[0].slice(0, 120);
 
 export const test = base.extend({
-  // The connection, once per worker: the browser, the context the tab is in,
-  // and which page is the tab. The last of those is the whole point and is
-  // known only here - it came back from the window along with the address, and
-  // nothing downstream could work it out again.
+  // The connection and the page, once per worker.
+  //
+  // The first worker drives the window's own tab - the one on screen, the one
+  // --endpoint named. Every worker after it opens a page of its own instead, so
+  // no two are ever working the same page: `--workers=4` is four pages, and the
+  // window shows them as four tabs. `alt+g` is then four tiles, one per worker,
+  // which is the whole reason for wanting them separate.
+  //
+  // parallelIndex rather than workerIndex: a worker replaced after a failure
+  // gets a fresh workerIndex, so that one counts restarts as well as workers,
+  // and the replacement would open a second page instead of taking over.
   web: [
     async ({}, use, workerInfo) => {
-      // One window, one tab, one test at a time. Several workers would drive
-      // the same page at once and read each other's navigations as flakiness,
-      // which is a hard thing to see for what it is.
-      //
-      // parallelIndex rather than workerIndex: a worker replaced after a
-      // failure gets a fresh workerIndex, so that one counts restarts as well
-      // as workers and would call the second failure a parallelism problem.
-      if (workerInfo.parallelIndex > 0) {
-        throw new Error(
-          'a web window is a single page: run with --workers=1',
-        );
-      }
-      await use(await connect());
-      // Nothing closed. The browser belongs to the window, and the window is
-      // still showing it; disconnecting is all that is ours to do, and node
-      // exiting does that.
+      const conn = await connect();
+      const own = workerInfo.parallelIndex > 0;
+      const page = own ? await conn.context.newPage()
+                       : await pageFor(conn.context, conn.target);
+      await use({ ...conn, page, own });
+      // A page this worker opened is this worker's to close; the window's own
+      // tab is not. The browser stays either way - it belongs to the window,
+      // and disconnecting is all that is ours to do.
+      if (own) await page.close().catch(() => {});
     },
     { scope: 'worker' },
   ],
@@ -54,7 +54,7 @@ export const test = base.extend({
   context: async ({ web }, use) => use(web.context),
 
   page: async ({ web }, use, testInfo) => {
-    const page = await pageFor(web.context, web.target);
+    const page = web.page;
     await use(page);
     // Playwright takes its own screenshots from inside the context it made,
     // which is the one thing overriding the context above costs. Taken here

@@ -485,15 +485,15 @@ test('the front page lists stories', async ({ page }) => {
 
 ```sh
 npm i @jhickner/web @playwright/test
-web --exec 'npx playwright test --workers=1' about:blank   # watch it run
-npx playwright test --workers=1                            # against a window already up
+web --exec 'npx playwright test' about:blank   # watch it run
+npx playwright test                            # against a window already up
 ```
 
 `examples/hn.spec.mjs` is that spec. From a checkout, `npm i @playwright/test`
 and:
 
 ```sh
-web --exec 'npx playwright test examples/hn.spec.mjs --workers=1' about:blank
+web --exec 'npx playwright test examples/hn.spec.mjs' about:blank
 ```
 
 | Import | What it is |
@@ -502,7 +502,10 @@ web --exec 'npx playwright test examples/hn.spec.mjs --workers=1' about:blank
 | `@jhickner/web/playwright` | `attach()`, `connect()`, `pageFor()` for a script of your own |
 | `@jhickner/web/cdp` | `endpoint()` and `page()` over raw CDP, no dependencies |
 
-- One window is one page, so tests run with `--workers=1`.
+- The first worker drives the window's own tab; every worker after it opens a
+  page of its own, which the window takes into the tab bar as it appears and
+  drops again when it goes. `--workers=4` is four tabs, and `alt+g` is four
+  tiles — one per worker, all running at once. See [The grid](#the-grid).
 - The tab is the context, so cookies, storage and the page itself carry from one
   test to the next; there is no fresh context per test.
 - The viewport is the window's — `--cols`, `--rows`, `[` and `]` set it, not

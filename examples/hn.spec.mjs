@@ -4,8 +4,8 @@
 //
 //   npm i @playwright/test         # in this checkout
 //
-//   web --exec 'npx playwright test examples/hn.spec.mjs --workers=1' about:blank
-//   npx playwright test examples/hn.spec.mjs --workers=1  # against a window already up
+//   web --exec 'npx playwright test examples/hn.spec.mjs' about:blank
+//   npx playwright test examples/hn.spec.mjs    # against a window already up
 //
 // web --slowmo 200 puts a pause between actions, which is what makes a run
 // something to watch rather than a flicker.

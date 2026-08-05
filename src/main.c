@@ -3291,7 +3291,14 @@ static void on_target_message(App *a, const char *msg) {
     const char *id = json_str(msg, "targetId", &n);
     if (!id || !n || n >= sizeof a->popups[0].target) return;
 
-    if (gone) { popup_drop(a, popup_find(a, id, n)); return; }
+    if (gone) {
+        // A page a driver opened and has now closed: its tile goes with it.
+        char t[96];
+        snprintf(t, sizeof t, "%.*s", (int)n, id);
+        tab_forget(a, t);
+        popup_drop(a, popup_find(a, id, n));
+        return;
+    }
     if (tab_target_is(a, id, n)) return;      // one of ours, and already drawn
 
     size_t tn = 0;
@@ -3310,6 +3317,23 @@ static void on_target_message(App *a, const char *msg) {
         term_log("%.3f page target %.*s appeared, opener %.*s (%s)", now_sec(),
                  (int)n, id, (int)(opener ? on : 1), opener ? opener : "-",
                  mine ? "ours" : "not ours");
+        // A page with no opener is nobody's as far as the rule above goes -
+        // and that is exactly what a test runner's worker makes, one page each,
+        // asked for at the browser rather than from any page. While something
+        // is driving this window, those are the pages worth showing: they take
+        // a place in the bar and a tile of the grid, without the window moving
+        // off whatever it is on. Nothing is adopted when nothing is driving,
+        // which leaves another window's pages, and a login window's, alone.
+        if (!mine && !opener && being_driven(a)) {
+            char t[96], u[1100] = "";
+            size_t un = 0;
+            const char *up = json_str(msg, "url", &un);
+            if (up && un) json_unescape(u, sizeof u, up, un);
+            snprintf(t, sizeof t, "%.*s", (int)n, id);
+            if (tab_adopt(a, t, u))
+                term_log("%.3f adopted %.*s: a driver's page", now_sec(), (int)n, id);
+            return;
+        }
         if (!mine) return;
     }
     int i = popup_find(a, id, n);
