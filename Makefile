@@ -1,6 +1,6 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -Wno-unused-parameter
-LDLIBS  ?= -lm
+LDLIBS  ?= -lm -lsqlite3
 PREFIX  ?= $(HOME)/.local
 
 SRC  := $(wildcard src/*.c)

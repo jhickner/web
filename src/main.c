@@ -1313,10 +1313,14 @@ static void draw_status(App *a) {
     buf_addf(&b, "\x1b[%d;1H\x1b[2K\x1b[%d;%dH", row, row, sx);
 
     if (a->editing) {
+        const char *label = a->prompt == 2 ? "find" : a->prompt == 3 ? "tab" : "go";
         buf_addf(&b, "\x1b[7m %s \x1b[0m %.*s\x1b[?25h",
-                 a->prompt == 2 ? "find" : "go", (int)a->edit_len, a->edit);
-        // Park the cursor after the text being typed.
-        buf_addf(&b, "\x1b[%d;%dH", row, sx + (int)a->edit_len + 5);
+                 label, (int)a->edit_len, a->edit);
+        // Park the cursor after the text being typed, which is as far past the
+        // label as the label is long: the space either side of it, and the one
+        // the text starts after.
+        buf_addf(&b, "\x1b[%d;%dH", row,
+                 sx + (int)strlen(label) + 3 + (int)a->edit_len);
     } else {
         // The rest of the list is one keypress away, so the line only has to
         // name that keypress. It is the one key nobody could have guessed at,
@@ -1395,6 +1399,7 @@ static void draw_panes(App *a) {
     draw_status(a);
     console_paint(a);
     help_paint(a);          // over the picture, so last of all
+    omni_paint(a);
 }
 
 // ------------------------------------------------------------------ input
@@ -1503,11 +1508,15 @@ static void start_url(const char *raw, char *out, size_t cap) {
         snprintf(out, cap, "https://%s", raw);
 }
 
-void navigate(App *a, const char *raw) {
-    char url[1100];
+// What the address bar makes of a line: an address as it stands, a path that
+// is really there, a bare host, or - a space in it, or no dot anywhere - the
+// search nothing else could have been. Apart from navigate itself because the
+// address bar now has two ways out of it, and a line typed for a new tab has
+// to become the same address it would have become for this one.
+void bar_url(const char *raw, char *url, size_t cap) {
     if (strstr(raw, "://") || strncmp(raw, "about:", 6) == 0) {
-        snprintf(url, sizeof url, "%s", raw);
-    } else if (!file_url(raw, url, sizeof url)) {
+        snprintf(url, cap, "%s", raw);
+    } else if (!file_url(raw, url, cap)) {
         if (strchr(raw, ' ') || !strchr(raw, '.')) {
             char q[1024];
             size_t o = 0;
@@ -1521,11 +1530,16 @@ void navigate(App *a, const char *raw) {
                 }
             }
             q[o] = 0;
-            snprintf(url, sizeof url, "https://duckduckgo.com/?q=%s", q);
+            snprintf(url, cap, "https://duckduckgo.com/?q=%s", q);
         } else {
-            snprintf(url, sizeof url, "https://%s", raw);
+            snprintf(url, cap, "https://%s", raw);
         }
     }
+}
+
+void navigate(App *a, const char *raw) {
+    char url[1100];
+    bar_url(raw, url, sizeof url);
 
     char esc[2200];
     json_escape(esc, sizeof esc, url);
@@ -2105,6 +2119,10 @@ static void handle_mouse(App *a, Event *ev) {
         if (ev->press && !ev->motion && ev->button < 3) help_toggle(a);
         return;
     }
+    if (a->omni_open) {
+        if (ev->press && !ev->motion && ev->button < 3) omni_close(a);
+        return;
+    }
     if (!a->mouse_down && tabs_mouse(a, ev)) return;
     if (console_mouse(a, ev)) return;
     Kitty *k = &a->kitty;
@@ -2194,6 +2212,10 @@ static void handle_mouse(App *a, Event *ev) {
 // ever seeing a modifier: whatever has the keyboard here gets it.
 static void handle_paste(App *a, const char *text, size_t len) {
     if (!len) return;
+    if (a->omni_open) {
+        omni_paste(a, text, len);
+        return;
+    }
     if (a->editing) {
         // A pasted newline is a line break in text but an instruction here, so
         // the address bar takes the first line and stops.
@@ -2286,6 +2308,14 @@ static bool do_action(App *a, Event *ev, Act act) {
         a->edit[0] = 0;
         a->edit_len = 0;
         return true;
+    // The same bar, for a tab that does not exist yet: nothing is put in it,
+    // since the page being left is not what is being gone to.
+    case ACT_ADDRESS_TAB:
+        a->editing = true;
+        a->prompt = 3;
+        a->edit[0] = 0;
+        a->edit_len = 0;
+        return true;
     case ACT_FIND:
         a->editing = true;
         a->prompt = 2;
@@ -2297,6 +2327,8 @@ static bool do_action(App *a, Event *ev, Act act) {
     case ACT_HINT_TAB:  hint_show(a, 1, false); return true;
     case ACT_HINT_COPY: hint_show(a, 2, false); return true;
     case ACT_HINT_ALL:  hint_show(a, 0, true);  return true;
+    case ACT_SEARCH_TABS:    omni_show(a, OMNI_TABS); return true;
+    case ACT_SEARCH_HISTORY: omni_show(a, OMNI_HIST); return true;
     case ACT_BACK:    nav_history(a, -1); return true;
     case ACT_FORWARD: nav_history(a, +1); return true;
     case ACT_RELOAD:
@@ -2440,6 +2472,9 @@ static void handle_key(App *a, Event *ev) {
     // The key list is over the page, so nothing under it can be reached while
     // it is up: the next key scrolls it or puts it away.
     if (help_key(a, ev)) return;
+    // The tab and history lists take every key they can use, since a letter is
+    // what is being typed at them rather than what it usually means.
+    if (omni_key(a, ev)) return;
     // Labels on the links take every key they can use, so a half-typed label
     // can never fall through into the page's own search box.
     if (hint_key(a, ev)) return;
@@ -2458,6 +2493,10 @@ static void handle_key(App *a, Event *ev) {
                 if (a->prompt == 2) {
                     snprintf(a->find, sizeof a->find, "%s", a->edit);
                     find_next(a, false);
+                } else if (a->prompt == 3) {
+                    char url[1100];
+                    bar_url(a->edit, url, sizeof url);
+                    tab_open_url(a, url);
                 } else {
                     navigate(a, a->edit);
                 }
@@ -3728,7 +3767,8 @@ int main(int argc, char **argv) {
         // which is the one thing poll cannot be woken by.
         bool draining = a.script.drain_exit && !script_busy(&a);
         int wait = (a.term.in.len || a.msg_until > now_sec() ||
-                    a.expect_frame > 0 || a.hint_deadline > 0 || draining) ? 20 : -1;
+                    a.expect_frame > 0 || a.hint_deadline > 0 ||
+                    draining) ? 20 : -1;
         int sw = script_wait_ms(&a);
         if (sw >= 0 && (wait < 0 || sw < wait)) wait = sw;
         // Everything a pending shot waits for arrives as an event except the
@@ -3991,6 +4031,7 @@ int main(int argc, char **argv) {
     tabs_free(&a);
     console_free(&a);
     help_free(&a);
+    omni_free(&a);
     // Most of a cold start is Chrome coming up. Left running, it holds the
     // profile and the next run adopts it instead of paying for that again. A
     // browser we only attached to is not ours to close at all.

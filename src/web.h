@@ -185,13 +185,14 @@ typedef enum {
     ACT_SCROLL_DOWN, ACT_SCROLL_UP, ACT_SCROLL_LEFT, ACT_SCROLL_RIGHT,
     ACT_LINE_DOWN, ACT_LINE_UP, ACT_HALF_DOWN, ACT_HALF_UP,
     ACT_PAGE_DOWN, ACT_PAGE_UP, ACT_TOP, ACT_BOTTOM,
-    ACT_ADDRESS, ACT_ADDRESS_BLANK, ACT_BACK, ACT_FORWARD,
+    ACT_ADDRESS, ACT_ADDRESS_BLANK, ACT_ADDRESS_TAB, ACT_BACK, ACT_FORWARD,
     ACT_RELOAD, ACT_RELOAD_HARD,
     ACT_COPY, ACT_COPY_URL, ACT_EXTERNAL,
     ACT_FIND, ACT_FIND_NEXT, ACT_FIND_PREV,
     ACT_HINT, ACT_HINT_TAB, ACT_HINT_COPY, ACT_HINT_ALL,
     ACT_INSERT, ACT_INSERT_OFF, ACT_FOCUS_INPUT, ACT_PICK,
     ACT_TAB_NEW, ACT_TAB_CLOSE, ACT_TAB_NEXT, ACT_TAB_PREV,
+    ACT_SEARCH_TABS, ACT_SEARCH_HISTORY,
     ACT_TAB_1, ACT_TAB_2, ACT_TAB_3, ACT_TAB_4, ACT_TAB_5,
     ACT_TAB_6, ACT_TAB_7, ACT_TAB_8, ACT_TAB_9,
     ACT_ZOOM_IN, ACT_ZOOM_OUT, ACT_ZOOM_RESET, ACT_SMALLER, ACT_LARGER,
@@ -557,6 +558,15 @@ typedef struct {
     unsigned help_grid;           // the grid count it was last drawn over
     Buf      help_buf, help_last;
 
+    bool     omni_open;
+    int      omni_mode;           // OMNI_TABS or OMNI_HIST
+    char     omni_q[128];         // what has been typed at the list
+    size_t   omni_qlen;
+    int      omni_sel;            // the row picked, in the filtered order
+    int      omni_scroll;         // rows past the top of the ones on screen
+    unsigned omni_grid;
+    Buf      omni_buf, omni_last;
+
     // Link labels, `f`. They are drawn by the page, in the picture rather than
     // over it, so there is nothing here but what the keyboard needs: while they
     // are up every key belongs to them.
@@ -608,6 +618,11 @@ void ask_where(App *a);
 int  app_attach(App *a, int port, char *msg, size_t cap);
 
 void navigate(App *a, const char *raw);
+
+// What a line typed at the address bar means, without going anywhere: the same
+// address `navigate` would have used, for the caller that wants it in a tab of
+// its own instead.
+void bar_url(const char *raw, char *url, size_t cap);
 void run_js(App *a, const char *js);
 void relayout(App *a);
 
@@ -662,6 +677,20 @@ void help_toggle(App *a);            // `?`, and the key that puts it away again
 bool help_key(App *a, Event *ev);    // true when the list consumed it
 void help_paint(App *a);
 void help_free(App *a);
+
+// ---------------------------------------------------------------- the lists
+
+// Going somewhere by typing a few letters of it: the tabs already open, or the
+// pages the profile has been to, narrowed as the letters arrive.
+#define OMNI_TABS 0
+#define OMNI_HIST 1
+
+void omni_show(App *a, int mode);
+void omni_close(App *a);             // safe when it is not open
+bool omni_key(App *a, Event *ev);    // true when the list consumed it
+void omni_paste(App *a, const char *text, size_t len);
+void omni_paint(App *a);
+void omni_free(App *a);
 
 // ---------------------------------------------------------------- hints
 

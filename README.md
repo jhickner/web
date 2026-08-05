@@ -20,7 +20,8 @@ support
 ## Quick start
 
 Requires [Ghostty](https://ghostty.org/) or [kitty](https://sw.kovidgoyal.net/kitty/),
-Google Chrome, and a C compiler. No libraries to install.
+Google Chrome, and a C compiler. The only library is sqlite3, which macOS ships
+and Linux packages as `libsqlite3-dev`.
 
 ```sh
 make
@@ -157,9 +158,11 @@ the vi vocabulary is the window's:
 | `gg` / `G` | top / bottom |
 | `/` | find in page, then `n` / `N` |
 | `H` / `L` | back / forward |
-| `o` / `O` | address bar, with the current address / blank |
+| `o` / `O` | address bar: this tab, with the current address / a new tab, blank |
 | `:` | address bar, blank |
 | `r` / `R` | reload / reload ignoring the cache |
+| `T` | find an open tab by name — see [Finding a page](#finding-a-page) |
+| `gh` | find a page been to before |
 | `gi` | focus the first text field |
 | `gf` | label everything clickable, past any `hint-only` rule for the site |
 | `yy` | copy the address |
@@ -218,6 +221,41 @@ A `#` or `=` in a selector is part of it, and such a line can only be commented
 out from its very start. `hint-all` labels everything on any page whatever the
 rules say — `gf` under the vim keys, bindable anywhere else — so nothing a rule
 leaves out is out of reach.
+
+## Finding a page
+
+Two lists, opened over the page and narrowed as you type: `search-tabs` for the
+tabs already open, `search-history` for the pages this profile has been to.
+`T` and `gh` under the vim keys, bindable anywhere else.
+
+| Key | Action |
+|---|---|
+| any letter | narrow the list |
+| `↓` / `↑` | down / up (`^N` / `^P` and `tab` / `shift+tab` too) |
+| `pgdn` / `pgup` | a screenful |
+| `enter` | go there, or switch to the tab if it is one already open |
+| `shift+enter` / `^T` | open it in a new tab |
+| `backspace` / `^U` | delete a character / the line |
+| `esc` / `^G` | put the list away |
+
+Every word typed has to appear in the title or the address, in any order, so
+`hacker news` and `news hacker` find the same page and each word narrows the
+list further. Case is ignored until you type a capital, and then it matters.
+
+Ranking is Vimium's, followed line for line. A word scores for being there at
+all, more for starting a word, more again for being a whole one, scaled by how
+much of the line it accounts for — so a word is worth more in a short title
+than buried in a long address, and the title is never dragged down by the
+address. Added to that is recency, on a cube that falls away to nothing at a
+month old, which can lift a page up the list and never push one down. How often
+a page has been visited is not counted, which is Vimium's choice too. With
+nothing typed the history opens on the most recent page first; tabs are ranked
+on the words alone, since a tab being old says nothing about it.
+
+The history is Chrome's own, read from `History` in the profile
+(`~/.cache/web/profile`) — so it is everything opened in `web`, including from
+a `--login` window. It is read from a copy, since the browser holds the file
+open while it runs.
 
 ## Config
 
