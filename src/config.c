@@ -20,7 +20,15 @@
 // means and acts on the answer, and help.c asks it which key an action wears
 // so the list it draws is the real one.
 
-typedef struct { int mods, key; Act act; } KeyBind;
+// A binding is one key or two: `key2` is 0 for the ones that are one, and the
+// pair `g g` is a first key that does nothing on its own and a second that
+// decides what the two of them were.
+typedef struct { int mods, key, mods2, key2; Act act; } KeyBind;
+
+// The tables below, where a pair costs two more numbers on the line and a
+// single key should not have to carry them.
+typedef struct { int mods, key; Act act; } KeyDef;
+typedef struct { int mods, key, mods2, key2; Act act; } KeyPair;
 
 // One entry per key, so a file line naming a key already bound replaces it
 // rather than adding a second meaning. Two keys may share an action.
@@ -28,6 +36,13 @@ typedef struct { int mods, key; Act act; } KeyBind;
 
 static KeyBind g_binds[BINDS_MAX];
 static int     g_nbinds;
+
+// What the vim layer bound, so a file line landing on one of them can be
+// counted: the file is read last and wins, and a vim map that quietly did
+// nothing because web.conf already named `L` is worth a word on the status
+// line rather than a puzzle.
+static KeyBind g_vim[48];
+static int     g_nvim;
 
 // ------------------------------------------------------------------ names
 
@@ -48,17 +63,23 @@ static const struct { const char *name; Act act; const char *section; } ACTS[] =
     {"bottom",         ACT_BOTTOM, NULL},
 
     {"address",        ACT_ADDRESS, "the page"},
+    {"address-blank",  ACT_ADDRESS_BLANK, NULL},
     {"back",           ACT_BACK, NULL},
     {"forward",        ACT_FORWARD, NULL},
     {"reload",         ACT_RELOAD, NULL},
+    {"reload-hard",    ACT_RELOAD_HARD, NULL},
     {"copy",           ACT_COPY, NULL},
     {"copy-url",       ACT_COPY_URL, NULL},
     {"external",       ACT_EXTERNAL, NULL},
     {"find",           ACT_FIND, NULL},
     {"find-next",      ACT_FIND_NEXT, NULL},
     {"find-prev",      ACT_FIND_PREV, NULL},
+    {"hint",           ACT_HINT, "the links"},
+    {"hint-tab",       ACT_HINT_TAB, NULL},
+    {"hint-copy",      ACT_HINT_COPY, NULL},
     {"insert",         ACT_INSERT, NULL},
     {"insert-off",     ACT_INSERT_OFF, NULL},
+    {"focus-input",    ACT_FOCUS_INPUT, NULL},
     {"pick-selector",  ACT_PICK, NULL},
 
     {"tab-new",        ACT_TAB_NEW, "tabs"},
@@ -157,26 +178,62 @@ static void normalize(int *mods, int *key) {
     *key = k;
 }
 
-static int find_bind(int mods, int key) {
+static int find_bind(int mods, int key, int mods2, int key2) {
     for (int i = 0; i < g_nbinds; i++)
-        if (g_binds[i].mods == mods && g_binds[i].key == key) return i;
+        if (g_binds[i].mods == mods && g_binds[i].key == key &&
+            g_binds[i].mods2 == mods2 && g_binds[i].key2 == key2) return i;
     return -1;
 }
 
-Act keys_lookup(int mods, int key) {
-    normalize(&mods, &key);
-    int i = find_bind(mods, key);
-    // A terminal that reports the unshifted key sends `?` as `/` with shift
-    // held, and `:` as `;`. The shifted spelling is tried first so a binding
-    // made on one may still differ from the binding made on the other.
+// A terminal that reports the unshifted key sends `?` as `/` with shift held,
+// and `:` as `;`. The shifted spelling is tried first, so a binding made on one
+// may still differ from the binding made on the other.
+static int find_either(int mods, int key, int mods2, int key2) {
+    int i = find_bind(mods, key, mods2, key2);
     if (i < 0 && (mods & MOD_SHIFT) && key < 0x100)
-        i = find_bind(mods & ~MOD_SHIFT, key);
-    return i < 0 ? ACT_NONE : g_binds[i].act;
+        i = find_bind(mods & ~MOD_SHIFT, key, mods2, key2);
+    return i;
 }
 
-static void bind_set(int mods, int key, Act act) {
+// Whether anything longer starts here. Only asked of a key that is not a
+// binding on its own, so a key that is both is simply that binding.
+static bool starts_pair(int mods, int key) {
+    for (int i = 0; i < g_nbinds; i++) {
+        if (!g_binds[i].key2) continue;
+        if (g_binds[i].key != key) continue;
+        if (g_binds[i].mods == mods ||
+            ((mods & MOD_SHIFT) && g_binds[i].mods == (mods & ~MOD_SHIFT)))
+            return true;
+    }
+    return false;
+}
+
+Act keys_lookup(int mods, int key) {
+    return keys_lookup_seq(0, 0, mods, key, NULL);
+}
+
+Act keys_lookup_seq(int pmods, int pkey, int mods, int key, bool *prefix) {
+    if (prefix) *prefix = false;
     normalize(&mods, &key);
-    int i = find_bind(mods, key);
+    if (pkey) {
+        normalize(&pmods, &pkey);
+        int i = find_either(pmods, pkey, mods, key);
+        if (i >= 0) return g_binds[i].act;
+        // The two of them are not a binding, so the first is dropped and this
+        // key is asked about on its own - which is what it would have meant
+        // had the other never been pressed.
+    }
+    int i = find_either(mods, key, 0, 0);
+    if (i >= 0) return g_binds[i].act;
+    if (prefix) *prefix = starts_pair(mods, key);
+    return ACT_NONE;
+}
+
+static void bind_set(int mods, int key, int mods2, int key2, Act act) {
+    normalize(&mods, &key);
+    if (key2) normalize(&mods2, &key2);
+    else      mods2 = 0;
+    int i = find_bind(mods, key, mods2, key2);
     if (act == ACT_NONE) {
         if (i >= 0) g_binds[i] = g_binds[--g_nbinds];
         return;
@@ -186,11 +243,18 @@ static void bind_set(int mods, int key, Act act) {
         i = g_nbinds++;
         g_binds[i].mods = mods;
         g_binds[i].key = key;
+        g_binds[i].mods2 = mods2;
+        g_binds[i].key2 = key2;
     }
     g_binds[i].act = act;
 }
 
 // ---------------------------------------------------------------- spelling
+
+// The left of a line: one key, or the two of a pair. Two are written with a
+// space between them - `^X f` - or, where both are a bare character, run
+// together the way they are pressed and said: `gg`, `yf`.
+static bool parse_seq(char *s, int *m1, int *k1, int *m2, int *k2);
 
 static bool parse_spec(const char *s, int *mods, int *key) {
     *mods = 0;
@@ -231,6 +295,29 @@ static bool parse_spec(const char *s, int *mods, int *key) {
     return true;
 }
 
+static bool parse_seq(char *s, int *m1, int *k1, int *m2, int *k2) {
+    *m2 = *k2 = 0;
+    char *sp = s;
+    while (*sp && !isspace((unsigned char)*sp)) sp++;
+    if (*sp) {
+        *sp++ = 0;
+        while (isspace((unsigned char)*sp)) sp++;
+        if (!*sp || !parse_spec(sp, m2, k2)) return false;
+    }
+    if (parse_spec(s, m1, k1)) return true;
+    if (*k2) return false;              // the first of a pair has to be a key
+    if (s[0] && s[1] && !s[2] &&
+        (unsigned char)s[0] >= 0x20 && (unsigned char)s[0] < 0x7f &&
+        (unsigned char)s[1] >= 0x20 && (unsigned char)s[1] < 0x7f) {
+        *m1 = 0;
+        *k1 = (unsigned char)s[0];
+        *m2 = 0;
+        *k2 = (unsigned char)s[1];
+        return true;
+    }
+    return false;
+}
+
 void key_text(int mods, int key, char *out, size_t cap) {
     normalize(&mods, &key);
     // ^Y rather than ctrl+y, since that is what a terminal's own documentation
@@ -259,6 +346,22 @@ void key_text(int mods, int key, char *out, size_t cap) {
              mods & MOD_ALT ? "alt+" : "", mods & MOD_SHIFT ? "shift+" : "", name);
 }
 
+// A whole binding, one key or two. A pair of bare characters is written the way
+// it is pressed and said - `gg`, `yf` - and anything with a modifier or a named
+// key in it takes the space it needs to be read back: `^X f`.
+static void bind_text(const KeyBind *b, char *out, size_t cap) {
+    char one[48];
+    key_text(b->mods, b->key, one, sizeof one);
+    if (!b->key2) {
+        snprintf(out, cap, "%s", one);
+        return;
+    }
+    char two[48];
+    key_text(b->mods2, b->key2, two, sizeof two);
+    if (strlen(one) == 1 && strlen(two) == 1) snprintf(out, cap, "%s%s", one, two);
+    else                                      snprintf(out, cap, "%s %s", one, two);
+}
+
 // The shortest of the keys that do it, which is both the one worth learning
 // and the one that keeps the help list narrow enough to hold two columns: `?`
 // rather than `shift+/`, `D` rather than `shift+down`.
@@ -267,7 +370,7 @@ bool keys_text(Act act, char *out, size_t cap) {
     for (int i = 0; i < g_nbinds; i++) {
         if (g_binds[i].act != act) continue;
         char one[48];
-        key_text(g_binds[i].mods, g_binds[i].key, one, sizeof one);
+        bind_text(&g_binds[i], one, sizeof one);
         if (!best[0] || strlen(one) < strlen(best)) memcpy(best, one, sizeof one);
     }
     snprintf(out, cap, "%s", best[0] ? best : "-");
@@ -276,7 +379,7 @@ bool keys_text(Act act, char *out, size_t cap) {
 
 // ---------------------------------------------------------------- defaults
 
-static const KeyBind DEFAULTS[] = {
+static const KeyDef DEFAULTS[] = {
     {MOD_CTRL, 'q', ACT_QUIT},
     {MOD_CTRL, 'c', ACT_QUIT},
     {MOD_CTRL, 'l', ACT_ADDRESS},
@@ -313,6 +416,8 @@ static const KeyBind DEFAULTS[] = {
     {MOD_ALT, '_', ACT_ZOOM_OUT},
     {MOD_ALT, '0', ACT_ZOOM_RESET},
 
+    {MOD_CTRL, 'f', ACT_FIND},
+
     {0, KEY_DOWN, ACT_LINE_DOWN},
     {0, KEY_UP, ACT_LINE_UP},
     {0, KEY_BACKSPACE, ACT_BACK},
@@ -321,20 +426,15 @@ static const KeyBind DEFAULTS[] = {
     {MOD_SHIFT, KEY_UP, ACT_BOX_SHORTER},
     {MOD_SHIFT, KEY_RIGHT, ACT_BOX_WIDER},
     {MOD_SHIFT, KEY_LEFT, ACT_BOX_NARROWER},
-    {0, 'j', ACT_SCROLL_DOWN},
-    {0, 'k', ACT_SCROLL_UP},
-    {0, 'h', ACT_SCROLL_LEFT},
-    {0, 'l', ACT_SCROLL_RIGHT},
-    {0, 'd', ACT_HALF_DOWN},
-    {0, 'u', ACT_HALF_UP},
+    {0, KEY_PGDN, ACT_PAGE_DOWN},
+    {0, KEY_PGUP, ACT_PAGE_UP},
     {0, ' ', ACT_PAGE_DOWN},
-    {0, 'b', ACT_PAGE_UP},
-    {0, 'g', ACT_TOP},
-    {0, 'G', ACT_BOTTOM},
-    {0, 'y', ACT_COPY_URL},
-    {0, 'n', ACT_FIND_NEXT},
-    {0, 'N', ACT_FIND_PREV},
-    {0, '/', ACT_FIND},
+    // What every browser puts them on, and the way to walk a search without
+    // the vi keys that used to be the only one.
+    {0, KEY_F3, ACT_FIND_NEXT},
+    {MOD_SHIFT, KEY_F3, ACT_FIND_PREV},
+    {0, 'f', ACT_HINT},
+    {0, 'F', ACT_HINT_TAB},
     {MOD_SHIFT, '/', ACT_HELP},
     {0, '?', ACT_HELP},
     {0, 'i', ACT_INSERT},
@@ -352,6 +452,61 @@ static const KeyBind DEFAULTS[] = {
     {0, 'L', ACT_BOX_NARROWER},
 };
 #define NDEFAULTS ((int)(sizeof DEFAULTS / sizeof DEFAULTS[0]))
+
+// ------------------------------------------------------------------- vim
+//
+// `vim = yes`, and the whole of the vi vocabulary is here rather than in the
+// map above: with this off, `j` types a j into the page and the window is
+// driven by the arrows, the chords and the handful of keys that are this
+// program's own rather than vi's. With it on, a reader who knows vim already
+// knows this - j k h l d u b gg G / n N for moving and searching, and the
+// browser extensions' additions on top: H and L for the history, o for the
+// address, f for the links, ZZ to leave.
+//
+// It sits under web.conf rather than over it, so a key the file names keeps
+// what the file gave it. Six of these land on keys the plain map uses for
+// something else, and those change meaning while vim is on:
+//
+//   L R    were the window's width; shift+left and shift+right still are
+//   :      was the console, which keeps ^X
+//   ^F     was find, which vi spells /
+//   ^D ^B  were the trace and the previous tab; the tab is on alt+shift+left
+static const KeyDef VIM[] = {
+    {0, 'j', ACT_SCROLL_DOWN},
+    {0, 'k', ACT_SCROLL_UP},
+    {0, 'h', ACT_SCROLL_LEFT},
+    {0, 'l', ACT_SCROLL_RIGHT},
+    {0, 'd', ACT_HALF_DOWN},
+    {0, 'u', ACT_HALF_UP},
+    {0, 'b', ACT_PAGE_UP},
+    {0, 'G', ACT_BOTTOM},
+    {0, '/', ACT_FIND},
+    {0, 'n', ACT_FIND_NEXT},
+    {0, 'N', ACT_FIND_PREV},
+    {0, 'H', ACT_BACK},
+    {0, 'L', ACT_FORWARD},
+    {0, 'o', ACT_ADDRESS},
+    {0, 'O', ACT_ADDRESS_BLANK},
+    {0, ':', ACT_ADDRESS_BLANK},
+    {0, 'r', ACT_RELOAD},
+    {0, 'R', ACT_RELOAD_HARD},
+    {MOD_CTRL, 'd', ACT_HALF_DOWN},
+    {MOD_CTRL, 'u', ACT_HALF_UP},
+    {MOD_CTRL, 'f', ACT_PAGE_DOWN},
+    {MOD_CTRL, 'b', ACT_PAGE_UP},
+};
+#define NVIM ((int)(sizeof VIM / sizeof VIM[0]))
+
+// `g` and `y` do nothing on their own here: each waits for the key that says
+// what it was.
+static const KeyPair VIM_PAIRS[] = {
+    {0, 'g', 0, 'g', ACT_TOP},
+    {0, 'g', 0, 'i', ACT_FOCUS_INPUT},
+    {0, 'y', 0, 'y', ACT_COPY_URL},
+    {0, 'y', 0, 'f', ACT_HINT_COPY},
+    {0, 'Z', 0, 'Z', ACT_QUIT},
+};
+#define NVIM_PAIRS ((int)(sizeof VIM_PAIRS / sizeof VIM_PAIRS[0]))
 
 // --------------------------------------------------------------- settings
 
@@ -371,6 +526,7 @@ static const struct {
     SetKind     kind;
     size_t      off;        // the field in App it is
 } SETTINGS[] = {
+    {"vim",           S_BOOL,     offsetof(App, vim)},
     {"pause-on-blur", S_BOOL,     offsetof(App, pause_on_blur)},
     {"status-line",   S_BOOL_NOT, offsetof(App, hide_status)},
     {"clear-on-exit", S_BOOL,     offsetof(App, clear_exit)},
@@ -462,15 +618,22 @@ static void write_config(const char *path, const App *a) {
         setting_text(a, i, val, sizeof val);
         fprintf(f, "%-16s = %s\n", SETTINGS[i].name, val);
     }
+    // The keys are written with a `#` in front of them: each line says what the
+    // key already does, and taking the `#` off is how it is changed. Live, they
+    // would be the whole default map stated a second time - and anything laid
+    // under this file, the vim map above all, would have nothing left to say.
+    fputs("\n# Every key, as it stands. Take the `#` off a line to change it,\n"
+          "# and press `?` in the window for the list as it really is.\n", f);
     // Walked in action order rather than binding order, so the file reads as a
     // list of what can be done rather than of what the keyboard happens to hold.
     for (int i = 0; i < NACTS; i++) {
         if (ACTS[i].section) fputc('\n', f);
         for (int j = 0; j < NDEFAULTS; j++) {
             if (DEFAULTS[j].act != ACTS[i].act) continue;
-            char spec[32];
-            key_text(DEFAULTS[j].mods, DEFAULTS[j].key, spec, sizeof spec);
-            fprintf(f, "%-16s = %s\n", spec, ACTS[i].name);
+            KeyBind b = {DEFAULTS[j].mods, DEFAULTS[j].key, 0, 0, DEFAULTS[j].act};
+            char spec[48];
+            bind_text(&b, spec, sizeof spec);
+            fprintf(f, "#%-15s = %s\n", spec, ACTS[i].name);
         }
     }
     fclose(f);
@@ -481,7 +644,26 @@ static void trim(char *s) {
     while (n && isspace((unsigned char)s[n - 1])) s[--n] = 0;
 }
 
-static int read_config(const char *path, App *a) {
+// Whether the vim layer had asked for this key, so a file line landing on it
+// can be counted. A single key counts against every pair it would start: the
+// file saying `y = copy-url` is the file taking `yy` and `yf` away, whether or
+// not it meant to.
+static bool vim_had(int m1, int k1, int m2, int k2) {
+    normalize(&m1, &k1);
+    if (k2) normalize(&m2, &k2);
+    else    m2 = 0;
+    for (int i = 0; i < g_nvim; i++) {
+        if (g_vim[i].mods != m1 || g_vim[i].key != k1) continue;
+        if (!k2 || (g_vim[i].mods2 == m2 && g_vim[i].key2 == k2)) return true;
+    }
+    return false;
+}
+
+// The file is read twice: once for the settings, and once for the keys, after
+// whatever the settings asked for has been laid down underneath them. Each
+// line belongs to exactly one of the two passes, so a mistake in it is
+// reported once rather than on every trip through.
+static int read_config(const char *path, App *a, bool keys) {
     FILE *f = fopen(path, "r");
     if (!f) return 0;
     char line[256];
@@ -499,7 +681,7 @@ static int read_config(const char *path, App *a) {
         char *eq = strrchr(line, '=');
         if (!eq) {
             trim(line);
-            if (line[0]) {
+            if (line[0] && keys) {
                 fprintf(stderr, "web: %s:%d: no `=` in `%s`\n", path, lineno, line);
                 bad++;
             }
@@ -518,7 +700,7 @@ static int read_config(const char *path, App *a) {
         for (int i = 0; i < NSETTINGS; i++)
             if (!strcasecmp(SETTINGS[i].name, spec)) { s = i; break; }
         if (s >= 0) {
-            if (!setting_set(a, s, name)) {
+            if (!keys && !setting_set(a, s, name)) {
                 const char *want = "yes or no";
                 if (SETTINGS[s].kind == S_SCALE)      want = "size";
                 else if (SETTINGS[s].kind == S_ZOOM)  want = "magnification";
@@ -529,8 +711,9 @@ static int read_config(const char *path, App *a) {
             }
             continue;
         }
-        int mods, key;
-        if (!parse_spec(spec, &mods, &key)) {
+        if (!keys) continue;
+        int m1, k1, m2, k2;
+        if (!parse_seq(spec, &m1, &k1, &m2, &k2)) {
             fprintf(stderr, "web: %s:%d: `%s` is not a key\n", path, lineno, spec);
             bad++;
             continue;
@@ -541,7 +724,8 @@ static int read_config(const char *path, App *a) {
             bad++;
             continue;
         }
-        bind_set(mods, key, act);
+        if (vim_had(m1, k1, m2, k2)) a->vim_shadowed++;
+        bind_set(m1, k1, m2, k2, act);
     }
     fclose(f);
     return bad;
@@ -556,10 +740,51 @@ void config_dir(char *out, size_t cap) {
     else             snprintf(out, cap, "%s/.config/web", home ? home : "/tmp");
 }
 
+// A key bound on its own happens the moment it is pressed, which leaves every
+// pair starting with it unreachable. That is a fair thing to ask for and a
+// terrible thing to arrive at by accident - and the commonest way in is a
+// web.conf written by a version where `gg` was one binding pressed twice, whose
+// `g = top` line now means a single press. Said once per key, and never for the
+// defaults, which do not shadow anything.
+static void warn_shadowed(const char *path) {
+    for (int i = 0; i < g_nbinds; i++) {
+        if (g_binds[i].key2) continue;
+        for (int j = 0; j < g_nbinds; j++) {
+            if (!g_binds[j].key2) continue;
+            if (g_binds[j].mods != g_binds[i].mods) continue;
+            if (g_binds[j].key != g_binds[i].key) continue;
+            char one[48], pair[48];
+            bind_text(&g_binds[i], one, sizeof one);
+            bind_text(&g_binds[j], pair, sizeof pair);
+            fprintf(stderr, "web: %s: `%s` acts on its own, so `%s` is out of reach\n",
+                    path, one, pair);
+            break;
+        }
+    }
+}
+
+// The vim layer, remembered as it goes on so the file can be seen taking any
+// of it back again.
+static void load_vim(void) {
+    g_nvim = 0;
+    for (int i = 0; i < NVIM && g_nvim < (int)(sizeof g_vim / sizeof g_vim[0]); i++) {
+        g_vim[g_nvim++] = (KeyBind){VIM[i].mods, VIM[i].key, 0, 0, VIM[i].act};
+        bind_set(VIM[i].mods, VIM[i].key, 0, 0, VIM[i].act);
+    }
+    for (int i = 0; i < NVIM_PAIRS && g_nvim < (int)(sizeof g_vim / sizeof g_vim[0]); i++) {
+        g_vim[g_nvim++] = (KeyBind){VIM_PAIRS[i].mods, VIM_PAIRS[i].key,
+                                    VIM_PAIRS[i].mods2, VIM_PAIRS[i].key2,
+                                    VIM_PAIRS[i].act};
+        bind_set(VIM_PAIRS[i].mods, VIM_PAIRS[i].key,
+                 VIM_PAIRS[i].mods2, VIM_PAIRS[i].key2, VIM_PAIRS[i].act);
+    }
+}
+
 int config_load(App *a) {
     g_nbinds = 0;
+    g_nvim = 0;
     for (int i = 0; i < NDEFAULTS; i++)
-        bind_set(DEFAULTS[i].mods, DEFAULTS[i].key, DEFAULTS[i].act);
+        bind_set(DEFAULTS[i].mods, DEFAULTS[i].key, 0, 0, DEFAULTS[i].act);
 
     char dir[512], path[600];
     config_dir(dir, sizeof dir);
@@ -569,5 +794,12 @@ int config_load(App *a) {
         write_config(path, a);
         return 0;               // just written, so it says what is already loaded
     }
-    return read_config(path, a);
+    // Settings first, because one of them decides what the keys are laid on
+    // top of; then the layer; then the file's own keys, which win, since a key
+    // named in a file is a key someone meant.
+    int bad = read_config(path, a, false);
+    if (a->vim) load_vim();
+    bad += read_config(path, a, true);
+    warn_shadowed(path);
+    return bad;
 }

@@ -58,6 +58,7 @@ web --login
 | `^R` | reload |
 | `^Y` | copy the page selection, or the address if nothing is selected |
 | `^E` | open this page in the desktop browser |
+| `^F` | find in page, then `f3` / `shift+f3` |
 | `^G` | devtools port, frame size, write time, throughput |
 | `^D` | start or stop a trace into `/tmp/web_input.log` |
 | `^S` | hide or show the status line |
@@ -74,29 +75,41 @@ web --login
 | mouse | click, drag to select, wheel to scroll |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
 
-While reading:
+While reading. Letters this table does not name are typed into the page;
+`vim = yes` gives most of them to the window instead, below.
 
 | Key | Action |
 |---|---|
 | `↓` / `↑` | down / up a line |
 | `←` / `→` | passed to the page |
+| `pgdn` / `pgup` | a screen (`space` too) |
 | `backspace` / `shift+backspace` | back / forward |
-| `j` / `k` | down / up |
-| `h` / `l` | left / right, for a page wider than its given width |
-| `d` / `u` | half a screen |
-| `space` / `b` | a screen |
-| `gg` / `G` | top / bottom |
 | `[` / `]` | zoom out / in; inline, scales the window from both edges |
 | `shift`+`↑↓←→` | drag one window edge (`U`/`D`/`L`/`R` too) |
 | `w` / `W` | widen / narrow the width the page is told it has |
 | `s` | frame size: auto, 100%, 75%, 50% |
-| `y` | copy the address to the clipboard |
-| `/` | find in page, then `n` / `N` |
+| `f` / `F` | label the links, then type a label: follow it / open it in a tab |
 | `P` | picking: click the page for a CSS selector, into the console |
 | `i` | hand the keyboard to the page |
 | `:` | open the console |
-| `?` | key list; `j` / `k` to scroll it |
+| `?` | key list; `↓` / `↑` to scroll it |
 | `esc` | take the keyboard back |
+
+## Links without a mouse
+
+`f` puts a label on everything clickable in view. Type a label to click it,
+`F` to open it in a new tab, `esc` to put the labels away, `backspace` to undo
+a character. Labels are `a` `s` `d` `f` `g` `h` `j` `k` `l`, short ones first
+and from the top of the page down; a label that can only be one thing fires
+without waiting. Every key goes to the labels while they are up, so nothing
+half-typed reaches the page.
+
+Links, buttons, fields, and anything carrying `role`, `onclick` or `tabindex`
+are labelled, in the page and in same-origin frames and open shadow roots.
+Something covered by a banner or a modal is not, since the click would land on
+the cover. What gets sent is a real mouse click at the label's own position:
+hover, focus, and the popups a click is allowed to open all behave as if the
+mouse had done it.
 
 ## Config
 
@@ -104,6 +117,7 @@ While reading:
 
 | Setting | Default | Values | Description |
 |---|---|---|---|
+| `vim` | `no` | yes/no | the vim key layer, under whatever keys this file names |
 | `pause-on-blur` | `yes` | yes/no | stop drawing while the terminal is not focused |
 | `status-line` | `yes` | yes/no | show the status line under the page |
 | `clear-on-exit` | `yes` | yes/no | erase the window on exit instead of leaving it |
@@ -131,6 +145,8 @@ shift-alt-right  = tab-next
 ^y               = copy
 y                = copy-url
 f5               = reload
+gg               = top
+g i              = focus-input
 ```
 
 Keys are `ctrl` `alt` `shift` `cmd` joined by `+` or `-`, then a character or
@@ -138,6 +154,47 @@ one of `left` `right` `up` `down` `space` `esc` `enter` `tab` `backspace`
 `delete` `home` `end` `pgup` `pgdn` `f1`–`f12`. `^y` is `ctrl+y`. Action names
 are the ones in the generated file; `none` unbinds; deleting a line restores
 its default. A key without `ctrl`, `alt` or `cmd` acts only while reading.
+
+Two keys pressed one after the other are a binding too, written as a pair of
+characters (`gg`, `yf`) or with a space between them where either needs a name
+or a modifier (`g i`, `^X f`). The first key of a pair shows on the status line
+while it waits. A key bound on its own happens at once, so the pairs starting
+with it are never reached: bind `y = none` before binding `yy`.
+
+## Vim keys
+
+`vim = yes`. Without it no letter key moves the page — `j` types a `j` — and
+the window is driven by the arrows, the chords, and the few keys above that are
+this program's own. With it, the vi vocabulary is the window's:
+
+| Key | Action |
+|---|---|
+| `j` / `k` | down / up |
+| `h` / `l` | left / right, for a page wider than its given width |
+| `d` / `u` | half a screen |
+| `b` | a screen back (`space` forward, as always) |
+| `gg` / `G` | top / bottom |
+| `/` | find in page, then `n` / `N` |
+| `H` / `L` | back / forward |
+| `o` / `O` / `:` | address bar, with the current address / blank / blank |
+| `r` / `R` | reload / reload ignoring the cache |
+| `gi` | focus the first text field |
+| `yy` / `yf` | copy the address / copy a link's address |
+| `^D` / `^U` | half a screen |
+| `^F` / `^B` | a screen |
+| `ZZ` | quit |
+
+Six keys change meaning while it is on: `L` and `R` stop sizing the window
+(`shift`+`←`/`→` still do), `:` stops opening the console (`^X` still does),
+`^F` stops finding (`/` does), `^D` stops tracing, and `^B` stops going to the
+previous tab (`shift+alt+←` still does).
+
+The layer sits under `web.conf`, so any key the file names keeps what the file
+gave it, and the status line says how many it kept. The generated file writes
+the defaults as comments for that reason — a live line there would take the key
+back from this layer. A file written by an earlier version has them live
+instead; comment the key block out to follow the defaults again. `web` says so
+on stderr when a line hides a pair, as an old `g = top` hides `gg`.
 
 ## Options
 

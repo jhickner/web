@@ -21,23 +21,24 @@
 typedef struct {
     const char *key;
     Act         act, act2;
-    bool        twice;      // pressed twice, the way gg is
     const char *what;
 } Bind;
 
 static const Bind BINDS[] = {
     {.what = "moving"},
+    {.act = ACT_LINE_DOWN,   .act2 = ACT_LINE_UP,      .what = "a line at a time"},
     {.act = ACT_SCROLL_DOWN, .act2 = ACT_SCROLL_UP,    .what = "down / up"},
     {.act = ACT_HALF_DOWN,   .act2 = ACT_HALF_UP,      .what = "half a screen"},
     {.act = ACT_PAGE_DOWN,   .act2 = ACT_PAGE_UP,      .what = "a screen"},
-    {.act = ACT_TOP, .twice = true, .act2 = ACT_BOTTOM, .what = "top / bottom"},
+    {.act = ACT_TOP,         .act2 = ACT_BOTTOM,       .what = "top / bottom"},
     {.act = ACT_SCROLL_LEFT, .act2 = ACT_SCROLL_RIGHT, .what = "left / right"},
-    {.act = ACT_LINE_DOWN,   .act2 = ACT_LINE_UP,      .what = "a line at a time"},
     {0},
     {.what = "the page"},
     {.act = ACT_ADDRESS,                          .what = "address bar"},
+    {.act = ACT_ADDRESS_BLANK,                    .what = "a blank one"},
     {.act = ACT_BACK,     .act2 = ACT_FORWARD,    .what = "back / forward"},
     {.act = ACT_RELOAD,                           .what = "reload"},
+    {.act = ACT_RELOAD_HARD,                      .what = "reload, ignoring the cache"},
     {.act = ACT_COPY,                             .what = "copy selection or address"},
     {.act = ACT_COPY_URL,                         .what = "copy the address"},
     {.act = ACT_EXTERNAL,                         .what = "open in the desktop browser"},
@@ -45,7 +46,13 @@ static const Bind BINDS[] = {
     {.act = ACT_FIND_NEXT, .act2 = ACT_FIND_PREV, .what = "next match / the one before"},
     {.act = ACT_INSERT,                           .what = "give the keyboard to the page"},
     {.act = ACT_INSERT_OFF,                       .what = "take it back"},
+    {.act = ACT_FOCUS_INPUT,                      .what = "into the first text field"},
     {.act = ACT_PICK,                             .what = "pick a CSS selector"},
+    {0},
+    {.what = "the links"},
+    {.act = ACT_HINT,                             .what = "label them, then type one"},
+    {.act = ACT_HINT_TAB,                         .what = "one of them in a new tab"},
+    {.act = ACT_HINT_COPY,                        .what = "copy one's address"},
     {0},
     {.what = "tabs"},
     {.act = ACT_TAB_NEW,  .act2 = ACT_TAB_CLOSE, .what = "new / close"},
@@ -73,7 +80,18 @@ static const Bind BINDS[] = {
     {.what = "the settings, and every key"},
     {.key = "", .what = "~/.config/web/web.conf"},
 };
-#define LINES ((int)(sizeof BINDS / sizeof BINDS[0]))
+#define NBINDS ((int)(sizeof BINDS / sizeof BINDS[0]))
+
+// The rows that have a key to show, which is not all of them: an action left
+// unbound - and with `vim = no` that is most of the vi vocabulary - would draw
+// a row whose key column is a dash, and a screen of dashes says nothing about
+// what this keyboard actually does. A heading whose whole section went that way
+// goes with it, and the blank line before each surviving heading is put back
+// here rather than written down in the table.
+static const Bind *g_list[NBINDS + 1];
+static int         g_nlist;
+
+#define LINES g_nlist
 
 typedef struct {
     int x, y, w, h;        // the box, in 1-based cells
@@ -91,10 +109,6 @@ static const char *entry_key(const Bind *e, char *buf, size_t cap) {
     if (!e->act) return NULL;
     char one[48], two[48];
     keys_text(e->act, one, sizeof one);
-    if (e->twice) {
-        size_t n = strlen(one);
-        if (2 * n < sizeof one) memcpy(one + n, one, n + 1);
-    }
     if (e->act2) {
         keys_text(e->act2, two, sizeof two);
         snprintf(buf, cap, "%s / %s", one, two);
@@ -105,7 +119,34 @@ static const char *entry_key(const Bind *e, char *buf, size_t cap) {
 }
 
 static bool is_heading(int i) {
-    return !BINDS[i].key && !BINDS[i].act && BINDS[i].what;
+    return !g_list[i]->key && !g_list[i]->act && g_list[i]->what;
+}
+
+// Whether anything is bound to the row at all. A row naming two actions earns
+// its place if either of them has a key.
+static bool row_live(const Bind *e) {
+    char buf[48];
+    if (e->key || !e->act) return true;          // a heading, a blank, or a note
+    if (keys_text(e->act, buf, sizeof buf)) return true;
+    return e->act2 && keys_text(e->act2, buf, sizeof buf);
+}
+
+static void build_list(void) {
+    static const Bind BLANK = {0};
+    const Bind *head = NULL;
+    g_nlist = 0;
+    for (int i = 0; i < NBINDS; i++) {
+        const Bind *e = &BINDS[i];
+        if (!e->key && !e->act && e->what) { head = e; continue; }   // a heading
+        if (!e->key && !e->act && !e->what) continue;                // a blank
+        if (!row_live(e)) continue;
+        if (head) {
+            if (g_nlist) g_list[g_nlist++] = &BLANK;
+            g_list[g_nlist++] = head;
+            head = NULL;
+        }
+        g_list[g_nlist++] = e;
+    }
 }
 
 // Whether breaking the list into columns `rows` tall lands the breaks between
@@ -124,11 +165,12 @@ static bool tidy(int rows, int n) {
 
 static void measure(void) {
     if (g_keyw) return;
+    build_list();
     for (int i = 0; i < LINES; i++) {
         char buf[104];
-        const char *key = entry_key(&BINDS[i], buf, sizeof buf);
+        const char *key = entry_key(g_list[i], buf, sizeof buf);
         int k = key ? (int)strlen(key) : 0;
-        int d = BINDS[i].what ? (int)strlen(BINDS[i].what) : 0;
+        int d = g_list[i]->what ? (int)strlen(g_list[i]->what) : 0;
         if (k > g_keyw) g_keyw = k;
         if (d > g_descw) g_descw = d;
     }
@@ -240,14 +282,23 @@ void help_paint(App *a) {
         if (r == 0) {
             border(&b, "\xe2\x94\x8c", "\xe2\x94\x90", " keys ", s.w);
         } else if (r == s.h - 1) {
-            border(&b, "\xe2\x94\x94", "\xe2\x94\x98",
-                   s.max_scroll > 0 ? " j / k for more " : NULL, s.w);
+            // Whichever keys actually scroll it, since the vi ones are only
+            // there with `vim = yes` and naming them otherwise is a lie.
+            char more[64] = "", down[48], up[48];
+            if (s.max_scroll > 0) {
+                if (!keys_text(ACT_SCROLL_DOWN, down, sizeof down))
+                    keys_text(ACT_LINE_DOWN, down, sizeof down);
+                if (!keys_text(ACT_SCROLL_UP, up, sizeof up))
+                    keys_text(ACT_LINE_UP, up, sizeof up);
+                snprintf(more, sizeof more, " %s / %s for more ", down, up);
+            }
+            border(&b, "\xe2\x94\x94", "\xe2\x94\x98", more[0] ? more : NULL, s.w);
         } else {
             buf_addf(&b, "\x1b[2m\xe2\x94\x82\x1b[0m ");
             for (int c = 0; c < s.cols; c++) {
                 if (c) pad(&b, GAP);
                 int i = a->help_scroll + c * s.rows + (r - 1);
-                put_entry(&b, i < LINES ? &BINDS[i] : NULL, s.keyw, s.colw);
+                put_entry(&b, i < LINES ? g_list[i] : NULL, s.keyw, s.colw);
             }
             buf_addf(&b, " \x1b[2m\xe2\x94\x82\x1b[0m");
         }

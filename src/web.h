@@ -185,10 +185,12 @@ typedef enum {
     ACT_SCROLL_DOWN, ACT_SCROLL_UP, ACT_SCROLL_LEFT, ACT_SCROLL_RIGHT,
     ACT_LINE_DOWN, ACT_LINE_UP, ACT_HALF_DOWN, ACT_HALF_UP,
     ACT_PAGE_DOWN, ACT_PAGE_UP, ACT_TOP, ACT_BOTTOM,
-    ACT_ADDRESS, ACT_BACK, ACT_FORWARD, ACT_RELOAD,
+    ACT_ADDRESS, ACT_ADDRESS_BLANK, ACT_BACK, ACT_FORWARD,
+    ACT_RELOAD, ACT_RELOAD_HARD,
     ACT_COPY, ACT_COPY_URL, ACT_EXTERNAL,
     ACT_FIND, ACT_FIND_NEXT, ACT_FIND_PREV,
-    ACT_INSERT, ACT_INSERT_OFF, ACT_PICK,
+    ACT_HINT, ACT_HINT_TAB, ACT_HINT_COPY,
+    ACT_INSERT, ACT_INSERT_OFF, ACT_FOCUS_INPUT, ACT_PICK,
     ACT_TAB_NEW, ACT_TAB_CLOSE, ACT_TAB_NEXT, ACT_TAB_PREV,
     ACT_TAB_1, ACT_TAB_2, ACT_TAB_3, ACT_TAB_4, ACT_TAB_5,
     ACT_TAB_6, ACT_TAB_7, ACT_TAB_8, ACT_TAB_9,
@@ -204,6 +206,16 @@ typedef enum {
 
 // What this key means now, or ACT_NONE for one that means nothing.
 Act  keys_lookup(int mods, int key);
+
+// The same question, asked by a keyboard that may be halfway through a pair.
+// `pkey` is the key already waiting, or 0 when none is; a pair whose two keys
+// are these is what the answer comes from. *prefix comes back true when this
+// key begins a pair instead of being one: the action is then ACT_NONE and
+// nothing has happened yet, so the caller holds the key and asks again with
+// the next one. A key that is bound on its own is that binding at once, and
+// the pairs it could have started are unreachable - which is why the file that
+// adds `y f` unbinds `y` first.
+Act  keys_lookup_seq(int pmods, int pkey, int mods, int key, bool *prefix);
 
 // A key that does this, for the help list; false when nothing is bound to it,
 // and `out` is a dash so the list still has something to draw.
@@ -445,7 +457,10 @@ typedef struct {
 
     bool    insert;            // a text field has focus: keys belong to the page
     bool    mouse_down;        // a button went down on the page and is still held
-    bool    pending_g;         // first half of gg
+    bool    vim;               // the vim layer, under the keys web.conf names
+    int     vim_shadowed;      // and how many of it that file took back
+    int     pend_mods;         // the first key of a pair, still waiting for its
+    int     pend_key;          // second; key 0 when nothing is waiting
     int     prompt;            // 0 none, 1 address, 2 find
     char    find[256];         // last search, for n and N
 
@@ -541,6 +556,15 @@ typedef struct {
     int      help_scroll;         // lines past the top, when it does not all fit
     unsigned help_grid;           // the grid count it was last drawn over
     Buf      help_buf, help_last;
+
+    // Link labels, `f`. They are drawn by the page, in the picture rather than
+    // over it, so there is nothing here but what the keyboard needs: while they
+    // are up every key belongs to them.
+    bool     hint_on;
+    int      hint_kind;           // 0 follow, 1 new tab, 2 copy the address
+    int      hint_n;              // labels the page reported putting up
+    char     hint_typed[16];      // what has been typed at them, for the line
+    double   hint_deadline;       // a page that never answers gives them back
 } App;
 
 // ----------------------------------------------------------------- config
@@ -563,6 +587,9 @@ int  app_req_take(App *a, int id);
 int  app_cdp(App *a, const char *method, const char *fmt, ...);
 
 void notify(App *a, const char *s);
+
+// Into the terminal's clipboard, by the escape the terminal reads.
+void clipboard_put(const char *text);
 
 // The CDP setup a page needs before it is worth drawing, where the window is
 // now, and the note on disk that says how to reach it. Shared with the tab
@@ -630,6 +657,28 @@ void help_toggle(App *a);            // `?`, and the key that puts it away again
 bool help_key(App *a, Event *ev);    // true when the list consumed it
 void help_paint(App *a);
 void help_free(App *a);
+
+// ---------------------------------------------------------------- hints
+
+// Keyboard-only clicking: a label on everything in view worth clicking, and
+// the label typed to click it. The labels are the page's own elements, put
+// there from the world in web.h's WEB_WORLD, so they arrive in the picture
+// like the rest of the page and cost nothing to draw.
+
+// Registered with the rest of the session's bindings and scripts; `fresh` is
+// tab_session_new, since the script sticks to the page and the binding does not.
+void hint_install(App *a, bool fresh);
+
+void hint_show(App *a, int kind);     // 0 follow, 1 new tab, 2 copy the address
+void hint_cancel(App *a);             // labels away, mode over; safe when off
+bool hint_key(App *a, Event *ev);     // true when the labels consumed it
+
+// The page answering: a count when the labels are up, or the label that was
+// typed and where it landed. Called for every `__webhint` binding message.
+void hint_reply(App *a, char *payload);
+
+// Once round the main loop, for the page that never answered at all.
+void hint_tick(App *a);
 
 // ---------------------------------------------------------------- tabs
 

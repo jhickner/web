@@ -155,7 +155,7 @@ static uint64_t fnv1a(const char *p, size_t n) {
 
 // macOS has pbcopy; the Linux tools are checked in turn so the same build
 // works there without a configuration switch.
-static void clipboard_put(const char *text) {
+void clipboard_put(const char *text) {
     static const char *cmds[] = {"pbcopy", "wl-copy", "xclip -selection clipboard",
                                  "xsel --clipboard --input", NULL};
     for (int i = 0; cmds[i]; i++) {
@@ -364,6 +364,11 @@ static void still_request(App *a) {
 void relayout(App *a) {
     Term *t = &a->term;
     term_size(t);
+
+    // Every label is pinned to a viewport that is about to be a different size,
+    // so all of them are about to be in the wrong place. Cheap when there are
+    // none, which is nearly always.
+    hint_cancel(a);
 
     if (!a->has_tty && a->shot_path) {
         a->css_w = SHOT_CSS_W;
@@ -1142,6 +1147,15 @@ static void draw_status(App *a) {
 
         if (a->insert)
             buf_addf(&b, "\x1b[1;33m INSERT\x1b[0m ");
+        else if (a->hint_on)
+            buf_addf(&b, "\x1b[1;36m LINKS %s\x1b[0m ", a->hint_typed);
+        else if (a->pend_key) {
+            // Half a pair is state with nothing to show for it otherwise: the
+            // next key means something different and the keyboard looks stuck.
+            char spec[48];
+            key_text(a->pend_mods, a->pend_key, spec, sizeof spec);
+            buf_addf(&b, "\x1b[1;36m %s-\x1b[0m ", spec);
+        }
         if (a->msg_until > now_sec())
             buf_addf(&b, " \x1b[1m%.*s\x1b[0m", avail, a->msg);
         else
@@ -2012,11 +2026,10 @@ static bool do_action(App *a, Event *ev, Act act) {
     case ACT_HALF_UP:      scroll_by(a, -(a->css_h / 2)); return true;
     case ACT_PAGE_DOWN:    scroll_by(a, (int)(a->css_h * 0.9));  return true;
     case ACT_PAGE_UP:      scroll_by(a, -(int)(a->css_h * 0.9)); return true;
-    // Twice, the way vi asks for it. The first press is remembered by the
-    // caller, which clears it again the moment any other action goes through.
+    // Twice, the way vi asks for it: `gg` is a pair in the key table, so the
+    // first `g` is the keyboard waiting rather than anything happening here.
     case ACT_TOP:
-        if (a->pending_g) scroll_page_end(a, false);
-        else              a->pending_g = true;
+        scroll_page_end(a, false);
         return true;
     case ACT_BOTTOM:
         scroll_page_end(a, true);
@@ -2030,6 +2043,14 @@ static bool do_action(App *a, Event *ev, Act act) {
         snprintf(a->edit, sizeof a->edit, "%s", a->url);
         a->edit_len = strlen(a->edit);
         return true;
+    // The address bar with nothing in it, for going somewhere else rather than
+    // editing where you are.
+    case ACT_ADDRESS_BLANK:
+        a->editing = true;
+        a->prompt = 1;
+        a->edit[0] = 0;
+        a->edit_len = 0;
+        return true;
     case ACT_FIND:
         a->editing = true;
         a->prompt = 2;
@@ -2037,12 +2058,20 @@ static bool do_action(App *a, Event *ev, Act act) {
         return true;
     case ACT_FIND_NEXT: find_next(a, false); return true;
     case ACT_FIND_PREV: find_next(a, true);  return true;
+    case ACT_HINT:      hint_show(a, 0); return true;
+    case ACT_HINT_TAB:  hint_show(a, 1); return true;
+    case ACT_HINT_COPY: hint_show(a, 2); return true;
     case ACT_BACK:    nav_history(a, -1); return true;
     case ACT_FORWARD: nav_history(a, +1); return true;
     case ACT_RELOAD:
         app_cdp(a, "Page.reload", "\"ignoreCache\":false");
         a->loading = true;
         notify(a, "reloading");
+        return true;
+    case ACT_RELOAD_HARD:
+        app_cdp(a, "Page.reload", "\"ignoreCache\":true");
+        a->loading = true;
+        notify(a, "reloading, cache ignored");
         return true;
     case ACT_COPY: copy_selection(a); return true;
     case ACT_COPY_URL:
@@ -2064,6 +2093,20 @@ static bool do_action(App *a, Event *ev, Act act) {
         // Drop focus so the page stops claiming the keyboard.
         run_js(a, "document.activeElement&&document.activeElement.blur()");
         a->insert = false;
+        return true;
+    // The first field worth typing in, focused from here. Nothing sets insert
+    // mode: focusing one is what the page's own watcher reports, and the answer
+    // comes back the same way it does when a click lands on one.
+    case ACT_FOCUS_INPUT:
+        run_js(a,
+            "(function(){var l=document.querySelectorAll("
+            "'input:not([type=hidden]):not([type=checkbox]):not([type=radio])"
+            ":not([type=submit]):not([type=button]):not([type=file]),"
+            "textarea,[contenteditable]');"
+            "for(var i=0;i<l.length;i++){var e=l[i],r=e.getBoundingClientRect();"
+            "if(e.disabled||e.readOnly||r.width<2||r.height<2)continue;"
+            "if(r.bottom<0||r.top>innerHeight)continue;"
+            "e.focus();return;}})()");
         return true;
 
     // --------------------------------------------------------------- tabs
@@ -2161,6 +2204,9 @@ static void handle_key(App *a, Event *ev) {
     // The key list is over the page, so nothing under it can be reached while
     // it is up: the next key scrolls it or puts it away.
     if (help_key(a, ev)) return;
+    // Labels on the links take every key they can use, so a half-typed label
+    // can never fall through into the page's own search box.
+    if (hint_key(a, ev)) return;
     // --step parks the runner after every line, and this is the key it waits
     // for. Swallowed rather than acted on: the point of it is to let the next
     // line go, and a script being walked through is not one being typed over.
@@ -2201,15 +2247,29 @@ static void handle_key(App *a, Event *ev) {
         return;
     }
 
-    Act act = keys_lookup(ev->mods, ev->key);
+    // A binding may be two keys long, so the key already waiting is part of the
+    // question. Whatever the answer is, it has been used up by asking: either
+    // the pair is one and has just happened, or the first key is dropped and
+    // this one stands on its own.
+    bool prefix = false;
+    Act act = keys_lookup_seq(a->pend_mods, a->pend_key, ev->mods, ev->key, &prefix);
+    a->pend_mods = a->pend_key = 0;
+
     // Without ctrl, alt or cmd, a key is only ours while reading: a browser you
     // cannot type "j" into is not a browser. Leaving insert mode is the one
     // thing still listened for from inside it, or there is no way back out.
     if (!(ev->mods & (MOD_CTRL | MOD_ALT | MOD_SUPER)) && a->insert &&
-        act != ACT_INSERT_OFF)
+        act != ACT_INSERT_OFF) {
         act = ACT_NONE;
-    // `gg` is the only pair there is, so anything else breaks it up.
-    if (act != ACT_TOP) a->pending_g = false;
+        prefix = false;                 // and the page gets its `g` as a `g`
+    }
+    // The start of something longer: nothing has happened yet, and nothing is
+    // handed to the page either, since the next key is what says what this was.
+    if (prefix) {
+        a->pend_mods = ev->mods;
+        a->pend_key = ev->key;
+        return;
+    }
     if (do_action(a, ev, act)) return;
 
     // An unclaimed cmd chord is the terminal's business, and a page handed one
@@ -2415,7 +2475,22 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         return;
     }
 
-    if (strstr(msg, "Page.frameStartedLoading")) { a->loading = true; return; }
+    if (strstr(msg, "Runtime.bindingCalled") && strstr(msg, "__webhint")) {
+        size_t n;
+        const char *p = json_str(msg, "payload", &n);
+        char pl[2048];
+        json_unescape(pl, sizeof pl, p ? p : "", p ? n : 0);
+        hint_reply(a, pl);
+        return;
+    }
+
+    // The document the labels were drawn into is on its way out, and with it
+    // everything they were pointing at.
+    if (strstr(msg, "Page.frameStartedLoading")) {
+        a->loading = true;
+        hint_cancel(a);
+        return;
+    }
 
     // Either of these means the page has arrived, and neither can be relied on
     // alone: a cold browser can finish loading before Page.enable takes effect,
@@ -2809,6 +2884,10 @@ void session_init(App *a) {
         // `runImmediately` is what covers the document already on screen: the
         // registration alone would not be run until the next one.
         bool fresh = tab_session_new(a);
+        // Its own binding first, for the same reason as the two above: the
+        // world is built by the first script to land in it, and a binding
+        // registered after that is not in the world already standing.
+        hint_install(a, fresh);
         if (fresh)
             app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
                      "\"source\":\"%s\",\"worldName\":\"%s\","
@@ -2920,6 +2999,9 @@ int app_attach(App *a, int port, char *msg, size_t cap) {
     a->loading = false;
     a->insert = false;
     a->mouse_down = false;
+    a->hint_on = false;        // whatever they were drawn on is not here now
+    a->hint_deadline = 0;
+    a->pend_key = 0;
     a->fit_w = 0;
     a->last_hash = 0;
     a->kitty.grid_dirty = true;
@@ -3299,6 +3381,15 @@ int main(int argc, char **argv) {
         a.shot_deadline = now_sec() + SHOT_LOAD_MAX;
     }
     relayout(&a);
+    // The vim map is laid under web.conf, so a file that already names one of
+    // its keys keeps that key - which from the outside looks like `vim = yes`
+    // having done nothing. Said once, here, where it can still be read.
+    if (a.vim && a.vim_shadowed) {
+        char m[96];
+        snprintf(m, sizeof m, "vim: %d key%s kept by web.conf", a.vim_shadowed,
+                 a.vim_shadowed == 1 ? "" : "s");
+        notify(&a, m);
+    }
     draw_panes(&a);
 
     // Started once the page is on its way and the window has a shape, so a
@@ -3389,7 +3480,7 @@ int main(int argc, char **argv) {
         // which is the one thing poll cannot be woken by.
         bool draining = a.script.drain_exit && !script_busy(&a);
         int wait = (a.term.in.len || a.msg_until > now_sec() ||
-                    a.expect_frame > 0 || draining) ? 20 : -1;
+                    a.expect_frame > 0 || a.hint_deadline > 0 || draining) ? 20 : -1;
         int sw = script_wait_ms(&a);
         if (sw >= 0 && (wait < 0 || sw < wait)) wait = sw;
         // Everything a pending shot waits for arrives as an event except the
@@ -3468,6 +3559,10 @@ int main(int argc, char **argv) {
         // never coming back. Restarting the screencast is the part that brings
         // a frame back when there is one to bring, and it is much the cheaper
         // of the two.
+        // Labels asked for and never reported: the keyboard comes back rather
+        // than waiting on a page that is not going to answer.
+        hint_tick(&a);
+
         double due = 3.0 * (1 << (a.unwedge_run < 3 ? a.unwedge_run : 3));
         if (a.expect_frame > 0 && !a.paused && now_sec() > a.expect_frame &&
             now_sec() - a.last_unwedge > due) {
