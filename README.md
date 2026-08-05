@@ -76,7 +76,7 @@ web --login
 | tab bar | click to switch, middle-click to close, wheel to cycle |
 
 While reading. Letters this table does not name are typed into the page;
-`vim = yes` gives most of them to the window instead, below.
+`vim = yes` gives most of them to the window instead — see [Vim keys](#vim-keys).
 
 | Key | Action |
 |---|---|
@@ -94,6 +94,45 @@ While reading. Letters this table does not name are typed into the page;
 | `:` | open the console |
 | `?` | key list; `↓` / `↑` to scroll it |
 | `esc` | take the keyboard back |
+
+## Vim keys
+
+Set `vim = yes` in `~/.config/web/web.conf`. Without it no letter moves the
+page — `j` types a `j` — and the window is driven by the arrows, the chords,
+and the few keys above that are this program's own rather than vi's. With it,
+the vi vocabulary is the window's:
+
+| Key | Action |
+|---|---|
+| `j` / `k` | down / up |
+| `h` / `l` | left / right, for a page wider than its given width |
+| `d` / `u` | half a screen (`^D` / `^U` too) |
+| `b` | a screen back; `space` forward, and `^F` / `^B` for both |
+| `gg` / `G` | top / bottom |
+| `/` | find in page, then `n` / `N` |
+| `H` / `L` | back / forward |
+| `o` / `O` | address bar, with the current address / blank |
+| `:` | address bar, blank |
+| `r` / `R` | reload / reload ignoring the cache |
+| `gi` | focus the first text field |
+| `yy` | copy the address |
+| `yf` | label the links, then type a label to copy its address |
+| `ZZ` | quit |
+
+`f` and `F` label the links in either mode, and everything else in the reading
+table still applies: `[` `]` `w` `W` `s` for the window, `P`, `i`, `esc`, `?`.
+
+Six keys the plain map uses change meaning while this is on: `L` and `R` stop
+sizing the window (`shift`+`←`/`→` still do), `:` stops opening the console
+(`^X` still does), `^F` stops finding (`/` does), `^D` stops tracing, and `^B`
+stops going to the previous tab (`shift+alt+←` still does).
+
+The layer sits under `web.conf`, so any key the file names keeps what the file
+gave it, and the status line says how many it kept. The generated file writes
+the defaults as comments for that reason — a live line there would take the key
+back from this layer. A file written by an earlier version has them live
+instead; comment the key block out to follow the defaults again. `web` says so
+on stderr when a line hides a pair, as an old `g = top` hides `gg`.
 
 ## Links without a mouse
 
@@ -160,41 +199,6 @@ characters (`gg`, `yf`) or with a space between them where either needs a name
 or a modifier (`g i`, `^X f`). The first key of a pair shows on the status line
 while it waits. A key bound on its own happens at once, so the pairs starting
 with it are never reached: bind `y = none` before binding `yy`.
-
-## Vim keys
-
-`vim = yes`. Without it no letter key moves the page — `j` types a `j` — and
-the window is driven by the arrows, the chords, and the few keys above that are
-this program's own. With it, the vi vocabulary is the window's:
-
-| Key | Action |
-|---|---|
-| `j` / `k` | down / up |
-| `h` / `l` | left / right, for a page wider than its given width |
-| `d` / `u` | half a screen |
-| `b` | a screen back (`space` forward, as always) |
-| `gg` / `G` | top / bottom |
-| `/` | find in page, then `n` / `N` |
-| `H` / `L` | back / forward |
-| `o` / `O` / `:` | address bar, with the current address / blank / blank |
-| `r` / `R` | reload / reload ignoring the cache |
-| `gi` | focus the first text field |
-| `yy` / `yf` | copy the address / copy a link's address |
-| `^D` / `^U` | half a screen |
-| `^F` / `^B` | a screen |
-| `ZZ` | quit |
-
-Six keys change meaning while it is on: `L` and `R` stop sizing the window
-(`shift`+`←`/`→` still do), `:` stops opening the console (`^X` still does),
-`^F` stops finding (`/` does), `^D` stops tracing, and `^B` stops going to the
-previous tab (`shift+alt+←` still does).
-
-The layer sits under `web.conf`, so any key the file names keeps what the file
-gave it, and the status line says how many it kept. The generated file writes
-the defaults as comments for that reason — a live line there would take the key
-back from this layer. A file written by an earlier version has them live
-instead; comment the key block out to follow the defaults again. `web` says so
-on stderr when a line hides a pair, as an old `g = top` hides `gg`.
 
 ## Options
 
