@@ -1603,6 +1603,26 @@ void run_js(App *a, const char *js) {
     app_cdp(a, "Runtime.evaluate", "\"expression\":\"%s\"", esc);
 }
 
+// The element a scroll has to move, given a point to look under: the nearest
+// scroller above it, and the document's own when there is none. Asking the
+// document alone is not enough - an app that scrolls a pane inside itself
+// leaves document.scrollingElement the size of the window, and so does a page
+// Chrome puts in quirks mode, where scrollingElement is the body while the
+// scrolling happens on the html element. Either way the document reports
+// nothing to scroll and every call aimed at it does nothing at all.
+#define SCROLLER_FN \
+    "function hunt(x,y){var e=document.elementFromPoint(x,y);" \
+    "while(e){var o=getComputedStyle(e).overflowY;" \
+    "if((o==='auto'||o==='scroll')&&e.scrollHeight>e.clientHeight+1)break;" \
+    "e=e.parentElement;}return e;}" \
+    "function doc(){return document.scrollingElement||document.documentElement;}" \
+    "function moves(e){return e&&e.scrollHeight>e.clientHeight+1;}" \
+    /* A step moves what is under the pointer, so a pane scrolls where it is */ \
+    "function sc(x,y){return hunt(x,y)||doc();}" \
+    /* An end means the page, so the document comes first and the pane only  */ \
+    /* stands in for it when the document is not what scrolls               */ \
+    "function pg(x,y){var d=doc();return moves(d)?d:(hunt(x,y)||d);}"
+
 // One jump, landed on immediately. The scroller under the point is the one that
 // moves, so panes and inner scrollers behave the way they look; the target is
 // clamped to the ends first, so a step at the top or bottom of a page simply
@@ -1621,14 +1641,10 @@ void scroll_at(App *a, int x, int y, int dy) {
         return;
     }
 
-    char js[768];
+    char js[1024];
     snprintf(js, sizeof js,
-             "(function(x,y,d){"
-             "var e=document.elementFromPoint(x,y);"
-             "while(e){var o=getComputedStyle(e).overflowY;"
-             "if((o==='auto'||o==='scroll')&&e.scrollHeight>e.clientHeight+1)break;"
-             "e=e.parentElement;}"
-             "var t=e||document.scrollingElement||document.documentElement;"
+             "(function(x,y,d){" SCROLLER_FN
+             "var t=sc(x,y);"
              "var m=t.scrollHeight-t.clientHeight,v=t.scrollTop+d;"
              "if(v<0)v=0;if(v>m)v=m;"
              // 'instant' and not the scrollTop setter: the setter obeys a page
@@ -1685,11 +1701,20 @@ void scroll_page_end(App *a, bool bottom) {
                  bottom ? "End" : "Home", NULL, 0);
         return;
     }
-    run_js(a, bottom
-        ? "(function(t){t.scrollTo({top:t.scrollHeight,behavior:'instant'});})"
-          "(document.scrollingElement||document.documentElement)"
-        : "(function(t){t.scrollTo({top:0,behavior:'instant'});})"
-          "(document.scrollingElement||document.documentElement)");
+    // Aimed at the middle of the view, as a step is, so that a page which
+    // scrolls something other than its own document - an app with the article
+    // in a pane, a document Chrome reads as quirks mode - ends up where `j`
+    // and `k` have been moving all along. Asking the document alone left `gg`
+    // and `G` doing nothing at all on those pages.
+    char js[1024];
+    snprintf(js, sizeof js,
+             "(function(x,y,b){" SCROLLER_FN
+             "var t=pg(x,y);"
+             "t.scrollTo({top:b?t.scrollHeight:0,left:t.scrollLeft,"
+             "behavior:'instant'});"
+             "})(%d,%d,%d)",
+             a->css_w / 2, a->css_h / 2, bottom ? 1 : 0);
+    run_js(a, js);
 }
 
 // Through the browser's own list rather than history.back(). A page that keeps
