@@ -1,0 +1,32 @@
+{
+  "name": "@jhickner/web",
+  "version": "0.1.0",
+  "description": "Drive the page a web window is showing, from CDP or Playwright",
+  "type": "module",
+  "license": "MIT",
+  "repository": "github:jhickner/web",
+  "exports": {
+    ".": "./js/cdp.mjs",
+    "./cdp": "./js/cdp.mjs",
+    "./playwright": "./js/playwright.mjs",
+    "./test": "./js/test.mjs"
+  },
+  "files": [
+    "js"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@playwright/test": "^1.62.1",
+    "playwright-core": ">=1.40"
+  },
+  "peerDependenciesMeta": {
+    "@playwright/test": {
+      "optional": true
+    },
+    "playwright-core": {
+      "optional": true
+    }
+  }
+}

@@ -71,6 +71,7 @@ static const struct { const char *name; Act act; const char *section; } ACTS[] =
     {"reload-hard",    ACT_RELOAD_HARD, NULL},
     {"copy",           ACT_COPY, NULL},
     {"copy-url",       ACT_COPY_URL, NULL},
+    {"copy-console",   ACT_COPY_CONSOLE, NULL},
     {"external",       ACT_EXTERNAL, NULL},
     {"find",           ACT_FIND, NULL},
     {"find-next",      ACT_FIND_NEXT, NULL},
@@ -401,6 +402,9 @@ static const KeyDef DEFAULTS[] = {
     {MOD_CTRL, 'n', ACT_TAB_NEXT},
     {MOD_CTRL, 'b', ACT_TAB_PREV},
     {MOD_SUPER, 'c', ACT_COPY},
+    // alt rather than ctrl: the console's own editor uses most of the control
+    // keys, and this one has to work from inside it.
+    {MOD_ALT, 'y', ACT_COPY_CONSOLE},
 
     {MOD_ALT | MOD_SHIFT, KEY_RIGHT, ACT_TAB_NEXT},
     {MOD_ALT | MOD_SHIFT, KEY_LEFT, ACT_TAB_PREV},
@@ -526,7 +530,7 @@ static const KeyPair VIM_PAIRS[] = {
 // key moves them afterwards and the file never hears about it, so the several
 // windows usually up at once each keep their own - what is written here is an
 // opening position, not a record of one.
-typedef enum { S_BOOL, S_BOOL_NOT, S_SCALE, S_ZOOM, S_COUNT } SetKind;
+typedef enum { S_BOOL, S_BOOL_NOT, S_SCALE, S_ZOOM, S_COUNT, S_MS } SetKind;
 
 static const struct {
     const char *name;
@@ -545,6 +549,7 @@ static const struct {
     {"zoom",          S_ZOOM,     offsetof(App, zoom)},
     {"rows",          S_COUNT,    offsetof(App, want_rows)},
     {"cols",          S_COUNT,    offsetof(App, want_cols)},
+    {"slowmo",        S_MS,       offsetof(App, slowmo)},
 };
 #define NSETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))
 
@@ -585,6 +590,14 @@ static bool setting_set(App *a, int i, const char *v) {
         *int_at(a, SETTINGS[i].off) = (int)n;
         return true;
     }
+    // Milliseconds, where none is a number rather than a word: 0 is what a run
+    // going as fast as it can already is.
+    if (SETTINGS[i].kind == S_MS) {
+        long n = strtol(v, &end, 10);
+        if (end == v || *end || n < 0 || n > 60000) return false;
+        *int_at(a, SETTINGS[i].off) = (int)n;
+        return true;
+    }
     bool on;
     if (!parse_bool(v, &on)) return false;
     *bool_at(a, SETTINGS[i].off) = SETTINGS[i].kind == S_BOOL_NOT ? !on : on;
@@ -605,6 +618,10 @@ static void setting_text(const App *a, int i, char *out, size_t cap) {
         int n = *int_at((App *)a, SETTINGS[i].off);
         if (n > 0) snprintf(out, cap, "%d", n);
         else       snprintf(out, cap, "auto");
+        return;
+    }
+    if (SETTINGS[i].kind == S_MS) {
+        snprintf(out, cap, "%d", *int_at((App *)a, SETTINGS[i].off));
         return;
     }
     bool on = *bool_at((App *)a, SETTINGS[i].off);
@@ -834,6 +851,7 @@ static int read_config(const char *path, App *a, bool keys) {
                 if (SETTINGS[s].kind == S_SCALE)      want = "size";
                 else if (SETTINGS[s].kind == S_ZOOM)  want = "magnification";
                 else if (SETTINGS[s].kind == S_COUNT) want = "count";
+                else if (SETTINGS[s].kind == S_MS)    want = "number of milliseconds";
                 fprintf(stderr, "web: %s:%d: `%s` is not a %s for %s\n", path,
                         lineno, name, want, spec);
                 bad++;

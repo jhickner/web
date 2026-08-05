@@ -42,6 +42,7 @@ static const Bind BINDS[] = {
     {.act = ACT_RELOAD_HARD,                      .what = "reload, ignoring the cache"},
     {.act = ACT_COPY,                             .what = "copy selection or address"},
     {.act = ACT_COPY_URL,                         .what = "copy the address"},
+    {.act = ACT_COPY_CONSOLE,                     .what = "copy the console transcript"},
     {.act = ACT_EXTERNAL,                         .what = "open in the desktop browser"},
     {.act = ACT_FIND,                             .what = "find in the page"},
     {.act = ACT_FIND_NEXT, .act2 = ACT_FIND_PREV, .what = "next match / the one before"},

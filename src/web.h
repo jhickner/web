@@ -193,7 +193,7 @@ typedef enum {
     ACT_PAGE_DOWN, ACT_PAGE_UP, ACT_TOP, ACT_BOTTOM,
     ACT_ADDRESS, ACT_ADDRESS_BLANK, ACT_ADDRESS_TAB, ACT_BACK, ACT_FORWARD,
     ACT_RELOAD, ACT_RELOAD_HARD,
-    ACT_COPY, ACT_COPY_URL, ACT_EXTERNAL,
+    ACT_COPY, ACT_COPY_URL, ACT_COPY_CONSOLE, ACT_EXTERNAL,
     ACT_FIND, ACT_FIND_NEXT, ACT_FIND_PREV,
     ACT_HINT, ACT_HINT_TAB, ACT_HINT_COPY, ACT_HINT_ALL,
     ACT_INSERT, ACT_INSERT_OFF, ACT_FOCUS_INPUT, ACT_PICK,
@@ -459,6 +459,8 @@ typedef struct {
 
     bool    pause_on_blur;     // stop drawing while the terminal is not focused
     bool    paused;            // and whether that has happened
+    bool    blurred;           // what the terminal last said, which is not the
+                               // same: a window being driven draws through it
 
     // Cancel the browser's own action for a navigation key the page did not
     // want, so it is never handed back to the window system. The page still
@@ -529,6 +531,7 @@ typedef struct {
     int     exec_fd;           // --exec: the child's output, -1 when none
     pid_t   exec_pid;
     Buf     exec_buf;          // what has arrived of the line being read
+    int     slowmo;            // ms between a driver's actions, so it can be watched
 
     // --screenshot. The picture is the whole point of such a run, so it is
     // what the exit waits for rather than something taken on the way past.
@@ -680,6 +683,7 @@ bool console_key(App *a, Event *ev);  // true when the pane consumed it
 bool console_mouse(App *a, Event *ev);// transcript wheel/click handling
 void console_paint(App *a);
 void console_log(App *a, const char *line);
+int  console_copy(App *a);           // the transcript to the clipboard; lines sent
 void console_history_add(App *a, const char *line);
 
 // ---------------------------------------------------------------- help

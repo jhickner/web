@@ -12,7 +12,7 @@
 // 2; x * 2` answers 4 rather than being a syntax error.
 //
 // There is no command language here any more. Selectors, waiting and real input
-// belong to something that has them already: examples/cdp.mjs over --exec, or
+// belong to something that has them already: js/cdp.mjs over --exec, or
 // Playwright through the same endpoint.
 
 // ------------------------------------------------------------------ output

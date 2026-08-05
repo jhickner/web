@@ -1068,6 +1068,18 @@ static void exec_start(App *a, const char *cmd) {
         // this one is in rather than in the shared profile.
         char pname[64];
         if (chrome_profile_named(pname, sizeof pname)) setenv("WEB_PROFILE", pname, 1);
+        // The console draws text, not escape sequences, and a test runner
+        // colours its output by default. Set rather than forced: a child told
+        // otherwise by the environment it was started from keeps that. NO_COLOR
+        // alone, since a child that sees both says the first is being ignored.
+        setenv("NO_COLOR", "1", 0);
+        // Playwright's connect takes a pause between actions but has no
+        // variable for it, so this is ours, and the option is where it is set.
+        if (a->slowmo > 0) {
+            char ms[24];
+            snprintf(ms, sizeof ms, "%d", a->slowmo);
+            setenv("WEB_SLOWMO", ms, 0);
+        }
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
@@ -2087,38 +2099,18 @@ static const char KEY_CLAIMER[] =
     "var z=p.join(' > ');try{if(document.querySelectorAll(z).length===1)return z}catch(_){}" \
     "e=e.parentElement}return p.join(' > ')}"
 
-// The terminal has said whether anyone is looking. Every frame costs a PNG out
-// of Chrome and a base64 write across the terminal, and both are wasted on a
-// pane that is not on screen - so the screencast stops with the focus and comes
-// back with it. The page itself is left running: timers, sockets and audio
-// carry on, which is the difference between not drawing something and freezing
-// it, and the reason this stops at the picture.
-static void handle_focus(App *a, bool focused) {
-    if (!a->pause_on_blur || focused == !a->paused) return;
-    if (!focused) {
-        // A page just handed in has not been drawn yet, and the blur that says
-        // to stop drawing is half of the same click that asked for it.
-        if (g_handoff_owed > now_sec()) return;
-        a->paused = true;
-        a->expect_frame = 0;        // no frame is coming, and none is owed
-        a->in_motion = false;       // and it is not moving, it is not drawing
-        a->motion_run = 0;
-        still_cancel(a);            // nothing to photograph for nobody to see
-        app_cdp(a, "Page.stopScreencast", "");
-        // Not drawing is the whole of it: the page goes on animating into a
-        // screencast nobody is reading, and stopping that is the saving.
-        //
-        // Emulation.setCPUThrottlingRate is not the other half of this and must
-        // not be added back. Chrome emulates a slower processor rather than
-        // asking for less work: a thread of its own interrupts the renderer's
-        // main thread with a signal, and the handler busy-waits on
-        // mach_absolute_time to burn away the share of the quantum the rate
-        // says it should not have had. Throttling a blurred window that way
-        // spends a whole core doing nothing, answers no javascript and paints
-        // nothing - the opposite of what the name promises, and on this side of
-        // a blur indistinguishable from a page that has hung.
-        return;
-    }
+// Something other than this keyboard is working the page: the child `--exec`
+// started, or a queue of javascript still being got through. A window being
+// driven is a window being watched - watching it is the whole reason for
+// driving it here rather than in a headless browser - and the pane it is in is
+// by definition not the one being typed in. tmux makes that literal: focus goes
+// to the active pane, so a window sitting in plain sight beside the shell
+// running the test is told it is not being looked at.
+static bool being_driven(const App *a) {
+    return a->exec_fd >= 0 || script_busy(a);
+}
+
+static void resume_drawing(App *a) {
     a->paused = false;
     // The page may not have changed while it was away, and an unchanged frame
     // is hash-skipped - which would leave the block empty until something on
@@ -2129,6 +2121,59 @@ static void handle_focus(App *a, bool focused) {
     // The restart is an ask like any other, and a page that did not change
     // while it was away gives Chrome nothing to answer it with.
     still_soon(a);
+}
+
+static void pause_drawing(App *a) {
+    a->paused = true;
+    a->expect_frame = 0;        // no frame is coming, and none is owed
+    a->in_motion = false;       // and it is not moving, it is not drawing
+    a->motion_run = 0;
+    still_cancel(a);            // nothing to photograph for nobody to see
+    app_cdp(a, "Page.stopScreencast", "");
+    // Not drawing is the whole of it: the page goes on animating into a
+    // screencast nobody is reading, and stopping that is the saving.
+    //
+    // Emulation.setCPUThrottlingRate is not the other half of this and must
+    // not be added back. Chrome emulates a slower processor rather than
+    // asking for less work: a thread of its own interrupts the renderer's
+    // main thread with a signal, and the handler busy-waits on
+    // mach_absolute_time to burn away the share of the quantum the rate
+    // says it should not have had. Throttling a blurred window that way
+    // spends a whole core doing nothing, answers no javascript and paints
+    // nothing - the opposite of what the name promises, and on this side of
+    // a blur indistinguishable from a page that has hung.
+}
+
+// The terminal has said whether anyone is looking. Every frame costs a PNG out
+// of Chrome and a base64 write across the terminal, and both are wasted on a
+// pane that is not on screen - so the screencast stops with the focus and comes
+// back with it. The page itself is left running: timers, sockets and audio
+// carry on, which is the difference between not drawing something and freezing
+// it, and the reason this stops at the picture.
+static void handle_focus(App *a, bool focused) {
+    a->blurred = !focused;
+    if (!a->pause_on_blur || focused == !a->paused) return;
+    if (!focused) {
+        // A page just handed in has not been drawn yet, and the blur that says
+        // to stop drawing is half of the same click that asked for it.
+        if (g_handoff_owed > now_sec()) return;
+        if (being_driven(a)) return;
+        pause_drawing(a);
+        return;
+    }
+    resume_drawing(a);
+}
+
+// Driving does not begin and end on a focus event, so the two are asked about
+// separately: a run that starts while the window is blurred would otherwise go
+// by with nothing drawn, and one that ends there would leave the window drawing
+// for a pane nobody has looked at since.
+static void check_driven(App *a) {
+    if (!a->pause_on_blur || !a->blurred) return;
+    bool driven = being_driven(a);
+    if (driven && a->paused)        resume_drawing(a);
+    else if (!driven && !a->paused && g_handoff_owed <= now_sec())
+        pause_drawing(a);
 }
 
 static void handle_mouse(App *a, Event *ev) {
@@ -2364,6 +2409,11 @@ static bool do_action(App *a, Event *ev, Act act) {
         notify(a, "reloading, cache ignored");
         return true;
     case ACT_COPY: copy_selection(a); return true;
+    case ACT_COPY_CONSOLE: {
+        int n = console_copy(a);
+        notify(a, n ? "console copied" : "the console has said nothing yet");
+        return true;
+    }
     case ACT_COPY_URL:
         clipboard_put(a->url);
         notify(a, "copied url");
@@ -2488,6 +2538,12 @@ static void handle_key(App *a, Event *ev) {
         if (ev->mods & (MOD_CTRL | MOD_ALT | MOD_SUPER)) {
             if (in_console == ACT_QUIT)    { g_quit = 1; return; }
             if (in_console == ACT_CONSOLE) { console_toggle(a); return; }
+            // Taking the transcript away with you is a thing to do from inside
+            // the console above all, where the editor would otherwise eat it.
+            if (in_console == ACT_COPY_CONSOLE) {
+                do_action(a, ev, in_console);
+                return;
+            }
         }
         if (console_key(a, ev)) return;
     }
@@ -3132,11 +3188,14 @@ static void usage(void) {
         "              including any nothing can reach any more. A window it\n"
         "              cannot place is named rather than ended\n"
         "  --exec CMD  run CMD against this window, its output in the console\n"
+        "  --slowmo MS pause MS between the actions of what --exec starts, so\n"
+        "              a run can be watched rather than only finished\n"
         "  --profile N run in a profile of its own - its own logins, history\n"
         "              and browser, and none of the windows already up. \"-\"\n"
         "              is a throwaway one, taken away again on exit\n"
         "  --port N    fix chrome's devtools port so playwright can find it\n"
-        "  --no-pause  keep drawing while the terminal is not focused\n"
+        "  --no-pause  keep drawing while the terminal is not focused. What\n"
+        "              --exec starts already draws through a blur\n"
         "  --raw-keys  let a key the page did not want reach the window\n"
         "              system. On macOS that routes it through the menu bar,\n"
         "              which on some pages costs seconds of the thread every\n"
@@ -3473,6 +3532,10 @@ int main(int argc, char **argv) {
             a.script.json = true;
         } else if (!strcmp(argv[i], "--profile") && i + 1 < argc) {
             i++;                      // already read, above the loop
+        } else if (!strcmp(argv[i], "--slowmo") && i + 1 < argc) {
+            a.slowmo = atoi(argv[++i]);
+            if (a.slowmo < 0) a.slowmo = 0;
+            if (a.slowmo > 60000) a.slowmo = 60000;
         } else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
             port = atoi(argv[++i]);
             if (port < 1 || port > 65535) {
@@ -3908,6 +3971,9 @@ int main(int argc, char **argv) {
         // Labels asked for and never reported: the keyboard comes back rather
         // than waiting on a page that is not going to answer.
         hint_tick(&a);
+        // A run that started or ended while the window was blurred: neither is
+        // a focus event, and both change whether there is anything to draw for.
+        check_driven(&a);
 
         double due = 3.0 * (1 << (a.unwedge_run < 3 ? a.unwedge_run : 3));
         if (a.expect_frame > 0 && !a.paused && now_sec() > a.expect_frame &&

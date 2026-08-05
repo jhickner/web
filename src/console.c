@@ -113,6 +113,23 @@ void console_log(App *a, const char *line) {
     g_log_scroll = 0;                // new output follows the tail, like a shell
 }
 
+// The whole transcript, joined, into the clipboard. A page drawn in cells is
+// out of the terminal's own selection's reach, and the transcript is the part
+// of the window most often wanted somewhere else - a value to paste into a
+// script, an error to send on. Answers how many lines went, for the notice.
+int console_copy(App *a) {
+    console_init(a);
+    if (!g_log_n) return 0;
+    Buf b = {0};
+    for (int i = 0; i < g_log_n; i++) {
+        buf_add(&b, g_log[i], strlen(g_log[i]));
+        buf_add(&b, "\n", 1);
+    }
+    if (b.p) clipboard_put(b.p);
+    buf_free(&b);
+    return g_log_n;
+}
+
 // ------------------------------------------------------------------- paint
 
 static void cell(void *ctx, int x, int y, uint32_t cp, ReplStyle st) {

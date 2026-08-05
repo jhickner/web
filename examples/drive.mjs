@@ -1,10 +1,10 @@
 // Drive the page a `web` window is showing. Nothing installed, nothing to set
-// up: cdp.mjs next door is the connection, and it is all standard library.
+// up: js/cdp.mjs is the connection, and it is all standard library.
 //
 //   web --exec 'node examples/drive.mjs' news.ycombinator.com
 //   node examples/drive.mjs                 # against the one window running
 
-import { page } from './cdp.mjs';
+import { page } from '../js/cdp.mjs';
 
 const p = await page();
 console.log('attached to:', await p.title());

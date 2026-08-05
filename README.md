@@ -89,6 +89,7 @@ window started from there inherits.
 | `cmd+c` | copy the page selection |
 | `cmd+v` | paste into the page, or into the address bar when it is open |
 | `^X` | open or close the console |
+| `alt+y` | copy the console transcript |
 | `?` | key list over the page; any key dismisses it |
 | mouse | click, drag to select, wheel to scroll |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
@@ -225,7 +226,7 @@ The history is Chrome's own, read from `History` in the profile
 | Setting | Default | Values | Description |
 |---|---|---|---|
 | `vim` | `no` | yes/no | the vim key layer, under whatever keys this file names |
-| `pause-on-blur` | `yes` | yes/no | stop drawing while the terminal is not focused |
+| `pause-on-blur` | `yes` | yes/no | stop drawing while the terminal is not focused. A window being driven by `--exec` or a script draws either way |
 | `status-line` | `yes` | yes/no | show the status line under the page |
 | `clear-on-exit` | `yes` | yes/no | erase the window on exit instead of leaving it |
 | `full` | `no` | yes/no | take over the whole terminal instead of drawing a window |
@@ -236,6 +237,7 @@ The history is Chrome's own, read from `History` in the profile
 | `zoom` | `1.5` | 0.5–3 | page magnification a new window opens at |
 | `rows` | `40` | `auto`, a count | cell rows a new window opens at |
 | `cols` | `80` | `auto`, a count | cell columns a new window opens at |
+| `slowmo` | `0` | 0–60000 | milliseconds between the actions of what `--exec` starts |
 
 Booleans also take `true`, `on` and `1`. Each setting is the command line
 option of the same name, which wins for that run. `hint-only` and `hint-skip`
@@ -302,6 +304,8 @@ web [options] <url>...
 --kill      quit this profile's windows and end its browsers, including
             any nothing can reach
 --exec CMD  run CMD against this window, its output in the console
+--slowmo MS pause MS between the actions of what --exec starts, so a run
+            can be watched rather than only finished
 --profile N run in a profile of its own: its own logins, history and
             browser, and none of the windows already up. "-" is a
             throwaway one, removed on exit
@@ -388,7 +392,9 @@ news.ycombinator.com,github.com
 ```
 
 Lines join the same queue `--eval` uses. Shift+Enter adds an input line, Page
-Up/Page Down or the wheel scrolls the transcript, Enter runs.
+Up/Page Down or the wheel scrolls the transcript, Enter runs. `alt+y` copies the
+whole transcript, from inside the console or out of it — including whatever
+`--exec` has printed there.
 
 `P` while reading toggles picking: clicking the page writes the shortest CSS
 selector for what you hit into the console instead of activating it.
@@ -426,15 +432,61 @@ for (const page of ctx.pages()) {
 }
 ```
 
-`examples/attach.mjs` is that loop, ready to import. Playwright is not required:
-CDP is a websocket taking JSON, and Node has had `WebSocket` and `fetch` built
-in since 22. `examples/cdp.mjs` is that connection in standard library only, and
-`examples/drive.mjs` is a demo written against it:
+The package does that loop for you — see [Playwright](#playwright). Playwright
+is not required: CDP is a websocket taking JSON, and Node has had `WebSocket`
+and `fetch` built in since 22. `js/cdp.mjs` is that connection in standard
+library only, and `examples/drive.mjs` is a demo written against it:
 
 ```sh
 node examples/drive.mjs                 # against the one window running
 web --exec 'node examples/drive.mjs' news.ycombinator.com
 ```
+
+### Playwright
+
+`@jhickner/web` is this repository as a package. `/test` is `@playwright/test`
+with `page` bound to the tab on screen, so a spec file is an ordinary spec file:
+
+```js
+import { test, expect } from '@jhickner/web/test';
+
+test('the front page lists stories', async ({ page }) => {
+  await page.goto('https://news.ycombinator.com');
+  await expect(page.locator('.titleline > a').first()).toBeVisible();
+});
+```
+
+```sh
+npm i @jhickner/web @playwright/test
+web --exec 'npx playwright test --workers=1' about:blank   # watch it run
+npx playwright test --workers=1                            # against a window already up
+```
+
+`examples/hn.spec.mjs` is that spec. From a checkout, `npm i @playwright/test`
+and:
+
+```sh
+web --exec 'npx playwright test examples/hn.spec.mjs --workers=1' about:blank
+```
+
+| Import | What it is |
+|---|---|
+| `@jhickner/web/test` | `test` and `expect`, with `page`, `context` and `browser` on the window |
+| `@jhickner/web/playwright` | `attach()`, `connect()`, `pageFor()` for a script of your own |
+| `@jhickner/web/cdp` | `endpoint()` and `page()` over raw CDP, no dependencies |
+
+- One window is one page, so tests run with `--workers=1`.
+- The tab is the context, so cookies, storage and the page itself carry from one
+  test to the next; there is no fresh context per test.
+- The viewport is the window's — `--cols`, `--rows`, `[` and `]` set it, not
+  `test.use({ viewport })`.
+- `--slowmo 200` puts a pause between actions, which is what makes a run
+  something to watch.
+- A run under `--exec` keeps drawing while the terminal is not focused, so the
+  window is live in one pane while the tests are watched from another. A runner
+  started outside `web` cannot be seen from in here: use `--no-pause` for that.
+- `WEB_PROFILE=ci`, or `--profile ci`, keeps a run off the browser you are using.
+- A failing test attaches a screenshot of the page as it was left.
 
 ### --exec
 
@@ -497,6 +549,7 @@ does not fit is reached with `h` and `l`.
 |---|---|
 | `WEB_CHROME` | path to a different Chrome build |
 | `WEB_PROFILE` | the profile to run in, as `--profile` names it. Set for what `--exec` starts |
+| `WEB_WINDOW` | which window a script attaches to, by pid, when several are up |
 | `WEB_CELL` | `WxH` cell size, if the page aspect looks stretched. A terminal reporting no pixel geometry leaves it a guess (8x17 default); `^G` says which you have |
 
 ## How it works
