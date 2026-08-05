@@ -11,7 +11,8 @@
 // editor owns no terminal state of its own, which is why it fits here at all -
 // it hands back cells and this decides what a cell is.
 
-#define CONSOLE_ROWS 12         // stable height: typing never restarts the screencast
+#define CONSOLE_ROWS 12         // the height it opens at
+#define CONSOLE_MIN 3
 #define LOG_MAX 200
 #define LOG_COLS 512
 #define INPUT_ROWS 4
@@ -28,6 +29,9 @@ static int    g_log_scroll;         // lines above the newest transcript entry
 static RCell *g_grid;
 static int    g_gw, g_gh;
 static int    g_clip_y0, g_clip_y1;
+
+static bool   g_dragging;           // the top border is being carried
+static int    g_drag_y;             // the row the pointer was on last
 
 // ------------------------------------------------------------------- setup
 
@@ -57,16 +61,20 @@ static int console_width(App *a) {
 
 // ------------------------------------------------------------------- rows
 
-// Fixed on purpose. Changing height as output arrives or completion filters
-// would restart the screencast on almost every keystroke.
+static int fit_rows(App *a, int rows) {
+    int max = a->term.rows - (a->status_open ? 1 : 0) - 2;
+    if (rows > max) rows = max;
+    if (rows < CONSOLE_MIN) rows = CONSOLE_MIN;
+    return rows;
+}
+
+// Whatever the border was last dragged to, and nothing else: a height that
+// moved with output or completions would restart the screencast on almost every
+// keystroke.
 int console_rows(App *a) {
     if (!a->console_open) return 0;
     console_init(a);
-    int rows = CONSOLE_ROWS;
-    int max = a->term.rows - (a->status_open ? 1 : 0) - 2;
-    if (rows > max) rows = max;
-    if (rows < 3) rows = 3;
-    return rows;
+    return fit_rows(a, a->console_want > 0 ? a->console_want : CONSOLE_ROWS);
 }
 
 // Open and focused, or gone: the key that opens the console is the key that puts
@@ -211,11 +219,16 @@ void console_paint(App *a) {
     int start = end - log_rows;
     if (start < 0) start = 0;
     int first_y = 1 + (log_rows - (end - start));
-    for (int i = start, y = first_y; i < end && y < 1 + log_rows; i++, y++)
-        for (int c = 0, o = 0; g_log[i][o] && c < iw; c++) {
-            unsigned char ch = (unsigned char)g_log[i][o++];
-            cell(a, c + 1, y, ch, REPL_STYLE_DIM);
+    for (int i = start, y = first_y; i < end && y < 1 + log_rows; i++, y++) {
+        int len = (int)strlen(g_log[i]), o = 0, col = 0;
+        while (g_log[i][o]) {
+            uint32_t cp = utf8_decode(g_log[i], len, &o);
+            int w = glyph_cols(cp);
+            if (col + w > iw) break;
+            cell(a, col + 1, y, cp < 0x20 ? ' ' : cp, REPL_STYLE_DIM);
+            col += w;
         }
+    }
 
     int cur_row = repl_cursor_row(&g_repl, iw);
     int first_input = cur_row - in_show + 1;
@@ -245,6 +258,10 @@ void console_paint(App *a) {
             }
             char u[4];
             buf_add(&b, u, utf8_put(k->cp, u));
+            // repl.h's contract, and the transcript follows it: a double-width
+            // glyph is emitted once and the cell it covers is left alone.
+            int w = glyph_cols(k->cp);
+            if (w > 1) c += w - 1;
         }
         buf_add(&b, "\x1b[0m", 4);
     }
@@ -338,9 +355,36 @@ bool console_key(App *a, Event *ev) {
 }
 
 bool console_mouse(App *a, Event *ev) {
-    if (!a->console_open || ev->type != EV_MOUSE ||
+    if (ev->type != EV_MOUSE) return false;
+
+    if (g_dragging) {
+        if (!ev->press) g_dragging = false;
+        else if (ev->motion) {
+            int have = a->console_want > 0 ? a->console_want : a->console_rows;
+            int delta = fit_rows(a, have + (g_drag_y - ev->my)) - have;
+            // Inline, the block is anchored at its top, so the rows have to be
+            // traded with the picture to hold the last row still.
+            if (a->inline_mode) {
+                if (a->box_rows - delta < BOX_MIN_ROWS)
+                    delta = a->box_rows - BOX_MIN_ROWS;
+                a->box_rows -= delta;
+            }
+            a->console_want = have + delta;
+            g_drag_y = ev->my;
+        }
+        return true;
+    }
+
+    if (!a->console_open ||
         ev->my < a->console_row || ev->my >= a->console_row + a->console_rows)
         return false;
+
+    if (ev->my == a->console_row && ev->button == 0 && ev->press && !ev->motion) {
+        g_dragging = true;
+        g_drag_y = ev->my;
+        a->console_focus = true;
+        return true;
+    }
     if (ev->button == 3 || ev->button == 4) {
         g_log_scroll += ev->button == 3 ? 3 : -3;
         if (g_log_scroll < 0) g_log_scroll = 0;

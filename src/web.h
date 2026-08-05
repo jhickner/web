@@ -438,6 +438,8 @@ typedef struct {
 #define POPUP_MAX   8
 #define POPUP_GRACE 15.0   // seconds a popup has to say where it is going
 
+#define BOX_MIN_ROWS 2     // the least picture an inline window can be left with
+
 typedef struct {
     Term    term;
     Kitty   kitty;
@@ -513,7 +515,7 @@ typedef struct {
     int     prompt;            // 0 none, 1 address, 2 find
     char    find[256];         // last search, for n and N
 
-    int     box_rows;          // inline: cell rows the window occupies
+    int     box_rows;          // inline: cell rows the window occupies, BOX_MIN_ROWS up
     int     box_cols;          // inline: cell columns, 0 = from the proportion
     int     want_cols;         // cols for that block, 0 = from the proportion
     int     want_width;        // width pinned by w/W, 0 = derived from the cells
@@ -588,6 +590,7 @@ typedef struct {
     bool    console_focus;        // and holding the keyboard
     bool    selector_pick;        // clicks report a selector instead of reaching the page
     int     console_rows;         // how many rows it occupies
+    int     console_want;         // rows asked for by dragging its top border
     int     console_row;          // 1-based row it starts on
     Buf     console_buf, console_last;
 
