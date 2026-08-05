@@ -1122,6 +1122,12 @@ static void exec_start(App *a, const char *cmd) {
     unlink(pause);               // nothing left over from a run that was killed
     unlink(resume);
 
+    // Before the child exists, because the child is what writes in here and it
+    // can be quicker than the first session file.
+    char claims[700];
+    claims_dir(a, claims, sizeof claims);
+    mkdirs(claims);
+
     pid_t pid = fork();
     if (pid < 0) { close(fds[0]); close(fds[1]); return; }
     if (pid == 0) {
@@ -2418,8 +2424,11 @@ static void handle_mouse(App *a, Event *ev) {
         if (ev->press && !ev->motion && ev->button < 3) omni_close(a);
         return;
     }
-    if (!a->mouse_down && tabs_mouse(a, ev)) return;
+    // The console is asked first because a border being dragged owns the
+    // pointer wherever it goes, and the bar it can be dragged up to is the one
+    // place that would otherwise answer for it - including the release.
     if (console_mouse(a, ev)) return;
+    if (!a->mouse_down && tabs_mouse(a, ev)) return;
     // A grid is a picture of nine pages, not one page to click into: a click
     // picks the tile under it and the page it lands on comes forward. Nothing
     // is dispatched into a page at a size it was never laid out at.

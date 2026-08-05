@@ -4,7 +4,7 @@
 // one, so nothing here downloads a browser: playwright-core is enough, and the
 // full playwright package resolves to it anyway.
 
-import { unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { chromium } from 'playwright-core';
 import { endpoint, attachedWindow } from './cdp.mjs';
 
@@ -65,9 +65,15 @@ export function claim(target) {
   if (!dir || !target) return () => {};
   const path = `${dir}/${target}`;
   try {
+    // Made rather than assumed: a window writes this directory when it writes
+    // its session file, and a worker can be quicker than that.
+    mkdirSync(dir, { recursive: true });
     writeFileSync(path, `${process.pid}\n`);
-  } catch {
-    return () => {};                          // an older window, with nowhere to say it
+  } catch (e) {
+    // Said out loud. Silently doing nothing here is a page the window never
+    // shows, which looks like the grid being broken rather than like this.
+    console.warn(`web: cannot claim this page (${e.message})`);
+    return () => {};
   }
   return () => { try { unlinkSync(path); } catch {} };
 }
