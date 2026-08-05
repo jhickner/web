@@ -70,7 +70,8 @@ from whatever is already on screen:
 | Where | What happens |
 |---|---|
 | a free pane of the tmux window on screen | `web` is run in it |
-| no free pane there | a tmux window of its own, in that session |
+| no free pane there | a split of that same window |
+| no room left to split | a tmux window of its own, in that session |
 | no tmux | a tab of the Ghostty window already open |
 | no Ghostty | a window of its own |
 
@@ -160,6 +161,7 @@ the vi vocabulary is the window's:
 | `:` | address bar, blank |
 | `r` / `R` | reload / reload ignoring the cache |
 | `gi` | focus the first text field |
+| `gf` | label everything clickable, past any `hint-only` rule for the site |
 | `yy` | copy the address |
 | `yf` | label the links, then type a label to copy its address |
 | `ZZ` | quit |
@@ -195,6 +197,28 @@ the cover. What gets sent is a real mouse click at the label's own position:
 hover, focus, and the popups a click is allowed to open all behave as if the
 mouse had done it.
 
+### Site rules
+
+A page that is a list is mostly links no one came for. `web.conf` can say which
+elements the labels land on, per site, as CSS selectors:
+
+```
+hint-only news.ycombinator.com = .titleline > a
+hint-skip github.com           = .Header, footer
+```
+
+`hint-only` is the whole set for that host — thirty story titles instead of two
+hundred links — so add `,input,button` to it if the page's fields are wanted
+too. `hint-skip` keeps the usual set and drops whatever the selector matches,
+along with everything inside it. Both may be given for one host.
+
+The host matches the end of the page's own on a dot, so `ycombinator.com`
+covers `news.ycombinator.com`; the first rule of each kind that matches wins.
+A `#` or `=` in a selector is part of it, and such a line can only be commented
+out from its very start. `hint-all` labels everything on any page whatever the
+rules say — `gf` under the vim keys, bindable anywhere else — so nothing a rule
+leaves out is out of reach.
+
 ## Config
 
 `~/.config/web/web.conf`, written with the defaults on first run:
@@ -215,7 +239,8 @@ mouse had done it.
 | `cols` | `auto` | `auto`, a count | cell columns a new window opens at |
 
 Booleans also take `true`, `on` and `1`. Each setting is the command line
-option of the same name, which wins for that run.
+option of the same name, which wins for that run. `hint-only` and `hint-skip`
+lines go in the same file, one per site — see [Site rules](#site-rules).
 
 `zoom`, `rows` and `cols` are where a new window opens. `[` `]` `alt+0` and
 `shift`+arrows move a running window from there, and nothing is written back.

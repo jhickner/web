@@ -129,21 +129,23 @@ idle_pane() {
 }
 
 # The command line $1, run in the terminal already on screen. A free pane of the
-# tmux window being looked at is the best of these: no new window anywhere, and
-# the page lands in the session it was asked for from. Failing that a tmux window
-# of its own, which is still that terminal rather than another one.
+# tmux window being looked at is the best of these: no new anything, and the page
+# lands beside the work it was asked for from. Failing that a split of that same
+# window, which is still the window being looked at - and only if the window has
+# no room left to divide, one of its own.
 run_on_screen() {
     win=$(tmux_window) || return 1
     [ -n "$win" ] || return 1
+    "$TMUX_BIN" select-window -t "$win" 2>/dev/null || return 1
     pane=$(idle_pane "$win")
     if [ -n "$pane" ]; then
-        "$TMUX_BIN" select-window -t "$win" 2>/dev/null || return 1
         "$TMUX_BIN" select-pane -t "$pane" 2>/dev/null
         # C-u first: the pane is at a prompt, and a line half typed there would
         # otherwise have the address appended to it and run as one command.
         "$TMUX_BIN" send-keys -t "$pane" C-u "$1" Enter 2>/dev/null || return 1
     else
-        "$TMUX_BIN" new-window -t "${win%%:*}" "$1" 2>/dev/null || return 1
+        "$TMUX_BIN" split-window -t "$win" "$1" 2>/dev/null ||
+            "$TMUX_BIN" new-window -t "${win%%:*}" "$1" 2>/dev/null || return 1
     fi
     return 0
 }
