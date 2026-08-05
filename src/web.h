@@ -260,6 +260,11 @@ void term_resize_inline(Term *t, int rows);   // caller drops the image first
 void term_clear_inline(Term *t);              // blank the rows the block owns
 void term_clear_below(Term *t);               // and anything left under them
 void term_restore(Term *t, bool clear_inline);  // erase the block on the way out
+
+// The key and mouse modes back to what they were, and nothing else: the one
+// thing that has to happen even when the window is being killed rather than
+// closed. Safe to call from a signal handler.
+void term_panic(int fd);
 void term_size(Term *t);
 int  term_read(Term *t);                  // pull available bytes
 void term_log(const char *fmt, ...);      // WEB_DEBUG input trace

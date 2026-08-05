@@ -24,6 +24,17 @@ static void on_hand(int sig)  { (void)sig; g_handed = 1; }
 
 static App *g_app;
 
+// A crash, rather than a quit. The keyboard is asked for in a mode the terminal
+// keeps until it is told otherwise, so it is put back here and the signal is
+// then allowed to do what it would have done - the point is the terminal the
+// user is left sitting in, not saving the run.
+static int g_panic_fd = -1;
+static void on_crash(int sig) {
+    term_panic(g_panic_fd);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 // ----------------------------------------------------------- cdp dispatch
 
 // The table is small and a reply always comes back quickly, so a full slot is
@@ -3605,6 +3616,18 @@ int main(int argc, char **argv) {
     }
 
     if (a.has_tty) term_enter(&a.term, a.inline_mode);
+    // Armed only now, because only now is there a mode to put back: term_enter
+    // is what asks for the keyboard, and before it there is nothing a crash
+    // would leave behind.
+    if (a.has_tty) {
+        g_panic_fd = a.term.fd;
+        signal(SIGSEGV, on_crash);
+        signal(SIGBUS,  on_crash);
+        signal(SIGABRT, on_crash);
+        signal(SIGILL,  on_crash);
+        signal(SIGFPE,  on_crash);
+        signal(SIGINT,  on_crash);
+    }
     if (a.has_tty && a.inline_mode) {
         int status = a.status_open ? 1 : 0;   // the row below the box, if shown
         int rows = a.want_rows > 0 ? a.want_rows + status : a.term.rows / 2;

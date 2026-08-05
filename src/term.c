@@ -25,10 +25,18 @@ static bool g_have_saved = false;
 #define MOUSE_ON  "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h"
 #define MOUSE_OFF "\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l"
 
-// Ask for kitty's disambiguated key reporting, which is the only way a cmd
-// chord can reach us at all: the legacy encoding has no bit for super. A
-// terminal that does not know the sequence ignores it and keeps sending the
-// legacy codes, so both encodings have to stay readable either way.
+// Ask for kitty's key reporting, which is the only way a cmd chord can reach us
+// at all: the legacy encoding has no bit for super. A terminal that does not
+// know the sequence ignores it and keeps sending the legacy codes, so both
+// encodings have to stay readable either way.
+//
+// Flag 1 and no more. Asking for 8 as well - every key as an escape code - is
+// the only way the protocol will report a modifier on enter, since at 1 it
+// deliberately exempts enter, tab and backspace so that a crashed program
+// leaves a terminal you can still type `reset` into. It is not worth having:
+// inside tmux the request never reaches the terminal at all, which is where
+// this mostly runs, and outside it the exemption is there for a good reason.
+// Shift and enter are told apart below by the byte they arrive as instead.
 #define KBD_ON  "\x1b[>1u"
 #define KBD_OFF "\x1b[<u"
 
@@ -245,6 +253,17 @@ void term_resize_inline(Term *t, int rows) {
     t->inline_rows = rows;
 }
 
+// The two modes that outlive the process if nothing takes them back, written
+// with the one call that is safe to make from a signal handler. A window that
+// dies without this leaves the shell it lands back in reporting every mouse
+// move as a burst of escape codes, which looks like a broken terminal and is
+// one the user has to know to reset.
+void term_panic(int fd) {
+    if (fd < 0) return;
+    (void)!write(fd, KBD_OFF, sizeof KBD_OFF - 1);
+    (void)!write(fd, MOUSE_OFF, sizeof MOUSE_OFF - 1);
+}
+
 void term_restore(Term *t, bool clear_inline) {
     if (t->fd < 0) return;
     writeall(t->fd, KBD_OFF, strlen(KBD_OFF));
@@ -385,7 +404,21 @@ int term_next(Term *t, Event *ev) {
     if (b[0] != 0x1b) {
         unsigned char c = b[0];
         ev->type = EV_KEY;
-        if (c == 0x0d || c == 0x0a) { ev->key = KEY_ENTER; buf_consume(&t->in, 1); return 1; }
+        // Return is 0x0d and shift+return is 0x0a, which is the one place the
+        // legacy encoding says anything about a modifier on enter at all: the
+        // terminals this runs in send the line feed for the shifted one, and
+        // through tmux - where the kitty protocol never arrives - it is the
+        // only way the two can be told apart. Anything else sending 0x0a means
+        // ctrl+j, which nothing here binds.
+        //
+        // A newline inside a paste never reaches this: a bracketed paste is
+        // taken whole, above, and delivered as text rather than as keys.
+        if (c == 0x0d || c == 0x0a) {
+            ev->key = KEY_ENTER;
+            if (c == 0x0a) ev->mods |= MOD_SHIFT;
+            buf_consume(&t->in, 1);
+            return 1;
+        }
         if (c == 0x09) { ev->key = KEY_TAB; buf_consume(&t->in, 1); return 1; }
         if (c == 0x7f) { ev->key = KEY_BACKSPACE; buf_consume(&t->in, 1); return 1; }
         if (c < 0x20) {
@@ -518,10 +551,18 @@ int term_next(Term *t, Event *ev) {
             // it does use.
             if (p1 <= 0 || p1 >= 0x110000) { ev->key = KEY_NONE; break; }
             ev->key = p1;
+            // Kitty puts its functional keys in a private area of unicode
+            // rather than above it, so a terminal that reports them lands here
+            // rather than in the guard above: 57414 is the keypad's own enter
+            // and the rest are keys this build has no bindings for.
+            if (p1 >= 57344 && p1 <= 63743) {
+                ev->key = p1 == 57414 ? KEY_ENTER : KEY_NONE;
+                if (ev->key == KEY_NONE) break;
+            }
             // The protocol reports the unshifted key and a shift bit, but the
             // rest of the app reads a shifted letter as its own key: G is a
             // binding, shift+g is not.
-            if ((m & MOD_SHIFT) && p1 >= 'a' && p1 <= 'z') {
+            else if ((m & MOD_SHIFT) && p1 >= 'a' && p1 <= 'z') {
                 ev->key = p1 - 32;
                 m &= ~MOD_SHIFT;
             }
