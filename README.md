@@ -2,7 +2,8 @@
 
 <img src="images/ss.png" width="530" alt="Hacker News rendered inline in a terminal, with a tab bar above the page">
 
-Chrome in your terminal. Mostly. Sort of. 
+Chrome in your terminal. Works great with small windows in tmux splits, which
+is how I use it.
 This project uses Chrome's screencast capability combined with kitty graphics
 to stream a browser window (with tabs) inline, into your terminal. It works
 surprisingly well. It even works in tmux, although it's a bit slower.
@@ -42,59 +43,12 @@ set -g allow-passthrough all
 
 ## Logins
 
-Headless Chrome is usually blocked from signing in. Open a normal browser on
-the same profile, log in to whatever sites you need, and `web` keeps that
-session:
+Opens a normal browser window on the same profile. Log in to whatever sites you
+need and `web` keeps the session:
 
 ```sh
 web --login
 ```
-
-## Default browser
-
-`make browser` installs `web` and builds `~/Applications/Web.app`, an
-`http`/`https` handler that hands the link on:
-
-```sh
-make browser
-```
-
-Then System Settings > Desktop & Dock > Default web browser > web, and confirm
-the prompt macOS puts up. Nothing else can do it: LaunchServices answers `-54`
-to a third party asking for the browser to be changed, so `duti` and the like
-cannot set `http` or `https` however they are run.
-
-A link opens as a tab in the `web` window most recently used, which selects its
-own tmux pane if it is in one. With no window running, it starts one outwards
-from whatever is already on screen:
-
-| Where | What happens |
-|---|---|
-| a free pane of the tmux window on screen | `web` is run in it |
-| no free pane there | a split of that same window |
-| no room left to split | a tmux window of its own, in that session |
-| no tmux | a tab of the Ghostty window already open |
-| no Ghostty | a window of its own |
-
-A pane is free when nothing but a shell is running in it, and the active pane is
-taken first. The tmux window on screen is the one the client active last is
-showing. The terminal is brought forward either way.
-
-```sh
-sh mkbrowser.sh --terminal kitty   # some other terminal
-sh mkbrowser.sh --no-activate      # leave the terminal where it is
-sh mkbrowser.sh --to /Applications # somewhere other than ~/Applications
-```
-
-`--open` is the same handoff from a shell, and is what the bundle runs:
-
-```sh
-web --open https://example.com
-```
-
-It exits non-zero when there is no window to hand to, which is what tells the
-bundle to start one. A window started by a `web` older than `--open` is never
-handed to.
 
 ## Keys
 
@@ -202,25 +156,22 @@ mouse had done it.
 
 ### Site rules
 
-A page that is a list is mostly links no one came for. `web.conf` can say which
-elements the labels land on, per site, as CSS selectors:
+Per-host CSS selectors in `web.conf` decide which elements get labels:
 
 ```
 hint-only news.ycombinator.com = .titleline > a
 hint-skip github.com           = .Header, footer
 ```
 
-`hint-only` is the whole set for that host — thirty story titles instead of two
-hundred links — so add `,input,button` to it if the page's fields are wanted
-too. `hint-skip` keeps the usual set and drops whatever the selector matches,
-along with everything inside it. Both may be given for one host.
+`hint-only` replaces the default set for that host; add `,input,button` to keep
+fields and buttons. `hint-skip` keeps the default set and drops what the
+selector matches, along with everything inside it. Both may be given for one
+host.
 
 The host matches the end of the page's own on a dot, so `ycombinator.com`
 covers `news.ycombinator.com`; the first rule of each kind that matches wins.
-A `#` or `=` in a selector is part of it, and such a line can only be commented
-out from its very start. `hint-all` labels everything on any page whatever the
-rules say — `gf` under the vim keys, bindable anywhere else — so nothing a rule
-leaves out is out of reach.
+`hint-all` labels everything whatever the rules say — `gf` under the vim keys,
+bindable anywhere else.
 
 ## Finding a page
 
@@ -242,20 +193,13 @@ Every word typed has to appear in the title or the address, in any order, so
 `hacker news` and `news hacker` find the same page and each word narrows the
 list further. Case is ignored until you type a capital, and then it matters.
 
-Ranking is Vimium's, followed line for line. A word scores for being there at
-all, more for starting a word, more again for being a whole one, scaled by how
-much of the line it accounts for — so a word is worth more in a short title
-than buried in a long address, and the title is never dragged down by the
-address. Added to that is recency, on a cube that falls away to nothing at a
-month old, which can lift a page up the list and never push one down. How often
-a page has been visited is not counted, which is Vimium's choice too. With
-nothing typed the history opens on the most recent page first; tabs are ranked
-on the words alone, since a tab being old says nothing about it.
+Ranking is Vimium's: how well the words match the title and address, plus
+recency out to a month old. Visit count is not counted. With nothing typed the
+history opens on the most recent page first; tabs are ranked on the words alone.
 
 The history is Chrome's own, read from `History` in the profile
-(`~/.cache/web/profile`) — so it is everything opened in `web`, including from
-a `--login` window. It is read from a copy, since the browser holds the file
-open while it runs.
+(`~/.cache/web/profile`) — everything opened in `web`, including from a
+`--login` window.
 
 ## Config
 
@@ -541,9 +485,49 @@ Chrome ──Page.screencastFrame──> base64 PNG ──> kitty graphics ─�
    └────────── Input.dispatchKeyEvent / dispatchMouseEvent ───────────┘
 ```
 
-Chrome hands out frames as base64-encoded PNG and the kitty protocol accepts
-base64 PNG directly, so a frame is never decoded or re-encoded on the way
-through — it is copied from a websocket into an escape sequence.
+Frames pass through as base64 PNG, never decoded or re-encoded.
 
-Scrollbars are turned off, scrolling is one jump rather than an animation, and
-pointer moves collapse while a frame is being written.
+Scrollbars are turned off and scrolling is one jump rather than an animation.
+
+## Default browser
+
+`make browser` installs `web` and builds `~/Applications/Web.app`, an
+`http`/`https` handler that hands the link on:
+
+```sh
+make browser
+```
+
+Then System Settings > Desktop & Dock > Default web browser > web, and confirm
+the prompt macOS puts up. `duti` and other third-party setters cannot do it.
+
+A link opens as a tab in the `web` window most recently used, which selects its
+own tmux pane if it is in one. With no window running, it starts one outwards
+from whatever is already on screen:
+
+| Where | What happens |
+|---|---|
+| a free pane of the tmux window on screen | `web` is run in it |
+| no free pane there | a split of that same window |
+| no room left to split | a tmux window of its own, in that session |
+| no tmux | a tab of the Ghostty window already open |
+| no Ghostty | a window of its own |
+
+A pane is free when nothing but a shell is running in it, and the active pane is
+taken first. The tmux window on screen is the one the client active last is
+showing. The terminal is brought forward either way.
+
+```sh
+sh mkbrowser.sh --terminal kitty   # some other terminal
+sh mkbrowser.sh --no-activate      # leave the terminal where it is
+sh mkbrowser.sh --to /Applications # somewhere other than ~/Applications
+```
+
+`--open` is the same handoff from a shell, and is what the bundle runs:
+
+```sh
+web --open https://example.com
+```
+
+It exits non-zero when there is no window to hand to. A window started by a
+`web` older than `--open` is never handed to.
