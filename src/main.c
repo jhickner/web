@@ -408,7 +408,7 @@ void relayout(App *a) {
         // The terminal may have shrunk under the box since it was last sized.
         int max_rows = t->rows - below - above;
         if (a->box_rows > max_rows) a->box_rows = max_rows;
-        if (a->box_rows < 2) a->box_rows = 2;
+        if (a->box_rows < BOX_MIN_ROWS) a->box_rows = BOX_MIN_ROWS;
         a->img_rows = a->box_rows;
         rect_cols = box_cols_now(a, a->img_rows);
         // Keep the whole block, tab bar and status line included, on the
@@ -1122,10 +1122,18 @@ static void exec_start(App *a, const char *cmd) {
     unlink(pause);               // nothing left over from a run that was killed
     unlink(resume);
 
-    // Before the child exists, because the child is what writes in here and it
-    // can be quicker than the first session file.
-    char claims[700];
+    // Worked out here and carried into the child, not worked out there. Both
+    // of these are named for this process, and after the fork getpid() is the
+    // child's - so a child that built them itself would be told to write where
+    // nothing is reading: the claims went into a directory of their own and no
+    // page was ever adopted, and a freeze would have waited on a file nobody
+    // was going to answer.
+    //
+    // The directory is made before the child exists, because the child is what
+    // writes in it and it can be quicker than the first session file.
+    char claims[700], fbase[560];
     claims_dir(a, claims, sizeof claims);
+    freeze_base(a, fbase, sizeof fbase);
     mkdirs(claims);
 
     pid_t pid = fork();
@@ -1168,16 +1176,10 @@ static void exec_start(App *a, const char *cmd) {
         // Set only when freezing was asked for, and it is the place as well as
         // the permission: a driver that knows how to freeze but is run by a
         // window that never asked simply carries on, which is every run in CI.
-        if (a->freeze) {
-            char base[560];
-            freeze_base(a, base, sizeof base);
-            setenv("WEB_FREEZE", base, 1);
-        }
+        if (a->freeze) setenv("WEB_FREEZE", fbase, 1);
         // Where to say "this page is mine", so the pages a runner opens for its
         // workers become tabs of this window and tiles of its grid.
-        char pages[700];
-        claims_dir(a, pages, sizeof pages);
-        setenv("WEB_PAGES", pages, 1);
+        setenv("WEB_PAGES", claims, 1);
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
