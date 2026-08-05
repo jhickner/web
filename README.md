@@ -95,6 +95,7 @@ window started from there inherits.
 | `?` | key list over the page; any key dismisses it |
 | mouse | click, drag to select, wheel to scroll |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
+| console border | drag up or down to resize the pane |
 
 While reading. Letters this table does not name are typed into the page;
 `vim = yes` gives most of them to the window instead — see [Vim keys](#vim-keys).
@@ -408,6 +409,41 @@ with the line that produced it. A line that throws prints to stderr and exits
 non-zero. A line that starts a navigation is not finished until the page has
 arrived.
 
+A line that answers a promise is not finished until the promise is, so anything
+asynchronous can be a line of its own:
+
+```
+fetch("/api/status").then(r => r.json()).then(j => j.state)
+```
+
+Waiting is what a page needs and a line cannot say, so the page is given the
+verbs for it as `__web`. Each answers a promise, and each gives up after
+`--timeout` unless told otherwise:
+
+| Call | What it does |
+|---|---|
+| `__web.wait(sel[, ms])` | the element, once it is there |
+| `__web.gone(sel[, ms])` | waits until nothing matches |
+| `__web.until(fn or js[, ms])` | waits until it answers something true |
+| `__web.click(sel[, ms])` | waits for it, scrolls to it, clicks it |
+| `__web.type(sel, text[, ms])` | waits for it, focuses it, types, fires `input` and `change` |
+| `__web.text(sel)` | its text, trimmed, or null |
+| `__web.all(sel)` | the text of every match |
+| `__web.count(sel)` | how many match |
+| `__web.attr(sel, name)` | one attribute, or null |
+
+```sh
+./web example.com <<'EOF'
+__web.click("a")
+__web.wait("h1").then(e => e.textContent.trim())
+location.host
+EOF
+```
+
+A line that starts a navigation is finished when the page has arrived, so the
+line after it runs against the new one. A wait that gives up says what it was
+waiting for and the run stops, non-zero.
+
 `--delay MS` paces the run, `--step` waits for a key between lines, `--timeout S`
 caps one line.
 
@@ -428,9 +464,14 @@ news.ycombinator.com,github.com
 ```
 
 Lines join the same queue `--eval` uses. Shift+Enter adds an input line, Page
-Up/Page Down or the wheel scrolls the transcript, Enter runs. `alt+y` copies the
+Up/Page Down or the wheel scrolls the transcript, Enter runs. Dragging the top
+border up or down resizes the pane, down to three rows and up to two rows short
+of the whole window; the page takes back whatever it gives up. `alt+y` copies the
 whole transcript, from inside the console or out of it — including whatever
 `--exec` has printed there.
+
+`__web` is here too, so `__web.click(".titleline > a")` waits for the link and
+clicks it, and a line that answers a promise is answered when it resolves.
 
 `P` while reading toggles picking: clicking the page writes the shortest CSS
 selector for what you hit into the console instead of activating it.

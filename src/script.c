@@ -11,9 +11,12 @@
 // the completion value comes back, which is the reading devtools has - `let x =
 // 2; x * 2` answers 4 rather than being a syntax error.
 //
-// There is no command language here any more. Selectors, waiting and real input
-// belong to something that has them already: js/cdp.mjs over --exec, or
-// Playwright through the same endpoint.
+// There is no command language here, and there is not going to be one: what a
+// line is, is javascript. What the page cannot say in one line is waiting, so
+// the page is given the verbs for it - see WEB_HELPERS in main.c - and a line
+// that answers a promise is not finished until the promise is. Real input, a
+// selector engine and assertions belong to something that has them already:
+// js/cdp.mjs over --exec, or Playwright through the same endpoint.
 
 // ------------------------------------------------------------------ output
 
@@ -126,10 +129,16 @@ static void done(App *a) {
 // line a string to eval; app_cdp quotes the whole thing again for the wire.
 static void run(App *a) {
     Script *s = &a->script;
+    // Wrapped in a promise rather than in String() alone, so a line that
+    // answers with one is finished when the promise is - awaitPromise has
+    // something to wait for. String(promise) is "[object Promise]" and the wait
+    // has already been given a string, which is what a line doing anything
+    // asynchronous used to come back as. Written with buf_addf rather than a
+    // counted buf_add: a length counted by hand is a length counted wrong.
     Buf e = {0};
-    buf_add(&e, "String(eval(\"", 13);
+    buf_addf(&e, "Promise.resolve(eval(\"");
     json_escape_buf(&e, s->line);
-    buf_add(&e, "\"))", 3);
+    buf_addf(&e, "\")).then(String)");
 
     Buf esc = {0};
     json_escape_buf(&esc, e.p);

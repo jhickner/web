@@ -1163,9 +1163,11 @@ static void exec_start(App *a, const char *cmd) {
         if (chrome_profile_named(pname, sizeof pname)) setenv("WEB_PROFILE", pname, 1);
         // The console draws text, not escape sequences, and a test runner
         // colours its output by default. Set rather than forced: a child told
-        // otherwise by the environment it was started from keeps that. NO_COLOR
-        // alone, since a child that sees both says the first is being ignored.
-        setenv("NO_COLOR", "1", 0);
+        // otherwise by the environment it was started from keeps that. This
+        // rather than NO_COLOR because Playwright forces colour on its workers
+        // whatever they inherit, and node warns about a pair it has to choose
+        // between; playwright answers this one by stripping the escapes as well.
+        setenv("FORCE_COLOR", "0", 0);
         // Playwright's connect takes a pause between actions but has no
         // variable for it, so this is ours, and the option is where it is set.
         if (a->slowmo > 0) {
@@ -2249,6 +2251,48 @@ static const char FOCUS_WATCHER[] =
     "document.addEventListener('focusout',function(){setTimeout(rep,0);},true);}"
     "rep();})()";
 
+// The waiting a page needs, which a line of javascript has no way to express.
+// `--eval`, a piped script and the console all hand one line to the page and
+// take the answer, which is enough to read something and not enough to do
+// anything: a click on a page that has not finished arriving is a click on
+// nothing, and the line after it runs against whatever the one before left
+// behind. These are the verbs that turn that into a flow, and each answers a
+// promise - the runner waits for what a line answers, so `__web.click('#go')`
+// is a line that is over when the click has happened.
+//
+// In the page's own world rather than the isolated one this window's own
+// scripts live in: a line is evaluated in the page, and a helper the page
+// cannot see is no helper at all. One property, named like the others here.
+//
+// %d is --timeout in milliseconds, so a wait gives up a moment before the line
+// running it does and says what it was waiting for rather than "timed out".
+static const char WEB_HELPERS[] =
+    "(function(){if(window.__web)return;var T=%d;"
+    "function el(s){return document.querySelector(s)}"
+    "function sleep(ms){return new Promise(function(r){setTimeout(r,ms)})}"
+    "async function until(t,ms){ms=ms||T;var end=Date.now()+ms;for(;;){"
+    "var v=typeof t==='function'?t():(0,eval)(t);"
+    "if(v)return v;"
+    "if(Date.now()>end)throw new Error('waited '+ms+'ms for '+t);"
+    "await sleep(50)}}"
+    "async function wait(s,ms){try{return await until(function(){return el(s)},ms)}"
+    "catch(e){throw new Error('no '+s+' after '+(ms||T)+'ms')}}"
+    "async function gone(s,ms){try{return await until(function(){return !el(s)},ms)}"
+    "catch(e){throw new Error(s+' is still there after '+(ms||T)+'ms')}}"
+    "async function click(s,ms){var e=await wait(s,ms);"
+    "e.scrollIntoView({block:'center'});e.click();return true}"
+    "async function type(s,t,ms){var e=await wait(s,ms);e.focus();"
+    "var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e),'value');"
+    "if(d&&d.set)d.set.call(e,t);else e.value=t;"
+    "e.dispatchEvent(new Event('input',{bubbles:true}));"
+    "e.dispatchEvent(new Event('change',{bubbles:true}));return true}"
+    "window.__web={until:until,wait:wait,gone:gone,click:click,type:type,timeout:T,"
+    "text:function(s){var e=el(s);return e?e.textContent.trim():null},"
+    "count:function(s){return document.querySelectorAll(s).length},"
+    "attr:function(s,n){var e=el(s);return e?e.getAttribute(n):null},"
+    "all:function(s){return[].map.call(document.querySelectorAll(s),"
+    "function(e){return e.textContent.trim()})}};})()";
+
 // The same question, asked once rather than watched for. A session that has
 // just arrived on a document that is already loaded has heard no focus event
 // and cannot wait for one. Asked of the page's own world, where it leaves
@@ -2426,9 +2470,8 @@ static void handle_mouse(App *a, Event *ev) {
         if (ev->press && !ev->motion && ev->button < 3) omni_close(a);
         return;
     }
-    // The console is asked first because a border being dragged owns the
-    // pointer wherever it goes, and the bar it can be dragged up to is the one
-    // place that would otherwise answer for it - including the release.
+    // First: a border being dragged owns the pointer wherever it goes, and the
+    // bar is the one place that would otherwise answer for it.
     if (console_mouse(a, ev)) return;
     if (!a->mouse_down && tabs_mouse(a, ev)) return;
     // A grid is a picture of nine pages, not one page to click into: a click
@@ -3552,6 +3595,15 @@ void session_init(App *a) {
             app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
                      "\"source\":\"%s\",\"worldName\":\"%s\","
                      "\"runImmediately\":true", esc, WEB_WORLD);
+        // The page's own world, unlike everything else registered here, and for
+        // the reason WEB_HELPERS gives: what runs a line is the page's eval.
+        if (fresh) {
+            char src[3072], hesc[6144];
+            snprintf(src, sizeof src, WEB_HELPERS, (int)(a->script.timeout * 1000));
+            json_escape(hesc, sizeof hesc, src);
+            app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
+                     "\"source\":\"%s\",\"runImmediately\":true", hesc);
+        }
         // In the same world, and registered the same way: a listener added from
         // an isolated world sees the page's events and can cancel them, and
         // nothing it defines is visible to the page.
