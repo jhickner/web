@@ -19,7 +19,10 @@ install: $(BIN)
 	install -d $(PREFIX)/bin
 	install -m 755 $(BIN) $(PREFIX)/bin/$(BIN)
 
+browser: install
+	sh mkbrowser.sh
+
 clean:
 	rm -f $(OBJ) $(BIN)
 
-.PHONY: all install clean
+.PHONY: all install browser clean

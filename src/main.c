@@ -9,15 +9,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include "web.h"
 
 volatile sig_atomic_t g_resized = 0;
 volatile sig_atomic_t g_quit = 0;
+static volatile sig_atomic_t g_handed = 0;
 
 static void on_winch(int sig) { (void)sig; g_resized = 1; }
 static void on_term(int sig)  { (void)sig; g_quit = 1; }
+static void on_hand(int sig)  { (void)sig; g_handed = 1; }
 
 static App *g_app;
 
@@ -541,11 +544,213 @@ void session_write(App *a) {
     char url[2100], title[600];
     json_escape(url, sizeof url, a->url);
     json_escape(title, sizeof title, a->title);
+    // "handoff" says this window listens for a url handed to it. Nothing but
+    // its presence matters: a window from a version that predates the signal
+    // would be killed by it, and the file it left behind is the only place a
+    // sender can find that out before sending.
     fprintf(f, "{\"pid\":%d,\"port\":%d,\"cdp\":\"http://127.0.0.1:%d\","
-               "\"target\":\"%s\",\"url\":\"%s\",\"title\":\"%s\"}\n",
+               "\"target\":\"%s\",\"url\":\"%s\",\"title\":\"%s\","
+               "\"handoff\":true}\n",
             (int)getpid(), a->chrome.port, a->chrome.port,
             a->chrome.target, url, title);
     fclose(f);
+}
+
+// ------------------------------------------------------------- handed a url
+
+// An address given to a window that is already up, so that `web --open` - and
+// the system link handler standing on it - lands in a tab of a window the user
+// already has rather than in a terminal of its own.
+//
+// One file per request, named for the window it is for and the process that
+// wrote it, so two arriving at once are two files instead of two writes racing
+// for one. It is written under .tmp and renamed into place, which is what makes
+// a file the reader finds a whole one. SIGUSR1 is only the nudge: the files are
+// the request, and one that arrives while the reader is mid-pass is picked up
+// by the pass the signal after it provokes.
+static void handoff_dir(const char *profile, char *out, size_t cap) {
+    snprintf(out, cap, "%s/handoff", profile);
+}
+
+static void handle_focus(App *a, bool focused);
+
+// tmux draws one window of a session at a time, and a url arriving moves
+// nothing: the tab would be made in a pane behind whichever one the client is
+// looking at. Selecting our own pane is the half of coming forward that can be
+// done from in here - the terminal application itself is the sender's to raise,
+// since a window has no handle on the one drawing it.
+//
+// Done in a child because tmux talks to its server and waits for the answer,
+// and the window has a page to be drawing. Double-forked so there is no child
+// left to reap: this is called from the main loop, which waits for nothing.
+static void raise_pane(void) {
+    const char *pane = getenv("TMUX_PANE");
+    if (!getenv("TMUX") || !pane || pane[0] != '%') return;
+    for (const char *p = pane + 1; *p; p++)
+        if (*p < '0' || *p > '9') return;      // not a pane id; not for sh
+
+    pid_t mid = fork();
+    if (mid < 0) return;
+    if (mid == 0) {
+        if (fork() == 0) {
+            int null = open("/dev/null", O_RDWR);
+            if (null >= 0) { dup2(null, 0); dup2(null, 1); dup2(null, 2); }
+            char cmd[128];
+            // The window first and then the pane inside it: selecting a pane
+            // of another window is not on its own a move to that window.
+            snprintf(cmd, sizeof cmd,
+                     "tmux select-window -t %s; tmux select-pane -t %s",
+                     pane, pane);
+            execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    waitpid(mid, NULL, 0);
+}
+
+// Until when a handed page is still owed its picture. Nothing about a link
+// clicked in another application arrives in a helpful order: the terminal loses
+// the focus as the handler is launched and gains it again as the handler brings
+// it back, and either can land on either side of the url itself. A blur that
+// arrives just after the handoff would otherwise stop the screencast that the
+// handoff had just started and cancel the still it had asked for, leaving the
+// new tab drawn over by the old page - so for as long as this is in the future
+// the window does not pause, whoever tells it to.
+static double g_handoff_owed;
+
+#define HANDOFF_DRAW_WAIT 5.0
+
+// The picture that was owed is up: an ordinary blur may stop the drawing again.
+static void handoff_drawn(void) { g_handoff_owed = 0; }
+
+// A url handed in is a page somebody is waiting to look at, so the window comes
+// forward and draws it whether or not the terminal is focused at this moment.
+// Without this the tab arrives titled and empty, or titled and still showing
+// the page before it: the bar and the status line are text and go out
+// regardless, and the picture is the one thing pause-on-blur holds back - which
+// is exactly a link clicked in another application, where the terminal is by
+// definition not the focused one.
+//
+// The restart is unconditional rather than a focus event, because the window
+// may never have been paused at all: the tab it has just switched to is a page
+// nothing has drawn yet either way, and Chrome hands over a frame only when
+// asked.
+static void handoff_arrived(App *a) {
+    g_handoff_owed = now_sec() + HANDOFF_DRAW_WAIT;
+    raise_pane();
+    a->paused = false;
+    a->last_hash = 0;                 // an unchanged frame is still a new page
+    a->kitty.grid_dirty = true;
+    a->expect_frame = now_sec() + 2.0;
+    screencast_start(a);
+    still_soon(a);
+}
+
+// Every request for `pid`, removed as it goes. With an App it is opened in a
+// tab; without one it is only cleared away, which is what a window leaving does
+// with anything that arrived too late for it to draw.
+static void handoff_take(const char *profile, pid_t pid, App *a) {
+    char dir[600];
+    handoff_dir(profile, dir, sizeof dir);
+    DIR *d = opendir(dir);
+    if (!d) return;
+    char prefix[32];
+    int plen = snprintf(prefix, sizeof prefix, "%d-", (int)pid);
+    int taken = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, prefix, (size_t)plen) != 0) continue;
+        if (strstr(e->d_name, ".tmp")) continue;
+        char path[800];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        FILE *f = fopen(path, "r");
+        unlink(path);
+        if (!f) continue;
+        char url[1100];
+        if (a && fgets(url, sizeof url, f)) {
+            url[strcspn(url, "\r\n")] = 0;
+            if (url[0]) {
+                term_log("%.3f handed %s", now_sec(), url);
+                if (tab_open_url(a, url)) taken++;
+                else notify(a, "no room for another tab");
+            }
+        }
+        fclose(f);
+    }
+    closedir(d);
+    // Once for the pass rather than once per url: the window comes forward and
+    // starts drawing the tab it ended on, and doing that per file would be the
+    // same work repeated for pages already switched away from.
+    if (taken) handoff_arrived(a);
+}
+
+// The window a url handed in from outside belongs to: the one whose session
+// file was written last, which is the one most recently moved and so the one
+// most recently looked at. Only a window that said it listens for one is a
+// candidate, since the signal that carries it is fatal to a window that does
+// not. 0 when there is no such window.
+static pid_t newest_window(const char *profile) {
+    char dir[600];
+    snprintf(dir, sizeof dir, "%s/sessions", profile);
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    pid_t best = 0;
+    time_t best_at = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        int pid = atoi(e->d_name);
+        const char *dot = strrchr(e->d_name, '.');
+        if (pid <= 0 || !dot || strcmp(dot, ".json") != 0) continue;
+        if (kill((pid_t)pid, 0) != 0 && errno == ESRCH) continue;
+        char path[800];
+        struct stat st;
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        if (stat(path, &st) != 0) continue;
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        char line[4096];
+        bool listens = fgets(line, sizeof line, f) && json_has(line, "handoff");
+        fclose(f);
+        if (!listens) continue;
+        // A tie is two windows written in the same second; the later pid is the
+        // later window, which is the better guess of the two.
+        if (st.st_mtime > best_at || (st.st_mtime == best_at && pid > best)) {
+            best_at = st.st_mtime;
+            best = (pid_t)pid;
+        }
+    }
+    closedir(d);
+    return best;
+}
+
+static int hand_url(const char *url) {
+    char profile[512];
+    chrome_profile_path(profile, sizeof profile);
+    pid_t pid = newest_window(profile);
+    if (pid <= 0) {
+        fprintf(stderr, "web: no window is running\n");
+        return 1;
+    }
+    char dir[600], path[800], tmp[820];
+    handoff_dir(profile, dir, sizeof dir);
+    mkdirs(dir);
+    snprintf(path, sizeof path, "%s/%d-%d", dir, (int)pid, (int)getpid());
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) {
+        fprintf(stderr, "web: cannot write %s: %s\n", tmp, strerror(errno));
+        return 1;
+    }
+    fprintf(f, "%s\n", url);
+    fclose(f);
+    if (rename(tmp, path) != 0) { unlink(tmp); return 1; }
+    if (kill(pid, SIGUSR1) != 0) {
+        unlink(path);
+        fprintf(stderr, "web: window %d has gone\n", (int)pid);
+        return 1;
+    }
+    return 0;
 }
 
 static void session_forget(App *a) {
@@ -553,6 +758,7 @@ static void session_forget(App *a) {
     char path[700];
     session_file(a, path, sizeof path);
     unlink(path);
+    handoff_take(a->chrome.profile, getpid(), NULL);
 }
 
 // Every window running now, one JSON object to a line. Nothing else tidies the
@@ -984,6 +1190,7 @@ static void still_draw(App *a, const char *msg) {
     double t0 = now_sec();
     kitty_draw_png(&a->kitty, b64, n);
     double t1 = now_sec();
+    handoff_drawn();
 
     a->last_hash = fnv1a(b64, n);
     a->last_draw = t1;
@@ -1853,6 +2060,9 @@ static const char KEY_CLAIMER[] =
 static void handle_focus(App *a, bool focused) {
     if (!a->pause_on_blur || focused == !a->paused) return;
     if (!focused) {
+        // A page just handed in has not been drawn yet, and the blur that says
+        // to stop drawing is half of the same click that asked for it.
+        if (g_handoff_owed > now_sec()) return;
         a->paused = true;
         a->expect_frame = 0;        // no frame is coming, and none is owed
         a->in_motion = false;       // and it is not moving, it is not drawing
@@ -2347,6 +2557,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
                 double t0 = now_sec();
                 kitty_draw_png(&a->kitty, data, dlen);
                 double t1 = now_sec();
+                handoff_drawn();
 
                 double prev_draw = a->last_draw;
                 double gap = prev_draw > 0 ? t1 - prev_draw : 0;
@@ -2848,6 +3059,9 @@ static void usage(void) {
         "              (- for stdout; the shot waits for the page to arrive)\n"
         "  --login     open a window to sign in with, on the same profile\n"
         "  --keep      leave chrome running on exit so the next start is instant\n"
+        "  --open URL  open URL in a tab of the window most recently used,\n"
+        "              and exit. Nothing running is an error, so a caller can\n"
+        "              fall back to starting one\n"
         "  --endpoint  print every running window as JSON and exit\n"
         "  --browsers  list the chrome processes web has running, with pids,\n"
         "              and say which of them a new window could still adopt\n"
@@ -3092,7 +3306,7 @@ int main(int argc, char **argv) {
     config_load(&a);
     bool show = false, login = false;
     bool endpoint_only = false, browsers_only = false, kill_only = false;
-    const char *exec_cmd = NULL;
+    const char *exec_cmd = NULL, *hand_to_window = NULL;
     double drain_at = 0;              // when the queue first ran out
     int port = 0;                     // 0 = let chrome pick a free one
     const char *eval_js = NULL;
@@ -3148,6 +3362,8 @@ int main(int argc, char **argv) {
             show = true;
         } else if (!strcmp(argv[i], "--keep")) {
             a.keep = true;
+        } else if (!strcmp(argv[i], "--open") && i + 1 < argc) {
+            hand_to_window = argv[++i];
         } else if (!strcmp(argv[i], "--endpoint")) {
             endpoint_only = true;
         } else if (!strcmp(argv[i], "--browsers")) {
@@ -3207,6 +3423,7 @@ int main(int argc, char **argv) {
     if (endpoint_only) return print_sessions();
     if (browsers_only) return print_browsers();
     if (kill_only)     return kill_everything();
+    if (hand_to_window) return hand_url(hand_to_window);
 
     a.status_open = !a.hide_status;
 
@@ -3231,6 +3448,7 @@ int main(int argc, char **argv) {
     signal(SIGWINCH, on_winch);
     signal(SIGTERM, on_term);
     signal(SIGHUP, on_term);
+    signal(SIGUSR1, on_hand);
 
     // Measure the terminal before Chrome starts. Launched at some other size it
     // would lay the page out, paint it, and then have to do both again the
@@ -3426,6 +3644,10 @@ int main(int argc, char **argv) {
     // when it is not a terminal is what keeps `web url` interactive.
 
     while (!g_quit) {
+        if (g_handed) {
+            g_handed = 0;
+            handoff_take(a.chrome.profile, getpid(), &a);
+        }
         if (g_resized) {
             g_resized = 0;
             if (a.inline_mode) {

@@ -49,6 +49,51 @@ session:
 web --login
 ```
 
+## Default browser
+
+`make browser` installs `web` and builds `~/Applications/Web.app`, an
+`http`/`https` handler that hands the link on:
+
+```sh
+make browser
+```
+
+Then System Settings > Desktop & Dock > Default web browser > web, and confirm
+the prompt macOS puts up. Nothing else can do it: LaunchServices answers `-54`
+to a third party asking for the browser to be changed, so `duti` and the like
+cannot set `http` or `https` however they are run.
+
+A link opens as a tab in the `web` window most recently used, which selects its
+own tmux pane if it is in one. With no window running, it starts one outwards
+from whatever is already on screen:
+
+| Where | What happens |
+|---|---|
+| a free pane of the tmux window on screen | `web` is run in it |
+| no free pane there | a tmux window of its own, in that session |
+| no tmux | a tab of the Ghostty window already open |
+| no Ghostty | a window of its own |
+
+A pane is free when nothing but a shell is running in it, and the active pane is
+taken first. The tmux window on screen is the one the client active last is
+showing. The terminal is brought forward either way.
+
+```sh
+sh mkbrowser.sh --terminal kitty   # some other terminal
+sh mkbrowser.sh --no-activate      # leave the terminal where it is
+sh mkbrowser.sh --to /Applications # somewhere other than ~/Applications
+```
+
+`--open` is the same handoff from a shell, and is what the bundle runs:
+
+```sh
+web --open https://example.com
+```
+
+It exits non-zero when there is no window to hand to, which is what tells the
+bundle to start one. A window started by a `web` older than `--open` is never
+handed to.
+
 ## Keys
 
 | Key | Action |
@@ -225,6 +270,8 @@ web [options] <url>...
 --screenshot F   write the page to F as a png and exit; "-" is stdout
 --login     open a window to sign in with, on the same profile
 --keep      leave Chrome running on exit, for this window and every other
+--open URL  open URL in a tab of the window most recently used, and exit.
+            Nothing running is an error, so a caller can start one
 --endpoint  print every running window as JSON and exit
 --browsers  list the Chrome processes web has running, with pids, and say
             which a new window could adopt
@@ -337,7 +384,7 @@ per line, without starting a browser:
 
 ```console
 $ web --endpoint
-{"pid":4123,"port":9222,"cdp":"http://127.0.0.1:9222","target":"0A32…","url":"https://example.com/","title":"Example Domain"}
+{"pid":4123,"port":9222,"cdp":"http://127.0.0.1:9222","target":"0A32…","url":"https://example.com/","title":"Example Domain","handoff":true}
 ```
 
 Playwright has no accessor for a target id, so match it per page:
