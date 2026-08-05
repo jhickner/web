@@ -91,6 +91,7 @@ window started from there inherits.
 | `^X` | open or close the console |
 | `alt+y` | copy the console transcript |
 | `alt+enter` | let a frozen run carry on |
+| `alt+g` | every tab at once, in a grid — see [The grid](#the-grid) |
 | `?` | key list over the page; any key dismisses it |
 | mouse | click, drag to select, wheel to scroll |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
@@ -191,6 +192,23 @@ The host matches the end of the page's own on a dot, so `ycombinator.com`
 covers `news.ycombinator.com`; the first rule of each kind that matches wins.
 `hint-all` labels everything whatever the rules say — `gf` under the vim keys,
 bindable anywhere else.
+
+## The grid
+
+`alt+g` draws every tab at once, up to nine, each in a tile with its name under
+it:
+
+| Key | Action |
+|---|---|
+| `alt+g` | open the grid, or close it |
+| `alt+1`…`alt+9` | that tile takes the keyboard |
+| click a tile | the same, and clicking the one in front closes the grid |
+
+Each page is photographed at the size of its own tile, so it reflows to the
+width it is drawn at rather than being a shrunken screenshot of a whole window.
+One photograph is taken at a time, a few a second, going round the tiles in turn
+and stopping twice as often on the one in front — so a grid of nine costs what a
+grid of two does. The screencast stops while the grid is up.
 
 ## Finding a page
 

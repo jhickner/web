@@ -983,6 +983,41 @@ int cdp_vcall(Chrome *c, const char *method, const char *params_fmt, va_list ap)
     return rc < 0 ? -1 : id;
 }
 
+// The same call, sent on the browser's own socket instead of the page's, and
+// aimed at whichever page a flattened session names. That is how a page other
+// than the one this window drives is spoken to at all: a socket of its own
+// would be another descriptor to poll and another session to keep alive, where
+// a session id is a field in a message on a socket already here. The reply
+// comes back on the same socket carrying the same id.
+int cdp_session_call(Chrome *c, const char *session, const char *method,
+                     const char *params_fmt, ...) {
+    if (c->watch.fd <= 0 || c->watch.closed) return -1;
+    Buf b = {0};
+    int id = c->next_id++;
+    buf_addf(&b, "{\"id\":%d,\"method\":\"%s\"", id, method);
+    if (session && *session) buf_addf(&b, ",\"sessionId\":\"%s\"", session);
+    buf_add(&b, ",\"params\":{", 10);
+    if (params_fmt && *params_fmt) {
+        va_list ap;
+        va_start(ap, params_fmt);
+        va_list copy;
+        va_copy(copy, ap);
+        int n = vsnprintf(NULL, 0, params_fmt, copy);
+        va_end(copy);
+        if (n > 0) {
+            buf_reserve(&b, b.len + (size_t)n + 4);
+            vsnprintf(b.p + b.len, (size_t)n + 1, params_fmt, ap);
+            b.len += (size_t)n;
+        }
+        va_end(ap);
+    }
+    buf_add(&b, "}}", 2);
+    term_log("watch-> %.180s", b.p);
+    int rc = ws_send_text(&c->watch, b.p, b.len);
+    buf_free(&b);
+    return rc < 0 ? -1 : id;
+}
+
 int cdp_call(Chrome *c, const char *method, const char *params_fmt, ...) {
     va_list ap;
     va_start(ap, params_fmt);

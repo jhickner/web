@@ -306,6 +306,11 @@ static void screencast_start(App *a) {
     // through here, and any of them would otherwise start the picture up again
     // behind a terminal nobody is looking at.
     if (!a->has_tty || a->paused || a->cast_w < 1 || a->cast_h < 1) return;
+    // The grid photographs each of its tiles itself, at the size it draws them.
+    // A screencast running under it would be the whole window's worth of pixels
+    // arriving to be squeezed into one ninth of the screen, which is what made
+    // the first grid unusable.
+    if (a->grid_on) return;
     app_cdp(a, "Page.startScreencast",
              "\"format\":\"png\",\"maxWidth\":%d,\"maxHeight\":%d,\"everyNthFrame\":1",
              a->cast_w, a->cast_h);
@@ -1323,8 +1328,9 @@ static void shot_write(App *a, const char *msg) {
 // screencast and would read as a stutter if a still were counted among them.
 static void still_draw(App *a, const char *msg) {
     // A reply that outlived the blur it was asked before. Nothing is being
-    // looked at, and the unpause redraws from scratch anyway.
-    if (a->paused) return;
+    // looked at, and the unpause redraws from scratch anyway. Nor into a grid,
+    // where this is a full-window picture with nowhere to go.
+    if (a->paused || a->grid_on) return;
     size_t n = 0;
     const char *b64 = json_str(msg, "data", &n);
     if (!b64 || !n) return;    // the deadline in the loop asks again
@@ -1550,6 +1556,7 @@ static void draw_panes(App *a) {
     if (!a->has_tty) return;
     status_sync(a);
     tabs_paint(a);
+    grid_paint(a);
     draw_status(a);
     console_paint(a);
     help_paint(a);          // over the picture, so last of all
@@ -2344,6 +2351,10 @@ static void handle_mouse(App *a, Event *ev) {
     }
     if (!a->mouse_down && tabs_mouse(a, ev)) return;
     if (console_mouse(a, ev)) return;
+    // A grid is a picture of nine pages, not one page to click into: a click
+    // picks the tile under it and the page it lands on comes forward. Nothing
+    // is dispatched into a page at a size it was never laid out at.
+    if (grid_mouse(a, ev)) return;
     Kitty *k = &a->kitty;
     bool inside = ev->mx >= k->x && ev->mx < k->x + k->cols &&
                   ev->my >= k->y && ev->my < k->y + k->rows;
@@ -2567,6 +2578,7 @@ static bool do_action(App *a, Event *ev, Act act) {
         return true;
     }
     case ACT_RESUME: exec_resume(a); return true;
+    case ACT_GRID:   grid_toggle(a); return true;
     case ACT_COPY_URL:
         clipboard_put(a->url);
         notify(a, "copied url");
@@ -2822,6 +2834,12 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         // here on is ours, and the point of the split below is to say how much
         // of the gap between frames is us and how much is Chrome.
         double t_arrive = now_sec();
+
+        // Frames already in flight when the grid opened, or ones a page sent
+        // before it heard the screencast had stopped. Acknowledged below like
+        // any other - what must not happen is a picture of the whole window
+        // being drawn over a screen that is now nine thumbnails.
+        if (a->grid_on) dlen = 0;
 
         if (dlen) {
             uint64_t h = fnv1a(data, dlen);
@@ -3251,6 +3269,9 @@ static bool popup_navigable(const char *url, size_t n) {
 // without that a popup left open for an hour would be yanked into a tab the
 // moment it happened to navigate.
 static void on_target_message(App *a, const char *msg) {
+    // Replies to what the grid asked over this socket - a session, or a tile's
+    // photograph - which are not news about pages appearing and going.
+    if (grid_reply(a, msg)) return;
     bool made = strstr(msg, "Target.targetCreated") != NULL;
     bool moved = !made && strstr(msg, "Target.targetInfoChanged") != NULL;
     bool gone = !made && !moved && strstr(msg, "Target.targetDestroyed") != NULL;
@@ -4055,6 +4076,9 @@ int main(int argc, char **argv) {
         // Everything a pending shot waits for arrives as an event except the
         // deadlines, and those need the loop to come round on its own.
         if (a.shot_path && (wait < 0 || wait > 100)) wait = 100;
+        // The grid's turns are the one thing here on a clock of its own: no
+        // event announces that the next tile is due to be photographed.
+        if (a.grid_on && (wait < 0 || wait > 50)) wait = 50;
         // The picture stopping is the absence of frames, which is the one thing
         // poll cannot be woken by. One wakeup at the deadline is all it takes -
         // and while frames are still arriving they do the waking themselves.
@@ -4140,6 +4164,8 @@ int main(int argc, char **argv) {
         // A run that started or ended while the window was blurred: neither is
         // a focus event, and both change whether there is anything to draw for.
         check_driven(&a);
+        // Whose turn it is to be photographed for its tile.
+        grid_tick(&a);
         // A child that has stopped and is waiting says so in a file rather than
         // down the pipe, so this is the only thing looking for it.
         exec_check_pause(&a);
@@ -4305,6 +4331,9 @@ int main(int argc, char **argv) {
         // until that lands the resets after it are read as more of the frame.
         g_write_force = 1;
         kitty_abort(&a.kitty);
+        // The tiles are images of their own and are named nowhere else: left
+        // up, they go on showing through whatever the shell puts on those rows.
+        if (a.grid_on) grid_off(&a, NULL);
         if (!a.inline_mode || a.clear_exit) kitty_clear(&a.kitty);
         kitty_free(&a.kitty);
         term_restore(&a.term, a.clear_exit);
