@@ -22,6 +22,10 @@ void buf_consume(Buf *b, size_t n);
 void buf_free(Buf *b);
 
 double now_sec(void);
+
+// The hash a picture is deduped by. Chrome's encoder is deterministic, so two
+// frames of an unchanged page are the same bytes and hash the same.
+uint64_t fnv1a(const char *p, size_t n);
 int    writeall(int fd, const char *p, size_t n);
 void   mkdirs(const char *path);
 
@@ -405,6 +409,7 @@ typedef struct {
     bool inited;        // the once-per-page CDP setup has been done
     int  x0, x1;        // cells the bar last drew it on, for clicks
     Buf  shot;          // the last picture taken of it, for its tile in the grid
+    uint64_t shot_hash; // and what it hashed to, so an unchanged page is not redrawn
     char session[64];   // the flattened session its tile is captured through
 } Tab;
 
@@ -810,6 +815,7 @@ void grid_paint(App *a);
 void grid_tick(App *a);                   // whose turn it is, and asking
 bool grid_reply(App *a, const char *msg); // true when the message was the grid's
 bool grid_mouse(App *a, Event *ev);       // true when a tile took the click
+bool grid_key(App *a, Event *ev);         // arrows pick a tile, enter opens it
 bool grid_tile_rect(const App *a, int i, int *x, int *y, int *cols, int *rows);
 int  grid_tile_at(const App *a, int col, int row);
 int  grid_count(const App *a);

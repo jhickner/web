@@ -158,7 +158,7 @@ static int png_width(const char *b64, size_t len) {
                  ((unsigned)h[18] << 8) | (unsigned)h[19]);
 }
 
-static uint64_t fnv1a(const char *p, size_t n) {
+uint64_t fnv1a(const char *p, size_t n) {
     uint64_t h = 1469598103934665603ULL;
     for (size_t i = 0; i < n; i++) {
         h ^= (unsigned char)p[i];
@@ -2723,6 +2723,9 @@ static void handle_key(App *a, Event *ev) {
     // Labels on the links take every key they can use, so a half-typed label
     // can never fall through into the page's own search box.
     if (hint_key(a, ev)) return;
+    // The grid takes the arrows and enter: in a picture of nine pages they pick
+    // a tile and open it, where in a page they would scroll it.
+    if (grid_key(a, ev)) return;
     // --step parks the runner after every line, and this is the key it waits
     // for. Swallowed rather than acted on: the point of it is to let the next
     // line go, and a script being walked through is not one being typed over.

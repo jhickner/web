@@ -194,7 +194,14 @@ bool grid_reply(App *a, const char *msg) {
     term_log("grid: tile %d picture %zu b64", i, n);
     if (!b64 || !n) return true;              // it refused; its turn comes again
 
+    // A page that has not changed comes back as the same bytes - Chrome's
+    // encoder is deterministic - so the picture the terminal already holds is
+    // the picture that just arrived. Most of a grid is pages sitting still,
+    // and this is what keeps them from being written again every turn.
     Tab *t = &a->tabs[i];
+    uint64_t h64 = fnv1a(b64, n);
+    if (h64 == t->shot_hash && kitty_tile_live(&a->kitty, i + 1)) return true;
+    t->shot_hash = h64;
     t->shot.len = 0;
     buf_add(&t->shot, b64, n);
 
@@ -347,6 +354,38 @@ void grid_toggle(App *a) {
     }
     grid_paint(a);
     if (a->ntabs > GRID_MAX) notify(a, "showing the first nine tabs");
+}
+
+// The grid is a picture of pages, so the keys that move about in a page mean
+// something else here: the arrows walk the tiles and enter opens the one they
+// land on. Only those, and only unmodified - alt+g, the tab keys and quit are
+// what they always were.
+bool grid_key(App *a, Event *ev) {
+    if (!a->grid_on || ev->type != EV_KEY) return false;
+    if (ev->mods & (MOD_CTRL | MOD_ALT | MOD_SUPER)) return false;
+    int n = grid_count(a);
+    if (n < 1) return false;
+
+    if (ev->key == KEY_ENTER || ev->key == KEY_ESC) {
+        grid_off(a, NULL);          // whole again, on whichever tile was in front
+        return true;
+    }
+
+    int gc, gr;
+    grid_shape(n, &gc, &gr);
+    int cur = a->tab < n ? a->tab : 0;
+    int r = cur / gc, c = cur % gc, want = -1;
+    switch (ev->key) {
+    case KEY_LEFT:  if (c > 0)       want = cur - 1;  break;
+    case KEY_RIGHT: if (c + 1 < gc)  want = cur + 1;  break;
+    case KEY_UP:    if (r > 0)       want = cur - gc; break;
+    case KEY_DOWN:                   want = cur + gc; break;
+    default: return false;
+    }
+    // The last row is short whenever the tiles do not fill the shape, and a
+    // step off the end of it is a step onto nothing rather than a wrap.
+    if (want >= 0 && want < n && want != a->tab) tab_go(a, want);
+    return true;                    // an arrow is the grid's whether it moved or not
 }
 
 // A click picks the page under it, which switches to that tab. Clicking the one

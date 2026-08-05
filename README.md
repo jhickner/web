@@ -201,14 +201,19 @@ it:
 | Key | Action |
 |---|---|
 | `alt+g` | open the grid, or close it |
-| `alt+1`…`alt+9` | that tile takes the keyboard |
-| click a tile | the same, and clicking the one in front closes the grid |
+| `↓` `↑` `←` `→` | pick the tile next to this one |
+| `enter` | open the tile that is in front |
+| `esc` | the same |
+| `alt+1`…`alt+9` | pick that tile |
+| click a tile | pick it; clicking the one in front opens it |
 
 Each page is photographed at the size of its own tile, so it reflows to the
 width it is drawn at rather than being a shrunken screenshot of a whole window.
 One photograph is taken at a time, a few a second, going round the tiles in turn
 and stopping twice as often on the one in front — so a grid of nine costs what a
-grid of two does. The screencast stops while the grid is up.
+grid of two does. A page that has not changed comes back as the same bytes and
+is not drawn again, so a grid of pages sitting still costs nothing at all. The
+screencast stops while the grid is up.
 
 ## Finding a page
 
