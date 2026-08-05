@@ -250,6 +250,18 @@ void grid_paint(App *a) {
     int n = grid_count(a);
     bool relabel = a->grid_shown_tab != a->tab;
 
+    // Everything that disturbs the screen says so the same way: it dirties the
+    // picture's cells. A resize, a zoom, the console opening, the key list
+    // going away. In a single view the next frame lays them down again, and one
+    // is always on its way. Here the next picture may be a page that has not
+    // changed, which is deliberately not drawn - so a tile whose cells were
+    // wiped would stay blank until something happened to move it. The word is
+    // passed to the tiles rather than waited on.
+    if (a->kitty.slot == 0 && a->kitty.grid_dirty) {
+        for (int i = 1; i <= GRID_MAX; i++) a->kitty.tiles[i].grid_dirty = true;
+        a->kitty.grid_dirty = false;
+    }
+
     for (int i = 0; i < n; i++) {
         int x, y, w, h;
         if (!grid_tile_rect(a, i, &x, &y, &w, &h)) {
@@ -257,19 +269,18 @@ void grid_paint(App *a) {
             return;
         }
         kitty_use(&a->kitty, i + 1);
-        bool moved = a->kitty.x != x || a->kitty.y != y ||
-                     a->kitty.cols != w || a->kitty.rows != h;
-        kitty_set_rect(&a->kitty, x, y, w, h);
+        kitty_set_rect(&a->kitty, x, y, w, h);   // dirties the tile if it moved
+        // Only what the terminal no longer has: a tile whose cells are gone or
+        // have moved, or one that has never been drawn at all.
+        bool need = a->kitty.grid_dirty || !kitty_tile_live(&a->kitty, i + 1);
         Tab *t = &a->tabs[i];
         bool sent = false;
-        // Only what the terminal no longer has: a tile that moved, or one whose
-        // cells have never been laid down. Everything else is already up.
-        if (t->shot.len && (moved || !kitty_tile_live(&a->kitty, i + 1))) {
+        if (t->shot.len && need) {
             kitty_draw_png(&a->kitty, t->shot.p, t->shot.len);
             sent = true;
         }
         kitty_use(&a->kitty, 0);
-        if (relabel || sent || moved) paint_label(a, i, x, y + h, w);
+        if (relabel || sent || need) paint_label(a, i, x, y + h, w);
     }
     a->grid_shown_tab = a->tab;
 }
