@@ -2293,9 +2293,10 @@ static bool do_action(App *a, Event *ev, Act act) {
         return true;
     case ACT_FIND_NEXT: find_next(a, false); return true;
     case ACT_FIND_PREV: find_next(a, true);  return true;
-    case ACT_HINT:      hint_show(a, 0); return true;
-    case ACT_HINT_TAB:  hint_show(a, 1); return true;
-    case ACT_HINT_COPY: hint_show(a, 2); return true;
+    case ACT_HINT:      hint_show(a, 0, false); return true;
+    case ACT_HINT_TAB:  hint_show(a, 1, false); return true;
+    case ACT_HINT_COPY: hint_show(a, 2, false); return true;
+    case ACT_HINT_ALL:  hint_show(a, 0, true);  return true;
     case ACT_BACK:    nav_history(a, -1); return true;
     case ACT_FORWARD: nav_history(a, +1); return true;
     case ACT_RELOAD:

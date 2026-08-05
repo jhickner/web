@@ -49,6 +49,10 @@ static const char HINT_JS[] =
     "[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],"
     "[role=menuitem],[role=option],[onclick],[contenteditable],[tabindex]';"
     "var box=null,labels=[],typed='',kind=0;"
+    // What the file's site rules made of the above for this page: the set to
+    // look in, and the part of it to leave alone. Both are settled once in
+    // build and read from there down, since every element found walks past them.
+    "var sel=SEL,skipsel='';"
 
     "function say(s){try{__webhint(s);}catch(e){}}"
     // Through the CSSOM rather than a style attribute or a style element:
@@ -60,7 +64,7 @@ static const char HINT_JS[] =
     // it was found in. A closed root and a cross-origin frame are the two
     // blind spots, and neither can be reached from here at all.
     "function collect(root,dx,dy,out){"
-    "var all=root.querySelectorAll(SEL),i;"
+    "var all=root.querySelectorAll(sel),i;"
     "for(i=0;i<all.length;i++)out.push([all[i],dx,dy]);"
     "var hosts=root.querySelectorAll('*');"
     "for(i=0;i<hosts.length;i++)if(hosts[i].shadowRoot)collect(hosts[i].shadowRoot,dx,dy,out);"
@@ -76,6 +80,10 @@ static const char HINT_JS[] =
     // is worse than not labelling it.
     "function pick(el,dx,dy){"
     "if(el.disabled)return null;"
+    // A `hint-skip` rule names the part of the page to leave alone, so what it
+    // matches takes everything under it with it - a rule is written against the
+    // container a reader can see, not against the anchors inside it.
+    "if(skipsel&&el.closest&&el.closest(skipsel))return null;"
     "if(el.getAttribute&&el.getAttribute('tabindex')==='-1'&&!el.href)return null;"
     "if(el.type==='hidden')return null;"
     "var r=el.getBoundingClientRect();"
@@ -119,8 +127,16 @@ static const char HINT_JS[] =
 
     "function clear(){if(box)box.remove();box=null;labels=[];typed='';}"
 
-    "function build(k,chars){"
-    "clear();kind=k;"
+    "function build(k,chars,only,skip){"
+    "clear();kind=k;sel=SEL;skipsel='';"
+    // Each rule tried on the document once before anything is walked with it: a
+    // selector the file got wrong throws here, where it costs one call and can
+    // be said out loud, rather than inside the walk, where it would throw the
+    // labels away and look like a page that never answered.
+    "var bad=0;"
+    "if(only){try{document.querySelector(only);sel=only;}catch(e){bad=1;}}"
+    "if(skip){try{document.querySelector(skip);skipsel=skip;}catch(e){bad=1;}}"
+    "if(bad)say('badsel');"
     "var raw=[],hits=[],i;"
     "collect(document,0,0,raw);"
     "for(i=0;i<raw.length;i++){var h=pick(raw[i][0],raw[i][1],raw[i][2]);if(h)hits.push(h);}"
@@ -187,9 +203,15 @@ static const char HINT_JS[] =
     // one thing two worlds of the same page can both read. The event is only
     // the nudge to go and look.
     "document.addEventListener('webhint',function(){"
-    "var d=document.documentElement.getAttribute('data-webhint')||'';"
+    "var e=document.documentElement;"
+    "var d=e.getAttribute('data-webhint')||'';"
     "var p=d.split(' ');"
-    "if(p[0]==='s')build(parseInt(p[1],10)||0,p[2]||'asdfghjkl');"
+    // The two selectors ride on attributes of their own rather than in the
+    // command: they hold spaces, which the line above splits on, and they are
+    // longer than everything else here put together.
+    "if(p[0]==='s')build(parseInt(p[1],10)||0,p[2]||'asdfghjkl',"
+    "e.getAttribute('data-webhint-only')||'',"
+    "e.getAttribute('data-webhint-skip')||'');"
     "else if(p[0]==='t')type(p[1]||'');"
     "else if(p[0]==='b')back();"
     "else clear();"
@@ -211,6 +233,51 @@ static void hint_cmd(App *a, const char *cmd) {
     run_js(a, js);
 }
 
+// Into a single quoted JS string. What goes out is escaped once more for the
+// JSON it travels in, which is what takes care of the backslash this leaves
+// behind; what that escape does not touch is the quote, and a selector is
+// entitled to one - `a[href^='/item']` is a selector someone will write.
+static void js_quote(Buf *b, const char *s) {
+    for (; *s; s++) {
+        if ((unsigned char)*s < 0x20) continue;
+        if (*s == '\\' || *s == '\'') buf_add(b, "\\", 1);
+        buf_add(b, s, 1);
+    }
+}
+
+// The one command carrying more than a few characters, and the only one that
+// has to be built rather than printed: either selector may be as long as
+// everything else in the message. The attributes go on and come off around the
+// event exactly as the command's own does.
+static void hint_start(App *a, int kind, const char *only, const char *skip) {
+    Buf js = {0};
+    buf_addf(&js, "(function(d){d.setAttribute('data-webhint','s %d %s');",
+             kind, HINT_CHARS);
+    if (only) {
+        buf_addf(&js, "d.setAttribute('data-webhint-only','");
+        js_quote(&js, only);
+        buf_addf(&js, "');");
+    }
+    if (skip) {
+        buf_addf(&js, "d.setAttribute('data-webhint-skip','");
+        js_quote(&js, skip);
+        buf_addf(&js, "');");
+    }
+    buf_addf(&js, "document.dispatchEvent(new Event('webhint'));"
+                  "d.removeAttribute('data-webhint');"
+                  "d.removeAttribute('data-webhint-only');"
+                  "d.removeAttribute('data-webhint-skip');"
+                  "})(document.documentElement)");
+    buf_add(&js, "", 1);
+
+    Buf esc = {0};
+    json_escape_buf(&esc, js.p);
+    buf_add(&esc, "", 1);
+    app_cdp(a, "Runtime.evaluate", "\"expression\":\"%s\"", esc.p);
+    buf_free(&esc);
+    buf_free(&js);
+}
+
 void hint_install(App *a, bool fresh) {
     // The binding is the session's and the script is the page's: a tab switched
     // back to needs the first again and already carries the second.
@@ -226,7 +293,7 @@ void hint_install(App *a, bool fresh) {
     buf_free(&esc);
 }
 
-void hint_show(App *a, int kind) {
+void hint_show(App *a, int kind, bool all) {
     if (!a->has_tty) return;
     // A PDF is drawn by the viewer extension, in a frame of another process
     // that nothing this document is asked ever reaches. There is no document
@@ -235,9 +302,8 @@ void hint_show(App *a, int kind) {
         notify(a, "no labels in a pdf");
         return;
     }
-    char cmd[64];
-    snprintf(cmd, sizeof cmd, "s %d %s", kind, HINT_CHARS);
-    hint_cmd(a, cmd);
+    hint_start(a, kind, all ? NULL : hint_selector(a->url, false),
+                             all ? NULL : hint_selector(a->url, true));
     a->hint_on = true;
     a->hint_kind = kind;
     a->hint_n = 0;
@@ -321,6 +387,13 @@ void hint_reply(App *a, char *payload) {
             notify(a, "nothing to click in view");
         }
         still_soon(a);              // the labels want the sharp picture
+        return;
+    }
+    // Said on the way to the labels rather than instead of them: the rule the
+    // file got wrong is dropped and the rest of the page is labelled as it
+    // always was, so `f` still works while the line is being found and fixed.
+    if (!strcmp(payload, "badsel")) {
+        notify(a, "hint rule is not a selector");
         return;
     }
     if (!strcmp(payload, "cancel")) {

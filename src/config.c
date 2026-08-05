@@ -77,6 +77,7 @@ static const struct { const char *name; Act act; const char *section; } ACTS[] =
     {"hint",           ACT_HINT, "the links"},
     {"hint-tab",       ACT_HINT_TAB, NULL},
     {"hint-copy",      ACT_HINT_COPY, NULL},
+    {"hint-all",       ACT_HINT_ALL, NULL},
     {"insert",         ACT_INSERT, NULL},
     {"insert-off",     ACT_INSERT_OFF, NULL},
     {"focus-input",    ACT_FOCUS_INPUT, NULL},
@@ -502,6 +503,7 @@ static const KeyDef VIM[] = {
 static const KeyPair VIM_PAIRS[] = {
     {0, 'g', 0, 'g', ACT_TOP},
     {0, 'g', 0, 'i', ACT_FOCUS_INPUT},
+    {0, 'g', 0, 'f', ACT_HINT_ALL},
     {0, 'y', 0, 'y', ACT_COPY_URL},
     {0, 'y', 0, 'f', ACT_HINT_COPY},
     {0, 'Z', 0, 'Z', ACT_QUIT},
@@ -604,6 +606,108 @@ static void setting_text(const App *a, int i, char *out, size_t cap) {
     snprintf(out, cap, "%s", (SETTINGS[i].kind == S_BOOL_NOT ? !on : on) ? "yes" : "no");
 }
 
+// ------------------------------------------------------------ site rules
+
+// Which elements the labels land on, per site. `f` labels everything a click
+// could be aimed at, which is the only honest answer on a page nothing is known
+// about and the wrong one on a page that is a list: Hacker News is two hundred
+// links of which thirty are the ones anyone came for, and the other hundred and
+// seventy are what makes the thirty unreadable. `hint-only` says what the whole
+// set is for a host and `hint-skip` takes a part of it away, both as ordinary
+// CSS selectors, which is the same answer Vimium C arrived at.
+//
+//   hint-only news.ycombinator.com = .titleline > a
+//   hint-skip github.com           = .Header, footer
+//
+// Neither is a way to lose a link for good: `hint-all` labels everything on any
+// page, whatever the file said about it.
+typedef struct { char host[96]; char sel[192]; bool skip; } HintRule;
+#define HINTS_MAX 32
+
+static HintRule g_hints[HINTS_MAX];
+static int      g_nhints;
+
+// One field of a line, trimmed at both ends into a fixed array. False when
+// there was nothing there or more than there is room for, since a selector
+// silently cut in half is a selector that quietly means something else.
+static bool copy_field(char *out, size_t cap, const char *s, const char *end) {
+    while (s < end && isspace((unsigned char)*s)) s++;
+    while (end > s && isspace((unsigned char)end[-1])) end--;
+    size_t n = (size_t)(end - s);
+    if (!n || n >= cap) return false;
+    memcpy(out, s, n);
+    out[n] = 0;
+    return true;
+}
+
+// The `host = selector` half of a rule line.
+static bool hint_add(const char *s, bool skip) {
+    // The first `=`, unlike every other line in the file: a selector may hold
+    // one, as `a[href^=http]` does, and the host it belongs to may not.
+    const char *eq = strchr(s, '=');
+    if (!eq || g_nhints >= HINTS_MAX) return false;
+    HintRule r = {{0}, {0}, skip};
+    if (!copy_field(r.host, sizeof r.host, s, eq)) return false;
+    if (!copy_field(r.sel, sizeof r.sel, eq + 1, eq + 1 + strlen(eq + 1))) return false;
+    for (char *p = r.host; *p; p++) *p = (char)tolower((unsigned char)*p);
+    g_hints[g_nhints++] = r;
+    return true;
+}
+
+// The `hint-only` or `hint-skip` a line opens with, and what follows it. NULL
+// for every other line, which is most of them.
+static const char *hint_keyword(const char *s, bool *skip) {
+    while (isspace((unsigned char)*s)) s++;
+    if (!strncasecmp(s, "hint-only", 9))      *skip = false;
+    else if (!strncasecmp(s, "hint-skip", 9)) *skip = true;
+    else return NULL;
+    s += 9;
+    if (!isspace((unsigned char)*s)) return NULL;
+    while (isspace((unsigned char)*s)) s++;
+    return s;
+}
+
+// The host of a URL, lowercased, without the scheme, the port, the login or
+// anything after it.
+static void url_host(const char *url, char *out, size_t cap) {
+    const char *p = strstr(url, "://");
+    p = p ? p + 3 : url;
+    const char *e = p;
+    while (*e && *e != '/' && *e != '?' && *e != '#') e++;
+    for (const char *at = p; at < e; at++)
+        if (*at == '@') p = at + 1;
+    for (const char *c = p; c < e; c++)
+        if (*c == ':') { e = c; break; }
+    size_t n = (size_t)(e - p);
+    if (n >= cap) n = cap - 1;
+    for (size_t i = 0; i < n; i++) out[i] = (char)tolower((unsigned char)p[i]);
+    out[n] = 0;
+}
+
+// A rule's host against the page's: the end of it, on a dot, so
+// `ycombinator.com` is `news.ycombinator.com` as well and `combinator.com` is
+// neither of them.
+static bool host_match(const char *host, const char *pat) {
+    size_t h = strlen(host), n = strlen(pat);
+    if (!n || n > h) return false;
+    if (strcasecmp(host + h - n, pat)) return false;
+    return h == n || host[h - n - 1] == '.';
+}
+
+const char *hint_selector(const char *url, bool skip) {
+    if (!url || !*url || !g_nhints) return NULL;
+    char host[256];
+    url_host(url, host, sizeof host);
+    if (!host[0]) return NULL;
+    // The first that matches rather than the longest: the file is short and in
+    // an order its writer chose, and a second rule for a host already named is
+    // a line that reads as if it were the one in force.
+    for (int i = 0; i < g_nhints; i++)
+        if (g_hints[i].skip == skip && host_match(host, g_hints[i].host))
+            return g_hints[i].sel;
+    return NULL;
+}
+
 // ------------------------------------------------------------------ file
 
 // Written once, when there is nothing there, out of the values the program is
@@ -618,6 +722,9 @@ static void write_config(const char *path, const App *a) {
         setting_text(a, i, val, sizeof val);
         fprintf(f, "%-16s = %s\n", SETTINGS[i].name, val);
     }
+    fputs("\n# Which elements the link labels land on, for one site.\n"
+          "#hint-only news.ycombinator.com = .titleline > a\n"
+          "#hint-skip github.com = .Header, footer\n", f);
     // The keys are written with a `#` in front of them: each line says what the
     // key already does, and taking the `#` off is how it is changed. Live, they
     // would be the whole default map stated a second time - and anything laid
@@ -670,6 +777,23 @@ static int read_config(const char *path, App *a, bool keys) {
     int lineno = 0, bad = 0;
     while (fgets(line, sizeof line, f)) {
         lineno++;
+        // A site rule, taken whole and before any of the reading below touches
+        // it: a CSS selector may hold a `#` and it may hold an `=`, and neither
+        // means there what it means on every other line of the file. Which
+        // leaves such a line only able to be commented out from its very start.
+        bool skip;
+        trim(line);
+        const char *rule = hint_keyword(line, &skip);
+        if (rule) {
+            if (!keys) {
+                if (!hint_add(rule, skip)) {
+                    fprintf(stderr, "web: %s:%d: `%s` is not a host and a selector\n",
+                            path, lineno, rule);
+                    bad++;
+                }
+            }
+            continue;
+        }
         // A `#` opening the line, or with a space in front of it, starts a
         // comment; one written up against the key is the key. Which leaves the
         // bare `#` key unreachable and every other spelling of it working.
@@ -783,6 +907,7 @@ static void load_vim(void) {
 int config_load(App *a) {
     g_nbinds = 0;
     g_nvim = 0;
+    g_nhints = 0;
     for (int i = 0; i < NDEFAULTS; i++)
         bind_set(DEFAULTS[i].mods, DEFAULTS[i].key, 0, 0, DEFAULTS[i].act);
 

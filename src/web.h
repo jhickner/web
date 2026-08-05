@@ -189,7 +189,7 @@ typedef enum {
     ACT_RELOAD, ACT_RELOAD_HARD,
     ACT_COPY, ACT_COPY_URL, ACT_EXTERNAL,
     ACT_FIND, ACT_FIND_NEXT, ACT_FIND_PREV,
-    ACT_HINT, ACT_HINT_TAB, ACT_HINT_COPY,
+    ACT_HINT, ACT_HINT_TAB, ACT_HINT_COPY, ACT_HINT_ALL,
     ACT_INSERT, ACT_INSERT_OFF, ACT_FOCUS_INPUT, ACT_PICK,
     ACT_TAB_NEW, ACT_TAB_CLOSE, ACT_TAB_NEXT, ACT_TAB_PREV,
     ACT_TAB_1, ACT_TAB_2, ACT_TAB_3, ACT_TAB_4, ACT_TAB_5,
@@ -578,6 +578,11 @@ typedef struct {
 int  config_load(App *a);
 void config_dir(char *out, size_t cap);
 
+// The selector a `hint-only` or `hint-skip` line in the file gave this page's
+// host, or NULL where the file said nothing about it. `skip` picks which of the
+// two kinds is being asked for.
+const char *hint_selector(const char *url, bool skip);
+
 // Note an outstanding call so its reply can be recognised, and claim the reply.
 void app_req_note(App *a, int id, int kind);
 int  app_req_take(App *a, int id);
@@ -669,7 +674,10 @@ void help_free(App *a);
 // tab_session_new, since the script sticks to the page and the binding does not.
 void hint_install(App *a, bool fresh);
 
-void hint_show(App *a, int kind);     // 0 follow, 1 new tab, 2 copy the address
+// `kind` is 0 follow, 1 new tab, 2 copy the address. `all` labels everything
+// clickable whatever the file's site rules say, which is the way back to the
+// links a `hint-only` line leaves out.
+void hint_show(App *a, int kind, bool all);
 void hint_cancel(App *a);             // labels away, mode over; safe when off
 bool hint_key(App *a, Event *ev);     // true when the labels consumed it
 
