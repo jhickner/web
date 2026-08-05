@@ -117,7 +117,7 @@ static void first_col(const char *src, int number, char *dst, size_t cap) {
 // What to call a tab: its title, or the host out of its address until one
 // arrives. The tab in front is asked of the window rather than of the list,
 // because the list only learns where a tab is when the window looks away.
-void tab_label(const App *a, int i, char *out, size_t cap) {
+static void tab_label(const App *a, int i, char *out, size_t cap) {
     const Tab *t = &a->tabs[i];
     const char *title = i == a->tab ? a->title : t->title;
     const char *url   = i == a->tab ? a->url   : t->url;
@@ -149,7 +149,6 @@ void tabs_init(App *a) {
 void tabs_free(App *a) {
     buf_free(&a->tabs_buf);
     buf_free(&a->tabs_last);
-    for (int i = 0; i < TAB_MAX; i++) buf_free(&a->tabs[i].shot);
 }
 
 bool tabs_wanted(const App *a) { return a->ntabs > 1; }
@@ -164,9 +163,6 @@ static void tab_remember(App *a) {
 }
 
 static void tab_drop(App *a, int idx) {
-    // The picture kept for its tile goes with it: the shuffle below overwrites
-    // the pointer, and nothing else knows where that buffer was.
-    buf_free(&a->tabs[idx].shot);
     for (int i = idx; i + 1 < a->ntabs; i++) a->tabs[i] = a->tabs[i + 1];
     a->ntabs--;
     memset(&a->tabs[a->ntabs], 0, sizeof a->tabs[a->ntabs]);

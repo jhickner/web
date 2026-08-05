@@ -1321,28 +1321,6 @@ static void shot_write(App *a, const char *msg) {
 //
 // Left alone deliberately: fps and the frame count, which describe the
 // screencast and would read as a stutter if a still were counted among them.
-// A frame belongs to the tab it came from, which in a grid is one tile of the
-// window rather than the whole of it. Every frame is kept as that tab's last
-// picture on the way through, which is what the other tiles are drawn from.
-static void draw_frame(App *a, const char *b64, size_t len) {
-    grid_remember(a, b64, len);
-    if (a->grid_on) {
-        int x, y, w, h;
-        if (a->tab >= grid_count(a)) {
-            grid_off(a, "that tab is not one of the nine");
-        } else if (!grid_tile_rect(a, a->tab, &x, &y, &w, &h)) {
-            grid_off(a, "the window is too small for a grid");
-        } else {
-            kitty_use(&a->kitty, a->tab + 1);
-            kitty_set_rect(&a->kitty, x, y, w, h);
-            kitty_draw_png(&a->kitty, b64, len);
-            kitty_use(&a->kitty, 0);
-            return;
-        }
-    }
-    kitty_draw_png(&a->kitty, b64, len);
-}
-
 static void still_draw(App *a, const char *msg) {
     // A reply that outlived the blur it was asked before. Nothing is being
     // looked at, and the unpause redraws from scratch anyway.
@@ -1352,7 +1330,7 @@ static void still_draw(App *a, const char *msg) {
     if (!b64 || !n) return;    // the deadline in the loop asks again
 
     double t0 = now_sec();
-    draw_frame(a, b64, n);
+    kitty_draw_png(&a->kitty, b64, n);
     double t1 = now_sec();
     handoff_drawn();
 
@@ -1572,7 +1550,6 @@ static void draw_panes(App *a) {
     if (!a->has_tty) return;
     status_sync(a);
     tabs_paint(a);
-    grid_paint(a);
     draw_status(a);
     console_paint(a);
     help_paint(a);          // over the picture, so last of all
@@ -2367,11 +2344,6 @@ static void handle_mouse(App *a, Event *ev) {
     }
     if (!a->mouse_down && tabs_mouse(a, ev)) return;
     if (console_mouse(a, ev)) return;
-    // A grid is a picture of nine pages, not one page to click into: a click
-    // picks the tile under it and the page it lands on is the one that comes
-    // forward. Nothing is dispatched into a page at a size it was never laid
-    // out at.
-    if (grid_mouse(a, ev)) return;
     Kitty *k = &a->kitty;
     bool inside = ev->mx >= k->x && ev->mx < k->x + k->cols &&
                   ev->my >= k->y && ev->my < k->y + k->rows;
@@ -2595,7 +2567,6 @@ static bool do_action(App *a, Event *ev, Act act) {
         return true;
     }
     case ACT_RESUME: exec_resume(a); return true;
-    case ACT_GRID:   grid_toggle(a); return true;
     case ACT_COPY_URL:
         clipboard_put(a->url);
         notify(a, "copied url");
@@ -2857,7 +2828,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
             if (h != a->last_hash) {
                 a->last_hash = h;
                 double t0 = now_sec();
-                draw_frame(a, data, dlen);
+                kitty_draw_png(&a->kitty, data, dlen);
                 double t1 = now_sec();
                 handoff_drawn();
 
@@ -4334,9 +4305,6 @@ int main(int argc, char **argv) {
         // until that lands the resets after it are read as more of the frame.
         g_write_force = 1;
         kitty_abort(&a.kitty);
-        // The tiles are images of their own and are named nowhere else: left
-        // up, they go on showing through whatever the shell puts on those rows.
-        if (a.grid_on) grid_off(&a, NULL);
         if (!a.inline_mode || a.clear_exit) kitty_clear(&a.kitty);
         kitty_free(&a.kitty);
         term_restore(&a.term, a.clear_exit);
