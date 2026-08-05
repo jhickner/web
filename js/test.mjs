@@ -11,7 +11,7 @@
 // run by the ordinary runner. What changes is which browser it lands in.
 
 import { test as base, expect } from '@playwright/test';
-import { connect, freeze, freezing, pageFor } from './playwright.mjs';
+import { claim, connect, freeze, freezing, pageFor, targetOf } from './playwright.mjs';
 
 // The window has one line to say why it stopped. Playwright's message carries
 // the call log and a rendered diff after it, which is a screenful.
@@ -36,10 +36,14 @@ export const test = base.extend({
       const own = workerInfo.parallelIndex > 0;
       const page = own ? await conn.context.newPage()
                        : await pageFor(conn.context, conn.target);
+      // Claimed so the window shows it: it has no way of telling this page from
+      // one belonging to some other window on the same browser.
+      const unclaim = own ? claim(await targetOf(conn.context, page)) : () => {};
       await use({ ...conn, page, own });
       // A page this worker opened is this worker's to close; the window's own
       // tab is not. The browser stays either way - it belongs to the window,
       // and disconnecting is all that is ours to do.
+      unclaim();
       if (own) await page.close().catch(() => {});
     },
     { scope: 'worker' },

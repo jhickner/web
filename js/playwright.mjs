@@ -38,15 +38,38 @@ export async function pageFor(context, target) {
   // A connection that has just been made may not have heard about every tab
   // yet, so a miss is worth asking again about before it is an error.
   for (let tries = 0; tries < 20; tries++) {
-    for (const page of context.pages()) {
-      const session = await context.newCDPSession(page);
-      const { targetInfo } = await session.send('Target.getTargetInfo');
-      await session.detach();
-      if (targetInfo.targetId === target) return page;
-    }
+    for (const page of context.pages())
+      if (await targetOf(context, page) === target) return page;
     await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error(`no page with target ${target}`);
+}
+
+// The id Chrome knows a page by, which Playwright does not expose.
+export async function targetOf(context, page) {
+  const session = await context.newCDPSession(page);
+  const { targetInfo } = await session.send('Target.getTargetInfo');
+  await session.detach();
+  return targetInfo.targetId;
+}
+
+// Tell the window that this page is one of ours, so it takes it into its tab
+// bar and its grid - and untell it when the page goes.
+//
+// The window cannot work this out for itself: Chrome's news that a page has
+// appeared says nothing about who asked for it, and the pages of every other
+// window on the browser look exactly the same from there. So the one who knows
+// says so.
+export function claim(target) {
+  const dir = process.env.WEB_PAGES || attachedWindow()?.pages;
+  if (!dir || !target) return () => {};
+  const path = `${dir}/${target}`;
+  try {
+    writeFileSync(path, `${process.pid}\n`);
+  } catch {
+    return () => {};                          // an older window, with nowhere to say it
+  }
+  return () => { try { unlinkSync(path); } catch {} };
 }
 
 // The whole of it in one call, for a script that wants the page and nothing

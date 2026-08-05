@@ -265,6 +265,13 @@ static bool tab_add(App *a) {
 // it. A test runner working this browser opens a page per worker: each one is a
 // page of its own, and one tile of the grid is where it is watched. Not ours,
 // so whoever opened it is who closes it.
+int tab_index_of(const App *a, const char *target) {
+    if (!target || !*target) return -1;
+    for (int i = 0; i < a->ntabs; i++)
+        if (!strcmp(a->tabs[i].target, target)) return i;
+    return -1;
+}
+
 bool tab_adopt(App *a, const char *target, const char *url) {
     if (!target || !*target || a->ntabs >= TAB_MAX) return false;
     for (int i = 0; i < a->ntabs; i++)
@@ -274,6 +281,7 @@ bool tab_adopt(App *a, const char *target, const char *url) {
     snprintf(t->target, sizeof t->target, "%s", target);
     snprintf(t->url, sizeof t->url, "%s", url && *url ? url : "about:blank");
     t->ours = false;
+    t->claimed = true;
     a->ntabs++;
     return true;
 }

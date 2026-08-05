@@ -566,6 +566,16 @@ static void drive_file(App *a, char *out, size_t cap) {
     snprintf(out, cap, "%s/driving/%d", a->chrome.profile, (int)getpid());
 }
 
+// Pages a driver has said it opened for this window. One file per target id,
+// in a directory that is this window's alone - so a page in here is one that
+// something driving THIS window made, which is the only thing that could not
+// be worked out by looking at the browser. Chrome's own news about a page
+// appearing says nothing about who asked for it, and every window's pages look
+// alike from outside.
+static void claims_dir(App *a, char *out, size_t cap) {
+    snprintf(out, cap, "%s/driving/%d.pages", a->chrome.profile, (int)getpid());
+}
+
 static void freeze_base(App *a, char *out, size_t cap);
 static bool being_driven(App *a);
 
@@ -577,15 +587,20 @@ void session_write(App *a) {
     mkdirs(dir);
     snprintf(dir, sizeof dir, "%s/driving", a->chrome.profile);
     mkdirs(dir);
+    claims_dir(a, dir, sizeof dir);
+    mkdirs(dir);
     session_file(a, path, sizeof path);
     FILE *f = fopen(path, "w");
     if (!f) return;
     char url[2100], title[600], drive[700], drive_esc[1400];
     char freeze[700] = "", freeze_esc[1400] = "";
+    char pages[700], pages_esc[1400];
     json_escape(url, sizeof url, a->url);
     json_escape(title, sizeof title, a->title);
     drive_file(a, drive, sizeof drive);
     json_escape(drive_esc, sizeof drive_esc, drive);
+    claims_dir(a, pages, sizeof pages);
+    json_escape(pages_esc, sizeof pages_esc, pages);
     // Said only when this window asked to freeze, so a driver run from another
     // pane knows whether stopping would be watched or would simply hang.
     if (a->freeze) {
@@ -598,9 +613,10 @@ void session_write(App *a) {
     // sender can find that out before sending.
     fprintf(f, "{\"pid\":%d,\"port\":%d,\"cdp\":\"http://127.0.0.1:%d\","
                "\"target\":\"%s\",\"url\":\"%s\",\"title\":\"%s\","
-               "\"handoff\":true,\"drive\":\"%s\",\"freeze\":\"%s\"}\n",
+               "\"handoff\":true,\"drive\":\"%s\",\"freeze\":\"%s\","
+               "\"pages\":\"%s\"}\n",
             (int)getpid(), a->chrome.port, a->chrome.port,
-            a->chrome.target, url, title, drive_esc, freeze_esc);
+            a->chrome.target, url, title, drive_esc, freeze_esc, pages_esc);
     fclose(f);
 }
 
@@ -1151,6 +1167,11 @@ static void exec_start(App *a, const char *cmd) {
             freeze_base(a, base, sizeof base);
             setenv("WEB_FREEZE", base, 1);
         }
+        // Where to say "this page is mine", so the pages a runner opens for its
+        // workers become tabs of this window and tiles of its grid.
+        char pages[700];
+        claims_dir(a, pages, sizeof pages);
+        setenv("WEB_PAGES", pages, 1);
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
@@ -1239,6 +1260,47 @@ static void exec_resume(App *a) {
     a->exec_paused = false;
     a->exec_note[0] = 0;
     console_log(a, "-- carrying on");
+}
+
+// What a driver has claimed, made into tabs, and what it has let go of, taken
+// away again. Read rather than waited on: a claim is a file appearing, and the
+// window is not told about files.
+static void claims_scan(App *a) {
+    static double next;
+    double t = now_sec();
+    if (t < next) return;
+    next = t + 0.25;
+
+    char dir[700];
+    claims_dir(a, dir, sizeof dir);
+    DIR *d = opendir(dir);
+    if (!d) return;
+
+    char seen[TAB_MAX][96];
+    int nseen = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) && nseen < TAB_MAX) {
+        if (e->d_name[0] == '.') continue;
+        snprintf(seen[nseen], sizeof seen[nseen], "%s", e->d_name);
+        if (tab_index_of(a, seen[nseen]) < 0) {
+            if (tab_adopt(a, seen[nseen], ""))
+                term_log("%.3f adopted %s: a driver claimed it", now_sec(),
+                         seen[nseen]);
+        }
+        nseen++;
+    }
+    closedir(d);
+
+    // A claim taken away is a page the driver has closed, or a worker that went
+    // without tidying up. Either way the tab is showing something that is not
+    // there any more.
+    for (int i = a->ntabs - 1; i >= 0; i--) {
+        if (!a->tabs[i].claimed) continue;
+        bool still = false;
+        for (int j = 0; j < nseen && !still; j++)
+            still = !strcmp(a->tabs[i].target, seen[j]);
+        if (!still) tab_forget(a, a->tabs[i].target);
+    }
 }
 
 // Whole lines only: the console's transcript is a list of lines, and half of one
@@ -2585,7 +2647,12 @@ static bool do_action(App *a, Event *ev, Act act) {
         return true;
     }
     case ACT_RESUME: exec_resume(a); return true;
-    case ACT_GRID:   grid_toggle(a); return true;
+    case ACT_GRID:
+        // Closed by hand is closed for good: a window that opened it again a
+        // moment later would be a window that could not be closed.
+        if (a->grid_on) a->grid_auto = false;
+        grid_toggle(a);
+        return true;
     case ACT_COPY_URL:
         clipboard_put(a->url);
         notify(a, "copied url");
@@ -3299,6 +3366,22 @@ static void on_target_message(App *a, const char *msg) {
         popup_drop(a, popup_find(a, id, n));
         return;
     }
+    // A tab this window is not on has no session of its own, so what it is
+    // showing is only ever heard about here. Claimed pages are the ones that
+    // matters for: a worker's tile is labelled with whatever it has navigated
+    // to, and nothing else would ever tell us.
+    {
+        char t[96];
+        snprintf(t, sizeof t, "%.*s", (int)n, id);
+        int ti = tab_index_of(a, t);
+        if (ti >= 0 && ti != a->tab && a->tabs[ti].claimed) {
+            size_t un = 0, tn2 = 0;
+            const char *u2 = json_str(msg, "url", &un);
+            const char *t2 = json_str(msg, "title", &tn2);
+            if (u2 && un) json_unescape(a->tabs[ti].url, sizeof a->tabs[ti].url, u2, un);
+            if (t2 && tn2) json_unescape(a->tabs[ti].title, sizeof a->tabs[ti].title, t2, tn2);
+        }
+    }
     if (tab_target_is(a, id, n)) return;      // one of ours, and already drawn
 
     size_t tn = 0;
@@ -3317,23 +3400,10 @@ static void on_target_message(App *a, const char *msg) {
         term_log("%.3f page target %.*s appeared, opener %.*s (%s)", now_sec(),
                  (int)n, id, (int)(opener ? on : 1), opener ? opener : "-",
                  mine ? "ours" : "not ours");
-        // A page with no opener is nobody's as far as the rule above goes -
-        // and that is exactly what a test runner's worker makes, one page each,
-        // asked for at the browser rather than from any page. While something
-        // is driving this window, those are the pages worth showing: they take
-        // a place in the bar and a tile of the grid, without the window moving
-        // off whatever it is on. Nothing is adopted when nothing is driving,
-        // which leaves another window's pages, and a login window's, alone.
-        if (!mine && !opener && being_driven(a)) {
-            char t[96], u[1100] = "";
-            size_t un = 0;
-            const char *up = json_str(msg, "url", &un);
-            if (up && un) json_unescape(u, sizeof u, up, un);
-            snprintf(t, sizeof t, "%.*s", (int)n, id);
-            if (tab_adopt(a, t, u))
-                term_log("%.3f adopted %.*s: a driver's page", now_sec(), (int)n, id);
-            return;
-        }
+        // A page with no opener used to be taken as a driver's - which swept up
+        // every page in the browser, because discovery replays the ones already
+        // open and another window's pages look exactly the same from here. What
+        // a driver opens is claimed by the driver instead; see claims_scan.
         if (!mine) return;
     }
     int i = popup_find(a, id, n);
@@ -3403,6 +3473,8 @@ static void usage(void) {
         "  --freeze    hold the page where a driver failed instead of tearing\n"
         "              it down: the console, `P` and the labels all work on it,\n"
         "              and alt+enter lets the run carry on\n"
+        "  --grid      show the grid whenever there is more than one page, so a\n"
+        "              run with several workers opens as one tile each\n"
         "  --profile N run in a profile of its own - its own logins, history\n"
         "              and browser, and none of the windows already up. \"-\"\n"
         "              is a throwaway one, taken away again on exit\n"
@@ -3747,6 +3819,8 @@ int main(int argc, char **argv) {
             i++;                      // already read, above the loop
         } else if (!strcmp(argv[i], "--freeze")) {
             a.freeze = true;
+        } else if (!strcmp(argv[i], "--grid")) {
+            a.grid_auto = true;
         } else if (!strcmp(argv[i], "--slowmo") && i + 1 < argc) {
             a.slowmo = atoi(argv[++i]);
             if (a.slowmo < 0) a.slowmo = 0;
@@ -4198,6 +4272,15 @@ int main(int argc, char **argv) {
         // A run that started or ended while the window was blurred: neither is
         // a focus event, and both change whether there is anything to draw for.
         check_driven(&a);
+        // Pages a driver has opened for its workers, and ones it has closed.
+        claims_scan(&a);
+        // Asked for with --grid: a run that fans out into several pages is one
+        // to watch all of at once, and it is not worth a keypress at the moment
+        // the second worker starts.
+        if (a.grid_auto && a.has_tty) {
+            if (!a.grid_on && a.ntabs > 1) grid_toggle(&a);
+            else if (a.grid_on && a.ntabs < 2) grid_off(&a, NULL);
+        }
         // Whose turn it is to be photographed for its tile.
         grid_tick(&a);
         // A child that has stopped and is waiting says so in a file rather than

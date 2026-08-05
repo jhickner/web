@@ -555,6 +555,7 @@ static const struct {
     {"cols",          S_COUNT,    offsetof(App, want_cols)},
     {"slowmo",        S_MS,       offsetof(App, slowmo)},
     {"freeze",        S_BOOL,     offsetof(App, freeze)},
+    {"grid",          S_BOOL,     offsetof(App, grid_auto)},
 };
 #define NSETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))
 

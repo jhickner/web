@@ -406,6 +406,7 @@ typedef struct {
     char url[1024];     // where it was when the window last looked away
     char title[256];
     bool ours;          // we opened it, so it is ours to close on the way out
+    bool claimed;       // a driver said it opened this one, and will say when it goes
     bool inited;        // the once-per-page CDP setup has been done
     int  x0, x1;        // cells the bar last drew it on, for clicks
     Buf  shot;          // the last picture taken of it, for its tile in the grid
@@ -597,6 +598,7 @@ typedef struct {
     int     ntabs;
     int     tab;                  // the one the socket is on
     bool    grid_on;              // every tab at once, each in a tile
+    bool    grid_auto;            // and open it by itself once there is more than one
     int     grid_shown_tab;       // which tile the labels were last drawn for
     int     grid_turn;            // whose turn it is to be photographed
     int     grid_req;             // the capture outstanding, 0 when none
@@ -801,6 +803,7 @@ void tab_close(App *a);
 // is - and dropped again when it goes. Neither moves the window off the tab it
 // is on.
 bool tab_adopt(App *a, const char *target, const char *url);
+int  tab_index_of(const App *a, const char *target);   // -1 when it is not one
 bool tab_forget(App *a, const char *target);
 
 void tab_go(App *a, int idx);          // 0-based

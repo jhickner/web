@@ -207,6 +207,12 @@ it:
 | `alt+1`…`alt+9` | pick that tile |
 | click a tile | pick it; clicking the one in front opens it |
 
+A page opened by something driving the window — one per worker of a test run —
+becomes a tab as it appears and goes when it goes. It is the driver that says
+so: Chrome's news that a page has appeared says nothing about who asked for it,
+and the pages of every other window on the same browser look no different from
+here.
+
 Each page is photographed at the size of its own tile, so it reflows to the
 width it is drawn at rather than being a shrunken screenshot of a whole window.
 One photograph is taken at a time, a few a second, going round the tiles in turn
@@ -263,6 +269,7 @@ The history is Chrome's own, read from `History` in the profile
 | `cols` | `80` | `auto`, a count | cell columns a new window opens at |
 | `slowmo` | `0` | 0–60000 | milliseconds between the actions of what `--exec` starts |
 | `freeze` | `no` | yes/no | hold the page where a driver failed until `alt+enter` |
+| `grid` | `no` | yes/no | show the grid whenever there is more than one page |
 
 Booleans also take `true`, `on` and `1`. Each setting is the command line
 option of the same name, which wins for that run. `hint-only` and `hint-skip`
@@ -333,6 +340,8 @@ web [options] <url>...
             can be watched rather than only finished
 --freeze    hold the page where a driver failed instead of tearing it
             down; alt+enter lets the run carry on
+--grid      show the grid whenever there is more than one page, so a run
+            with several workers opens as one tile each
 --profile N run in a profile of its own: its own logins, history and
             browser, and none of the windows already up. "-" is a
             throwaway one, removed on exit
@@ -505,7 +514,8 @@ web --exec 'npx playwright test examples/hn.spec.mjs' about:blank
 - The first worker drives the window's own tab; every worker after it opens a
   page of its own, which the window takes into the tab bar as it appears and
   drops again when it goes. `--workers=4` is four tabs, and `alt+g` is four
-  tiles — one per worker, all running at once. See [The grid](#the-grid).
+  tiles — one per worker, all running at once. `--grid` opens the grid by
+  itself as soon as the second page appears. See [The grid](#the-grid).
 - Playwright's unit of parallelism is the *file*: four tests in one file are one
   worker however many `--workers` allows, and so one tile. `test.describe
   .configure({ mode: 'parallel' })` in the file, or `fullyParallel` in the
