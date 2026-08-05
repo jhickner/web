@@ -50,6 +50,23 @@ need and `web` keeps the session:
 web --login
 ```
 
+## Profiles
+
+Every window shares one profile — `~/.cache/web/profile` — unless `--profile`
+names another, which lives in `~/.cache/web/profiles/<name>`:
+
+```sh
+web --profile work --login          # its own logins
+web --profile work news.ycombinator.com
+web --profile - --screenshot shot.png example.com   # throwaway, removed on exit
+```
+
+A named profile gets its own browser, history, and tabs. `--endpoint`,
+`--browsers`, `--kill` and `--open` answer for one profile, so a run against
+one leaves every other window alone. `^G` names the profile when it is not the
+shared one, and `--exec` puts it in the environment as `WEB_PROFILE`, which a
+window started from there inherits.
+
 ## Keys
 
 | Key | Action |
@@ -285,6 +302,9 @@ web [options] <url>...
 --kill      quit this profile's windows and end its browsers, including
             any nothing can reach
 --exec CMD  run CMD against this window, its output in the console
+--profile N run in a profile of its own: its own logins, history and
+            browser, and none of the windows already up. "-" is a
+            throwaway one, removed on exit
 --port N    fix Chrome's devtools port instead of letting it pick one
 --no-pause  keep drawing while the terminal is not focused
 --raw-keys  let a key the page did not want reach the window system
@@ -425,7 +445,8 @@ output in the console while the page stays live above it:
 web --exec 'node examples/attach.mjs' example.com
 ```
 
-The child gets `WEB_CDP_URL`, `WEB_CDP_PORT`, and `WEB_TARGET_ID`. Quitting the
+The child gets `WEB_CDP_URL`, `WEB_CDP_PORT`, `WEB_TARGET_ID`, and
+`WEB_PROFILE` when the window is in a named one. Quitting the
 window ends it; it ending leaves the window. Both streams go to the console.
 
 ### attach
@@ -475,6 +496,7 @@ does not fit is reached with `h` and `l`.
 | Variable | Effect |
 |---|---|
 | `WEB_CHROME` | path to a different Chrome build |
+| `WEB_PROFILE` | the profile to run in, as `--profile` names it. Set for what `--exec` starts |
 | `WEB_CELL` | `WxH` cell size, if the page aspect looks stretched. A terminal reporting no pixel geometry leaves it a guess (8x17 default); `^G` says which you have |
 
 ## How it works

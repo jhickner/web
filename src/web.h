@@ -80,6 +80,12 @@ int  chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
 int  chrome_attach(Chrome *c);
 void chrome_profile_path(char *out, size_t cap);
 
+// Which profile this run works in, before anything asks where it is. A name is
+// letters, digits, dot, underscore and dash; "-" is a throwaway one, made for
+// this run and removed when its browser goes. -1 when the name is not one.
+int  chrome_profile_set(const char *name);
+bool chrome_profile_named(char *out, size_t cap);   // false when it is the shared one
+
 // 0 when a devtools endpoint answers there, so a port can be checked before
 // anything is given up for it.
 int  chrome_probe(int port);

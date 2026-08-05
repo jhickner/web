@@ -1064,6 +1064,10 @@ static void exec_start(App *a, const char *cmd) {
         setenv("WEB_CDP_URL", url, 1);
         setenv("WEB_CDP_PORT", port, 1);
         setenv("WEB_TARGET_ID", a->chrome.target, 1);
+        // So a child that starts a window of its own lands in the same world
+        // this one is in rather than in the shared profile.
+        char pname[64];
+        if (chrome_profile_named(pname, sizeof pname)) setenv("WEB_PROFILE", pname, 1);
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
@@ -1347,10 +1351,17 @@ static void draw_status(App *a) {
             // The cell and the frame it implies come last: they are what says
             // whether the size everything else is derived from was measured or
             // guessed, which is not visible from any of the numbers before them.
+            // Which profile, but only when it is not the shared one: a window
+            // that is off on its own has different logins and a browser of its
+            // own, and nothing else on screen says so.
+            char prof[80] = "";
+            char pname[64];
+            if (chrome_profile_named(pname, sizeof pname))
+                snprintf(prof, sizeof prof, "%s  ", pname);
             snprintf(stats, sizeof stats,
-                     "cdp:%d  %zuKB %.0fms %.1ffps  %dx%d@%gx z%.0f%%  "
+                     "%scdp:%d  %zuKB %.0fms %.1ffps  %dx%d@%gx z%.0f%%  "
                      "cell %dx%d cast %dx%d  %us%s",
-                     a->chrome.port,
+                     prof, a->chrome.port,
                      a->last_bytes / 1024, a->last_write_ms, a->fps,
                      a->css_w, a->css_h, a->scale,
                      100.0 * (sw * a->term.cell_w) / (a->css_w ? a->css_w : 1),
@@ -3121,6 +3132,9 @@ static void usage(void) {
         "              including any nothing can reach any more. A window it\n"
         "              cannot place is named rather than ended\n"
         "  --exec CMD  run CMD against this window, its output in the console\n"
+        "  --profile N run in a profile of its own - its own logins, history\n"
+        "              and browser, and none of the windows already up. \"-\"\n"
+        "              is a throwaway one, taken away again on exit\n"
         "  --port N    fix chrome's devtools port so playwright can find it\n"
         "  --no-pause  keep drawing while the terminal is not focused\n"
         "  --raw-keys  let a key the page did not want reach the window\n"
@@ -3352,6 +3366,22 @@ int main(int argc, char **argv) {
     a.fit_width = true;
     a.inline_mode = true;             // a window in the shell, unless --full
     a.clear_exit = true;              // the window goes away, unless --no-clear
+
+    // Read out of the arguments before the loop below, because everything
+    // between here and there already wants to know where the profile is: the
+    // user agent is read out of it, and --endpoint, --browsers and --kill all
+    // answer for one profile rather than for the machine.
+    // Inherited from the run that started this one - `--exec` puts it in the
+    // environment - so a window opened by something a window started is in the
+    // same profile rather than back in the shared one. An argument still wins.
+    const char *want_profile = getenv("WEB_PROFILE");
+    for (int i = 1; i < argc - 1; i++)
+        if (!strcmp(argv[i], "--profile")) { want_profile = argv[i + 1]; break; }
+    if (want_profile && *want_profile && chrome_profile_set(want_profile) < 0) {
+        fprintf(stderr, "web: --profile wants a name of letters, digits, "
+                        "'.', '_' or '-', or \"-\" for a throwaway one\n");
+        return 1;
+    }
     load_ua(&a);
     // Every default is in place, so the file is read over exactly what it would
     // otherwise be - and written out of it, the first time, saying the same.
@@ -3441,6 +3471,8 @@ int main(int argc, char **argv) {
             a.script.step = true;
         } else if (!strcmp(argv[i], "--json")) {
             a.script.json = true;
+        } else if (!strcmp(argv[i], "--profile") && i + 1 < argc) {
+            i++;                      // already read, above the loop
         } else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
             port = atoi(argv[++i]);
             if (port < 1 || port > 65535) {

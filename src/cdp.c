@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -87,19 +88,111 @@ int chrome_probe(int port) {
     return ok ? 0 : -1;
 }
 
+// A named profile, or the unnamed one every run shares. Set once, before
+// anything asks where the profile is: the browser's data, the session files,
+// the handoff directory, the note of the port and the history all live under
+// whichever directory this picks, so a named one is a whole separate world.
+static char profile_name[64];
+static bool profile_temp;         // made for this run, and removed with it
+
 // The browser profile is bulk cache, not configuration, so it stays out of
 // ~/.config (which is often a synced dotfiles directory). Worked out without a
 // browser, so that anything wanting to look in there can find it too.
 void chrome_profile_path(char *out, size_t cap) {
     const char *home = getenv("HOME");
     const char *cache = getenv("XDG_CACHE_HOME");
-    if (cache && *cache) snprintf(out, cap, "%s/web/profile", cache);
-    else snprintf(out, cap, "%s/.cache/web/profile", home ? home : "/tmp");
+    char base[400];
+    if (cache && *cache) snprintf(base, sizeof base, "%s/web", cache);
+    else snprintf(base, sizeof base, "%s/.cache/web", home ? home : "/tmp");
+    if (profile_name[0]) snprintf(out, cap, "%s/profiles/%s", base, profile_name);
+    else snprintf(out, cap, "%s/profile", base);
 }
 
 static bool pid_alive(pid_t p) {
     if (p <= 0) return false;
     return kill(p, 0) == 0 || errno != ESRCH;
+}
+
+// Only ever aimed at a throwaway profile, whose name says this program made it
+// and whose owner is already gone.
+static void rm_tree(const char *path) {
+    DIR *d = opendir(path);
+    if (!d) { unlink(path); return; }
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char child[1024];
+        if (snprintf(child, sizeof child, "%s/%s", path, e->d_name)
+            >= (int)sizeof child) continue;
+        struct stat st;
+        if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) rm_tree(child);
+        else unlink(child);
+    }
+    closedir(d);
+    rmdir(path);
+}
+
+// A run that died without tidying up leaves its throwaway profile behind, and
+// the name says which process it was waiting on. Swept when a new one is made,
+// which is the only time anybody is looking in there.
+static void sweep_temp_profiles(void) {
+    char here[512], dir[520];
+    chrome_profile_path(here, sizeof here);
+    char *slash = strrchr(here, '/');
+    if (!slash) return;
+    *slash = 0;
+    snprintf(dir, sizeof dir, "%s", here);
+
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (strncmp(e->d_name, "tmp-", 4)) continue;
+        pid_t pid = (pid_t)atoi(e->d_name + 4);
+        if (pid <= 0 || pid == getpid() || pid_alive(pid)) continue;
+        char path[1024];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        rm_tree(path);
+    }
+    closedir(d);
+}
+
+// "-" is a profile for this run alone: a fresh directory, named for the process
+// so two of them never meet, and taken away again when the browser goes.
+int chrome_profile_set(const char *name) {
+    if (!name || !*name) return -1;
+    if (!strcmp(name, "-")) {
+        snprintf(profile_name, sizeof profile_name, "tmp-%d", (int)getpid());
+        profile_temp = true;
+        sweep_temp_profiles();
+        return 0;
+    }
+    if (strlen(name) >= sizeof profile_name) return -1;
+    // A name is a single directory under profiles/, so nothing that could be a
+    // path, and nothing hidden: ".." would be the profile above it.
+    for (const char *p = name; *p; p++) {
+        bool ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                  (*p >= '0' && *p <= '9') || *p == '.' || *p == '_' || *p == '-';
+        if (!ok) return -1;
+    }
+    if (name[0] == '.') return -1;
+    snprintf(profile_name, sizeof profile_name, "%s", name);
+    return 0;
+}
+
+bool chrome_profile_named(char *out, size_t cap) {
+    if (out && cap) snprintf(out, cap, "%s", profile_name);
+    return profile_name[0] != 0;
+}
+
+// The data directory goes when the browser it belonged to has gone, and only
+// then: one still running is still using it.
+static void discard_temp_profile(Chrome *c) {
+    if (!profile_temp || c->foreign) return;
+    if (c->pid > 0 && pid_alive(c->pid)) return;
+    char path[512];
+    chrome_profile_path(path, sizeof path);
+    rm_tree(path);
 }
 
 // Chrome records "<hostname>-<pid>" in the lock symlink, which is the only
@@ -827,6 +920,7 @@ void chrome_kill(Chrome *c) {
         }
     }
     if (c->ws.fd > 0) ws_close(&c->ws);
+    discard_temp_profile(c);
 }
 
 // The same shutdown, waited out by a forked child instead of by us. A polite
