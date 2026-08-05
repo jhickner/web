@@ -223,7 +223,7 @@ typedef enum {
     ACT_ADDRESS, ACT_ADDRESS_BLANK, ACT_ADDRESS_TAB, ACT_BACK, ACT_FORWARD,
     ACT_RELOAD, ACT_RELOAD_HARD,
     ACT_COPY, ACT_COPY_URL, ACT_COPY_CONSOLE, ACT_EXTERNAL, ACT_RESUME,
-    ACT_GRID,
+    ACT_GRID, ACT_RECORD,
     ACT_FIND, ACT_FIND_NEXT, ACT_FIND_PREV,
     ACT_HINT, ACT_HINT_TAB, ACT_HINT_COPY, ACT_HINT_ALL,
     ACT_INSERT, ACT_INSERT_OFF, ACT_FOCUS_INPUT, ACT_PICK,
@@ -351,6 +351,19 @@ enum {
 // the page's DOM and nothing else: our globals are not on the page's window,
 // and a page redefining one of the things we call cannot reach ours.
 #define WEB_WORLD "web"
+
+// The shortest CSS path that picks out one element, walked up from it until a
+// query matches only that one. The last resort of anything naming an element:
+// the picker reports one, and the recorder writes one down when nothing
+// semantic is unique.
+#define SELECTOR_FN \
+    "function ws(e){if(!e||e.nodeType!==1)return '';" \
+    "if(e.id)return '#'+CSS.escape(e.id);var p=[];" \
+    "while(e&&e.nodeType===1&&e!==document.body){" \
+    "var s=e.tagName.toLowerCase(),i=1,q=e;while((q=q.previousElementSibling))" \
+    "if(q.tagName===e.tagName)i++;if(i>1)s+=':nth-of-type('+i+')';p.unshift(s);" \
+    "var z=p.join(' > ');try{if(document.querySelectorAll(z).length===1)return z}catch(_){}" \
+    "e=e.parentElement}return p.join(' > ')}"
 
 #define REQ_MAX 8
 
@@ -569,6 +582,8 @@ typedef struct {
     pid_t   exec_pid;
     Buf     exec_buf;          // what has arrived of the line being read
     int     slowmo;            // ms between a driver's actions, so it can be watched
+    bool    rec_on;            // driving the page is being written down as a spec
+    char    rec_path[512];     // where it is being written
     bool    freeze;            // a driver that fails holds the page where it failed
     bool    exec_paused;       // and is waiting to be let go of
     char    exec_note[160];    // what it said it was waiting about
@@ -832,6 +847,18 @@ bool grid_key(App *a, Event *ev);         // arrows pick a tile, enter opens it
 bool grid_tile_rect(const App *a, int i, int *x, int *y, int *cols, int *rows);
 int  grid_tile_at(const App *a, int col, int row);
 int  grid_count(const App *a);
+
+// ---------------------------------------------------------------- recording
+//
+// Driving the page by hand, written down as a Playwright spec. What the page
+// sees is what is recorded, so a click sent at coordinates and a link label
+// typed from the keyboard come out the same.
+void record_start(App *a, const char *path);
+void record_stop(App *a);
+void record_toggle(App *a);
+void record_event(App *a, const char *json);   // one interaction, from the page
+void record_goto(App *a, const char *url);
+void record_install(App *a, bool fresh);       // the watcher, into a new document
 
 // Take over a page the browser opened for itself. The address is moved into a
 // tab of our own and the page it came from is closed: a popup is put in the

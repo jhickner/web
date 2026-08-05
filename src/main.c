@@ -1593,7 +1593,9 @@ static void draw_status(App *a) {
         // Ahead of the rest: a window that is waiting looks exactly like one
         // that has finished, and which of the two it is decides whether there
         // is any point in looking at the page it is showing.
-        if (a->exec_paused)
+        if (a->rec_on)
+            buf_addf(&b, "\x1b[1;31m REC\x1b[0m ");
+        else if (a->exec_paused)
             buf_addf(&b, "\x1b[1;31m FROZEN\x1b[0m ");
         else if (a->insert)
             buf_addf(&b, "\x1b[1;33m INSERT\x1b[0m ");
@@ -1785,6 +1787,9 @@ void navigate(App *a, const char *raw) {
     json_escape(esc, sizeof esc, url);
     app_cdp(a, "Page.navigate", "\"url\":\"%s\"", esc);
     a->loading = true;
+    // An address somebody asked for. A click that navigates writes itself down
+    // as the click, and the page it lands on needs no line of its own.
+    record_goto(a, url);
 }
 
 // Ask the page whether it actually fits the viewport it was just given.
@@ -2338,14 +2343,6 @@ static const char KEY_CLAIMER[] =
 // otherwise a CSS path shortened to the first ancestor that is already unique.
 // CSS because that is what the console can spend - `document.querySelector` is
 // where a picked selector is going.
-#define SELECTOR_FN \
-    "function ws(e){if(!e||e.nodeType!==1)return '';" \
-    "if(e.id)return '#'+CSS.escape(e.id);var p=[];" \
-    "while(e&&e.nodeType===1&&e!==document.body){" \
-    "var s=e.tagName.toLowerCase(),i=1,q=e;while((q=q.previousElementSibling))" \
-    "if(q.tagName===e.tagName)i++;if(i>1)s+=':nth-of-type('+i+')';p.unshift(s);" \
-    "var z=p.join(' > ');try{if(document.querySelectorAll(z).length===1)return z}catch(_){}" \
-    "e=e.parentElement}return p.join(' > ')}"
 
 // Something other than this keyboard is working the page: the child `--exec`
 // started, or a queue of javascript still being got through. A window being
@@ -2701,6 +2698,7 @@ static bool do_action(App *a, Event *ev, Act act) {
         return true;
     }
     case ACT_RESUME: exec_resume(a); return true;
+    case ACT_RECORD: record_toggle(a); return true;
     case ACT_GRID:
         // Closed by hand is closed for good: a window that opened it again a
         // moment later would be a window that could not be closed.
@@ -3133,6 +3131,15 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         return;
     }
 
+    if (strstr(msg, "Runtime.bindingCalled") && strstr(msg, "__webrec")) {
+        size_t n;
+        const char *p = json_str(msg, "payload", &n);
+        char pl[2048];
+        json_unescape(pl, sizeof pl, p ? p : "", p ? n : 0);
+        record_event(a, pl);
+        return;
+    }
+
     if (strstr(msg, "Runtime.bindingCalled") && strstr(msg, "__webhint")) {
         size_t n;
         const char *p = json_str(msg, "payload", &n);
@@ -3529,6 +3536,8 @@ static void usage(void) {
         "              and alt+enter lets the run carry on\n"
         "  --grid      show the grid whenever there is more than one page, so a\n"
         "              run with several workers opens as one tile each\n"
+        "  --record F  write what is done to the page to F as a playwright\n"
+        "              spec, until alt+r stops it\n"
         "  --profile N run in a profile of its own - its own logins, history\n"
         "              and browser, and none of the windows already up. \"-\"\n"
         "              is a throwaway one, taken away again on exit\n"
@@ -3604,6 +3613,9 @@ void session_init(App *a) {
             app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
                      "\"source\":\"%s\",\"runImmediately\":true", hesc);
         }
+        // The recorder, when there is one, so a page arrived at mid-recording
+        // is recorded too.
+        record_install(a, fresh);
         // In the same world, and registered the same way: a listener added from
         // an isolated world sees the page's events and can cancel them, and
         // nothing it defines is visible to the page.
@@ -3797,7 +3809,7 @@ int main(int argc, char **argv) {
     config_load(&a);
     bool show = false, login = false;
     bool endpoint_only = false, browsers_only = false, kill_only = false;
-    const char *exec_cmd = NULL, *hand_to_window = NULL;
+    const char *exec_cmd = NULL, *hand_to_window = NULL, *rec_path = NULL;
     double drain_at = 0;              // when the queue first ran out
     int port = 0;                     // 0 = let chrome pick a free one
     const char *eval_js = NULL;
@@ -3884,6 +3896,8 @@ int main(int argc, char **argv) {
             a.freeze = true;
         } else if (!strcmp(argv[i], "--grid")) {
             a.grid_auto = true;
+        } else if (!strcmp(argv[i], "--record") && i + 1 < argc) {
+            rec_path = argv[++i];
         } else if (!strcmp(argv[i], "--slowmo") && i + 1 < argc) {
             a.slowmo = atoi(argv[++i]);
             if (a.slowmo < 0) a.slowmo = 0;
@@ -4152,6 +4166,9 @@ int main(int argc, char **argv) {
     // script that attaches immediately finds the viewport it will be driving
     // rather than the one this run began with.
     if (exec_cmd) exec_start(&a, exec_cmd);
+    // After the first page is on its way, so the spec opens with where the
+    // window actually started rather than about:blank.
+    if (rec_path) record_start(&a, rec_path);
 
     // A script named on the command line, or one piped in. Reading stdin only
     // when it is not a terminal is what keeps `web url` interactive.

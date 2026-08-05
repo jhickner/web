@@ -74,6 +74,7 @@ static const struct { const char *name; Act act; const char *section; } ACTS[] =
     {"copy-console",   ACT_COPY_CONSOLE, NULL},
     {"resume",         ACT_RESUME, NULL},
     {"grid",           ACT_GRID, NULL},
+    {"record",         ACT_RECORD, NULL},
     {"external",       ACT_EXTERNAL, NULL},
     {"find",           ACT_FIND, NULL},
     {"find-next",      ACT_FIND_NEXT, NULL},
@@ -409,6 +410,7 @@ static const KeyDef DEFAULTS[] = {
     {MOD_ALT, 'y', ACT_COPY_CONSOLE},
     {MOD_ALT, KEY_ENTER, ACT_RESUME},
     {MOD_ALT, 'g', ACT_GRID},
+    {MOD_ALT, 'r', ACT_RECORD},
 
     {MOD_ALT | MOD_SHIFT, KEY_RIGHT, ACT_TAB_NEXT},
     {MOD_ALT | MOD_SHIFT, KEY_LEFT, ACT_TAB_PREV},

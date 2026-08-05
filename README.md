@@ -92,6 +92,7 @@ window started from there inherits.
 | `alt+y` | copy the console transcript |
 | `alt+enter` | let a frozen run carry on |
 | `alt+g` | every tab at once, in a grid — see [The grid](#the-grid) |
+| `alt+r` | start or stop writing what you do as a spec — see [Recording](#recording) |
 | `?` | key list over the page; any key dismisses it |
 | mouse | click, drag to select, wheel to scroll |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
@@ -343,6 +344,8 @@ web [options] <url>...
             down; alt+enter lets the run carry on
 --grid      show the grid whenever there is more than one page, so a run
             with several workers opens as one tile each
+--record F  write what is done to the page to F as a Playwright spec,
+            until alt+r stops it
 --profile N run in a profile of its own: its own logins, history and
             browser, and none of the windows already up. "-" is a
             throwaway one, removed on exit
@@ -593,6 +596,46 @@ clickable. `alt+enter` lets the run carry on to the next test.
 The test's timeout is lifted while it waits. Only a window started with
 `--freeze` freezes anything, so a run with nothing watching it — CI — never
 stops.
+
+### Recording
+
+`--record` writes what you do to the page as a Playwright spec:
+
+```sh
+web --record login.spec.ts example.com
+```
+
+`alt+r` starts and stops it, and names the file `web-DATE-TIME.spec.ts` when
+`--record` did not. Clicks, typing, dropdowns, tick boxes, `enter`, and
+addresses opened by hand are recorded. The status line says `REC`.
+
+Locators are picked in this order:
+
+| Locator | When |
+| --- | --- |
+| `getByTestId` | `data-testid` or `data-test-id` |
+| `getByRole` | one element has that role and accessible name |
+| `getByPlaceholder` | |
+| `getByLabel` | |
+| `getByAltText` | |
+| `getByText` | one element has that text |
+| `locator` | nothing above is unique: shortest CSS path |
+
+The file is rewritten after every step, and runs at any point in a recording:
+
+```ts
+import { test, expect } from '@jhickner/web/test';
+
+test('recorded', async ({ page }) => {
+  await page.goto('https://example.com/login');
+  await page.getByRole('textbox', { name: 'Email' }).fill('me@example.com');
+  await page.getByPlaceholder('Password').fill('hunter2');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+});
+```
+
+`npx playwright test login.spec.ts` runs it back — see
+[Playwright](#playwright).
 
 ### --exec
 
