@@ -1608,11 +1608,18 @@ static void draw_status(App *a) {
             key_text(a->pend_mods, a->pend_key, spec, sizeof spec);
             buf_addf(&b, "\x1b[1;36m %s-\x1b[0m ", spec);
         }
-        if (a->msg_until > now_sec())
+        if (a->msg_until > now_sec()) {
             buf_addf(&b, " \x1b[1m%.*s\x1b[0m", avail, a->msg);
-        else
+        } else {
+            // Two columns off the name, so the line is the same width either way.
+            if (bookmark_current(a)) {
+                buf_addf(&b, " %s\xe2\x98\x85\x1b[0m",
+                         a->loading ? "\x1b[33m" : "\x1b[2m");
+                avail -= 2;
+            }
             buf_addf(&b, " %s%.*s\x1b[0m", a->loading ? "\x1b[33m" : "\x1b[2m",
                      avail, left);
+        }
 
         if (show_hint)
             buf_addf(&b, "\x1b[%d;%dH\x1b[2m%s\x1b[0m", row,
@@ -1739,15 +1746,28 @@ static bool file_url(const char *raw, char *out, size_t cap) {
     return true;
 }
 
+// Whether an argument is somewhere to go rather than something to look up.
+static bool looks_addressed(const char *s) {
+    if (strchr(s, ' ')) return false;
+    return strchr(s, '.') || strchr(s, ':') || strchr(s, '/') ||
+           !strcmp(s, "localhost");
+}
+
 // An address off the command line, made into one a browser will take. Kept
 // apart from what the address bar does with a phrase, because a word with no
 // dot in it is a search there and is a host here: `web localhost:8080` means
 // the server, and nobody types a search into a shell argument.
+// Anything else is put to the bookmarks first, and is a host or a search when
+// none of them matches.
 static void start_url(const char *raw, char *out, size_t cap) {
-    if (strstr(raw, "://") || !strncmp(raw, "about:", 6))
+    if (strstr(raw, "://") || !strncmp(raw, "about:", 6)) {
         snprintf(out, cap, "%s", raw);
-    else if (!file_url(raw, out, cap))
-        snprintf(out, cap, "https://%s", raw);
+        return;
+    }
+    if (file_url(raw, out, cap)) return;
+    if (!looks_addressed(raw) && omni_best_bookmark(raw, out, cap)) return;
+    if (strchr(raw, ' ')) bar_url(raw, out, cap);
+    else                  snprintf(out, cap, "https://%s", raw);
 }
 
 // What the address bar makes of a line: an address as it stands, a path that
@@ -2678,8 +2698,10 @@ static bool do_action(App *a, Event *ev, Act act) {
     case ACT_HINT_TAB:  hint_show(a, 1, false); return true;
     case ACT_HINT_COPY: hint_show(a, 2, false); return true;
     case ACT_HINT_ALL:  hint_show(a, 0, true);  return true;
-    case ACT_SEARCH_TABS:    omni_show(a, OMNI_TABS); return true;
-    case ACT_SEARCH_HISTORY: omni_show(a, OMNI_HIST); return true;
+    case ACT_SEARCH_TABS:      omni_show(a, OMNI_TABS);  return true;
+    case ACT_SEARCH_HISTORY:   omni_show(a, OMNI_HIST);  return true;
+    case ACT_SEARCH_BOOKMARKS: omni_show(a, OMNI_MARKS); return true;
+    case ACT_BOOKMARK:         bookmark_toggle(a);       return true;
     case ACT_BACK:    nav_history(a, -1); return true;
     case ACT_FORWARD: nav_history(a, +1); return true;
     case ACT_RELOAD:
@@ -3528,7 +3550,9 @@ static void usage(void) {
     fprintf(stderr,
         "usage: web [options] <url>...\n"
         "  A second address, and every one after it, opens in a tab of its\n"
-        "  own. The window starts on the first.\n"
+        "  own. The window starts on the first. An argument that is not an\n"
+        "  address opens the bookmark whose name or address holds every word\n"
+        "  of it, and is a host or a search when no bookmark does.\n"
         "  --scale F   hold the frame at F of the viewport (0.5 is a quarter of\n"
         "              the data and blurrier; above 1 does nothing, the\n"
         "              screencast will not hand over more than the viewport).\n"

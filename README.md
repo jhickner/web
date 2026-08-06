@@ -35,6 +35,14 @@ Each address after the first opens in a tab; the window starts on the first:
 ./web news.ycombinator.com lobste.rs example.com
 ```
 
+An argument that is not an address opens the bookmark whose name or address
+holds every word of it, and is a host or a search when no bookmark does:
+
+```sh
+./web hn
+./web 'hacker news'
+```
+
 In tmux, add to `~/.tmux.conf`:
 
 ```sh
@@ -93,6 +101,8 @@ window started from there inherits.
 | `alt+enter` | let a frozen run carry on |
 | `alt+g` | every tab at once, in a grid — see [The grid](#the-grid) |
 | `alt+r` | start or stop writing what you do as a spec — see [Recording](#recording) |
+| `alt+d` | bookmark this page, or take the bookmark off it |
+| `alt+b` | find a bookmark — see [Finding a page](#finding-a-page) |
 | `?` | key list over the page; any key dismisses it |
 | mouse | click, drag to select, wheel to scroll |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
@@ -139,6 +149,8 @@ the vi vocabulary is the window's:
 | `r` / `R` | reload / reload ignoring the cache |
 | `T` | find an open tab by name — see [Finding a page](#finding-a-page) |
 | `gh` | find a page been to before |
+| `m` | bookmark this page, or unbookmark it (`alt+d` too) |
+| `gb` | find a bookmark |
 | `gi` | focus the first text field |
 | `gf` | label everything clickable, past any `hint-only` rule for the site |
 | `yy` | copy the address |
@@ -225,9 +237,10 @@ screencast stops while the grid is up.
 
 ## Finding a page
 
-Two lists, opened over the page and narrowed as you type: `search-tabs` for the
-tabs already open, `search-history` for the pages this profile has been to.
-`T` and `gh` under the vim keys, bindable anywhere else.
+Three lists, opened over the page and narrowed as you type: `search-tabs` for
+the tabs already open, `search-history` for the pages this profile has been to,
+`search-bookmarks` for the pages kept on purpose. `T`, `gh` and `alt+b` / `gb`,
+bindable anywhere else.
 
 | Key | Action |
 |---|---|
@@ -250,6 +263,16 @@ history opens on the most recent page first; tabs are ranked on the words alone.
 The history is Chrome's own, read from `History` in the profile
 (`~/.cache/web/profile`) — everything opened in `web`, including from a
 `--login` window.
+
+The bookmarks are Chrome's own, read and written in `Bookmarks` in the profile.
+`alt+d` (`m` under the vim keys, action `bookmark`) puts the page in front at
+the end of the bookmark bar, or takes it out of wherever it sits when it is
+already bookmarked; the address has to match character for character. A
+bookmarked page has a `★` before its name on the status line. The list is every
+folder, not only the bar, newest-added first.
+
+A bookmark made in a `--login` window while `web` is up can overwrite one made
+here in the same session. The next start reads what is on disk.
 
 ## Config
 

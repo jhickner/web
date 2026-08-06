@@ -231,7 +231,7 @@ typedef enum {
     ACT_HINT, ACT_HINT_TAB, ACT_HINT_COPY, ACT_HINT_ALL,
     ACT_INSERT, ACT_INSERT_OFF, ACT_FOCUS_INPUT, ACT_PICK,
     ACT_TAB_NEW, ACT_TAB_CLOSE, ACT_TAB_NEXT, ACT_TAB_PREV,
-    ACT_SEARCH_TABS, ACT_SEARCH_HISTORY,
+    ACT_SEARCH_TABS, ACT_SEARCH_HISTORY, ACT_SEARCH_BOOKMARKS, ACT_BOOKMARK,
     ACT_TAB_1, ACT_TAB_2, ACT_TAB_3, ACT_TAB_4, ACT_TAB_5,
     ACT_TAB_6, ACT_TAB_7, ACT_TAB_8, ACT_TAB_9,
     ACT_ZOOM_IN, ACT_ZOOM_OUT, ACT_ZOOM_RESET, ACT_SMALLER, ACT_LARGER,
@@ -674,7 +674,7 @@ typedef struct {
     Buf      help_buf, help_last;
 
     bool     omni_open;
-    int      omni_mode;           // OMNI_TABS or OMNI_HIST
+    int      omni_mode;           // OMNI_TABS, OMNI_HIST or OMNI_MARKS
     char     omni_q[128];         // what has been typed at the list
     size_t   omni_qlen;
     int      omni_sel;            // the row picked, in the filtered order
@@ -796,10 +796,14 @@ void help_free(App *a);
 
 // ---------------------------------------------------------------- the lists
 
-// Going somewhere by typing a few letters of it: the tabs already open, or the
-// pages the profile has been to, narrowed as the letters arrive.
-#define OMNI_TABS 0
-#define OMNI_HIST 1
+// Going somewhere by typing a few letters of it: the tabs already open, the
+// pages the profile has been to, or Chrome's bookmarks.
+#define OMNI_TABS  0
+#define OMNI_HIST  1
+#define OMNI_MARKS 2
+
+// The bookmark a phrase names, or false when none holds every word of it.
+bool omni_best_bookmark(const char *query, char *url, size_t cap);
 
 void omni_show(App *a, int mode);
 void omni_close(App *a);             // safe when it is not open
@@ -807,6 +811,28 @@ bool omni_key(App *a, Event *ev);    // true when the list consumed it
 void omni_paste(App *a, const char *text, size_t len);
 void omni_paint(App *a);
 void omni_free(App *a);
+
+// ---------------------------------------------------------------- bookmarks
+
+// Chrome's own, read and written in `Bookmarks` in the profile.
+#define BOOKMARK_MAX 500
+
+typedef struct {
+    char   url[1024];
+    char   title[256];
+    double added;                // unix seconds, out of Chrome's own count
+} Bookmark;
+
+// Every bookmark, newest added first, in an array good until the next call and
+// until the next toggle - both read the file again over it.
+const Bookmark *bookmarks_all(int *n);
+
+// The page in front into the bookmark bar, or out of whatever folder holds it.
+void bookmark_toggle(App *a);
+
+// Whether the page in front is bookmarked, for the star on the status line.
+// Cheap to ask on every draw: the answer is held between address changes.
+bool bookmark_current(App *a);
 
 // ---------------------------------------------------------------- hints
 

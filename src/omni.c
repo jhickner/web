@@ -8,11 +8,9 @@
 #include <sqlite3.h>
 #include "web.h"
 
-// Going somewhere by typing a few letters of it. Two lists rather than one -
-// the tabs that are open, and the pages this profile has been to - because they
-// are answers to different questions: one is `which of these am I already in`,
-// and the other is `where was that thing`. Both are the same box, the same
-// matching, and the same keys, so knowing one is knowing the other.
+// Going somewhere by typing a few letters of it. Three lists - the tabs that are
+// open, the pages this profile has been to, and Chrome's bookmarks - in the same
+// box, with the same matching and the same keys.
 //
 // Drawn the way the key list is, over the cells the picture is placed into
 // rather than in a row of its own: a cell written as text stops being part of
@@ -251,6 +249,30 @@ static void filter(App *a) {
     if (a->omni_sel < 0) a->omni_sel = 0;
 }
 
+// ------------------------------------------------------- a phrase off the line
+
+// The bookmark a phrase names, scored as the list scores what is typed at it,
+// and filtered the same way: every word has to be in the address or the name.
+// Relevancy only, no recency. A tie goes to the newer, which is the order they
+// arrive in.
+bool omni_best_bookmark(const char *query, char *url, size_t cap) {
+    Terms q;
+    terms_split(query, &q);
+    if (!q.n) return false;
+    int n = 0;
+    const Bookmark *b = bookmarks_all(&n);
+    int best = -1;
+    double top = 0;
+    for (int i = 0; i < n; i++) {
+        if (!matches(&q, b[i].url, b[i].title)) continue;
+        double s = word_relevancy(&q, b[i].url, b[i].title);
+        if (best < 0 || s > top) { best = i; top = s; }
+    }
+    if (best < 0) return false;
+    snprintf(url, cap, "%s", b[best].url);
+    return true;
+}
+
 // ----------------------------------------------------------------- loading
 
 static void add_row(const char *url, const char *title, int tab, double last_visit) {
@@ -290,6 +312,14 @@ static bool copy_into(const char *src, FILE *out) {
     fclose(in);
     if (fclose(out) != 0) ok = false;
     return ok;
+}
+
+// Every folder of Chrome's bookmarks, newest added first.
+static void load_bookmarks(void) {
+    g_nrows = 0;
+    int n = 0;
+    const Bookmark *b = bookmarks_all(&n);
+    for (int i = 0; i < n; i++) add_row(b[i].url, b[i].title, -1, 0);
 }
 
 // Chrome's own history, which is a sqlite database in the profile and is being
@@ -475,7 +505,8 @@ void omni_paint(App *a) {
         buf_addf(&b, "\x1b[%d;%dH\x1b[0m", s.y + r, s.x);
         if (r == 0) {
             border(&b, "\xe2\x94\x8c", "\xe2\x94\x90",
-                   a->omni_mode == OMNI_TABS ? " tabs " : " history ", s.w);
+                   a->omni_mode == OMNI_TABS  ? " tabs " :
+                   a->omni_mode == OMNI_MARKS ? " bookmarks " : " history ", s.w);
             continue;
         }
         if (r == s.h - 1) {
@@ -566,12 +597,16 @@ void omni_show(App *a, int mode) {
     a->omni_last.len = 0;
     if (mode == OMNI_TABS) {
         load_tabs(a);
+    } else if (mode == OMNI_MARKS) {
+        load_bookmarks();
     } else if (!load_history(a)) {
         notify(a, "no history to search");
         return;
     }
     if (!g_nrows) {
-        notify(a, mode == OMNI_TABS ? "no tabs to search" : "no history to search");
+        notify(a, mode == OMNI_TABS  ? "no tabs to search" :
+                  mode == OMNI_MARKS ? "nothing has been bookmarked yet" :
+                                       "no history to search");
         return;
     }
     a->omni_open = true;
