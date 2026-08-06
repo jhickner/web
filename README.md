@@ -2,15 +2,12 @@
 
 <img src="images/ss.png" width="530" alt="Hacker News rendered inline in a terminal, with a tab bar above the page">
 
-Chrome in your terminal. Works great with small windows in tmux splits, which
-is how I use it.
-This project uses Chrome's screencast capability combined with kitty graphics
-to stream a browser window (with tabs) inline, into your terminal. It works
-surprisingly well. It even works in tmux, although it's a bit slower.
+Chrome in your terminal, with tabs, drawn inline as a window in the pane.
 
 `web` runs headless Chrome, streams the page over the DevTools protocol, and
 draws each frame with the kitty graphics protocol. Keyboard and mouse go back
-the other way, so pages are live: links click, forms type, wheels scroll.
+the other way, so pages are live: links click, forms type, wheels scroll. Tabs,
+history, bookmarks and logins are Chrome's own. Works in tmux.
 
 If you like running things in your terminal, check out these other projects:
 - [rom](https://github.com/jhickner/rom) - a terminal game emulator (gba, snes, etc.)
@@ -70,9 +67,8 @@ web --profile - --screenshot shot.png example.com   # throwaway, removed on exit
 ```
 
 A named profile gets its own browser, history, and tabs. `--endpoint`, `--list`,
-`--kill` and `--open` answer for one profile, so a run against one leaves every
-other window alone. `--exec` puts the profile in the environment as
-`WEB_PROFILE`, which a window started from there inherits.
+`--kill` and `--open` answer for one profile. `--exec` puts the profile in the
+environment as `WEB_PROFILE`, which a window started from there inherits.
 
 ## Keys
 
@@ -132,9 +128,8 @@ While reading. Letters this table does not name are typed into the page;
 ## Vim keys
 
 Set `vim = yes` in `~/.config/web/web.conf`. Without it no letter moves the
-page — `j` types a `j` — and the window is driven by the arrows, the chords,
-and the few keys above that are this program's own rather than vi's. With it,
-the vi vocabulary is the window's:
+page — `j` types a `j` — and the window is driven by the arrows and the chords.
+With it:
 
 | Key | Action |
 |---|---|
@@ -166,12 +161,11 @@ sizing the window (`shift`+`←`/`→` still do), `:` stops opening the console
 (`^X` still does), `^F` stops finding (`/` does), `^D` stops tracing, and `^B`
 stops going to the previous tab (`shift+alt+←` still does).
 
-The layer sits under `web.conf`, so any key the file names keeps what the file
-gave it, and the status line says how many it kept. The generated file writes
-the defaults as comments for that reason — a live line there would take the key
-back from this layer. A file written by an earlier version has them live
-instead; comment the key block out to follow the defaults again. `web` says so
-on stderr when a line hides a pair, as an old `g = top` hides `gg`.
+A key `web.conf` names keeps what the file gave it, and the status line says how
+many the file took back. The generated file writes the defaults as comments; a
+file from an earlier version has them live, so comment the key block out to
+follow the defaults again. A line that hides a pair — an old `g = top` over
+`gg` — is reported on stderr.
 
 ## Links without a mouse
 
@@ -179,15 +173,13 @@ on stderr when a line hides a pair, as an old `g = top` hides `gg`.
 `F` to open it in a new tab, `esc` to put the labels away, `backspace` to undo
 a character. Labels are `a` `s` `d` `f` `g` `h` `j` `k` `l`, short ones first
 and from the top of the page down; a label that can only be one thing fires
-without waiting. Every key goes to the labels while they are up, so nothing
-half-typed reaches the page.
+without waiting. Every key goes to the labels while they are up.
 
 Links, buttons, fields, and anything carrying `role`, `onclick` or `tabindex`
 are labelled, in the page and in same-origin frames and open shadow roots.
-Something covered by a banner or a modal is not, since the click would land on
-the cover. What gets sent is a real mouse click at the label's own position:
-hover, focus, and the popups a click is allowed to open all behave as if the
-mouse had done it.
+Something covered by a banner or a modal is not. The click is a real mouse
+click at the label's own position, so hover, focus and the popups a click is
+allowed to open all behave as they would from the mouse.
 
 ### Site rules
 
@@ -237,17 +229,12 @@ it:
 | click a tile | pick it; clicking the one in front opens it |
 
 A page opened by something driving the window — one per worker of a test run —
-becomes a tab as it appears and goes when it goes. It is the driver that says
-so: Chrome's news that a page has appeared says nothing about who asked for it,
-and the pages of every other window on the same browser look no different from
-here.
+becomes a tab as it appears and goes when it goes.
 
 Each page is photographed at the size of its own tile, so it reflows to the
 width it is drawn at rather than being a shrunken screenshot of a whole window.
-One photograph is taken at a time, a few a second, going round the tiles in turn
-and stopping twice as often on the one in front — so a grid of nine costs what a
-grid of two does. A page that has not changed comes back as the same bytes and
-is not drawn again, so a grid of pages sitting still costs nothing at all. The
+One photograph at a time, a few a second, round the tiles in turn and twice as
+often on the one in front. A page that has not changed is not drawn again. The
 screencast stops while the grid is up.
 
 ## Finding a page
@@ -271,9 +258,9 @@ Every word typed has to appear in the title or the address, in any order, so
 `hacker news` and `news hacker` find the same page and each word narrows the
 list further. Case is ignored until you type a capital, and then it matters.
 
-Ranking is Vimium's: how well the words match the title and address, plus
-recency out to a month old. Visit count is not counted. With nothing typed the
-history opens on the most recent page first; tabs are ranked on the words alone.
+Ranking is how well the words match the title and address, plus recency out to
+a month old; visit count is not counted. With nothing typed the history opens
+on the most recent page first, and tabs are ranked on the words alone.
 
 The history is Chrome's own, read from `History` in the profile
 (`~/.cache/web/profile`) — everything opened in `web`, including from a
@@ -327,9 +314,8 @@ option of the same name, which wins for that run; `motion-scale` and
 with a host in front of its `=` go in the same file, one per site — see
 [Site rules](#site-rules).
 
-`motion-scale` and `still-delay` apply under `scale = auto` and nowhere else.
-Below about 100, a scroll can be called over between two of its own frames and
-go back to full size in the middle of itself.
+`motion-scale` and `still-delay` apply under `scale = auto` and nowhere else. A
+`still-delay` below about 100 ends a scroll in the middle of itself.
 
 `search` takes the words in place of its `%s`, percent-encoded:
 
@@ -397,7 +383,7 @@ web [options] <url>...
 --login     open a window to sign in with, on the same profile
 --keep      leave Chrome running on exit, for this window and every other
 --open URL  open URL in a tab of the window most recently used, and exit.
-            Nothing running is an error, so a caller can start one
+            Nothing running is an error
 --endpoint  print every running window as JSON and exit
 --mcp       drive the window on screen as an MCP server on stdio, for an
             agent to work the page you are watching
@@ -406,12 +392,10 @@ web [options] <url>...
 --kill      quit this profile's windows and end its browsers, including
             any nothing can reach
 --exec CMD  run CMD against this window, its output in the console
---slowmo MS pause MS between the actions of what --exec starts, so a run
-            can be watched rather than only finished
+--slowmo MS pause MS between the actions of what --exec starts
 --freeze    hold the page where a driver failed instead of tearing it
             down; alt+enter lets the run carry on
---grid      show the grid whenever there is more than one page, so a run
-            with several workers opens as one tile each
+--grid      show the grid whenever there is more than one page
 --tmux-zoom grow the window to fill the pane while tmux has it zoomed,
             and put its size back when the zoom ends
 --search T  the search a phrase becomes, as a url with %s where the words
@@ -485,8 +469,7 @@ document.querySelector("h1").textContent
 Values go to stdout, one per line, while the page goes to the terminal, so
 `./web example.com < s.js | jq` works. `--json` wraps each value in an object
 with the line that produced it. A line that throws prints to stderr and exits
-non-zero. A line that starts a navigation is not finished until the page has
-arrived.
+non-zero.
 
 A line that answers a promise is not finished until the promise is, so anything
 asynchronous can be a line of its own:
@@ -495,9 +478,8 @@ asynchronous can be a line of its own:
 fetch("/api/status").then(r => r.json()).then(j => j.state)
 ```
 
-Waiting is what a page needs and a line cannot say, so the page is given the
-verbs for it as `__web`. Each answers a promise, and each gives up after
-`--timeout` unless told otherwise:
+The page is given verbs for waiting as `__web`. Each answers a promise, and
+each gives up after `--timeout` unless told otherwise:
 
 | Call | What it does |
 |---|---|
@@ -605,7 +587,7 @@ for (const page of ctx.pages()) {
 
 The package does that loop for you — see [Playwright](#playwright). Playwright
 is not required: `js/cdp.mjs` is the same connection over raw CDP with no
-dependencies, and `examples/drive.mjs` is a demo written against it:
+dependencies, and `examples/drive.mjs` is written against it:
 
 ```sh
 node examples/drive.mjs                 # against the one window running
@@ -668,11 +650,9 @@ await page.locator('.titleline > a').first().click();
   test to the next; there is no fresh context per test.
 - The viewport is the window's — `--cols`, `--rows`, `[` and `]` set it, not
   `test.use({ viewport })`.
-- `--slowmo 200` puts a pause between actions, which is what makes a run
-  something to watch.
-- A window being driven keeps drawing while the terminal is not focused, so it
-  stays live in one pane while the run is watched from another. `--exec` is seen
-  directly; a runner started anywhere else says so through the package.
+- `--slowmo 200` puts a pause between actions.
+- A window being driven keeps drawing while the terminal is not focused, whether
+  `--exec` started the run or a runner in another pane did.
 - `--freeze` holds the page where a test failed — see [Freezing](#freezing).
 - `WEB_PROFILE=ci`, or `--profile ci`, keeps a run off the browser you are using.
 - `WEB_WINDOW` picks the window when several are up: `web --name hn <url>` in
@@ -694,13 +674,12 @@ CSS selector off the element that was not found, `f` labels what was actually
 clickable. `alt+enter` lets the run carry on to the next test.
 
 The test's timeout is lifted while it waits. Only a window started with
-`--freeze` freezes anything, so a run with nothing watching it — CI — never
-stops.
+`--freeze` freezes anything.
 
 ### MCP
 
-`--mcp` is an MCP server on stdio that drives the window you already have open
-— your browser, your logins, your tabs — on screen while it works:
+`--mcp` is an MCP server on stdio that drives the window already open, on
+screen while it works:
 
 ```sh
 claude mcp add web -- web --mcp
@@ -721,9 +700,8 @@ claude mcp add web -- web --mcp
 | `screenshot` | a picture of the page |
 
 The window keeps drawing while an agent works it, whether or not its pane is
-focused. `WEB_WINDOW` picks one by pid or by `--name` when several are up.
-Nothing is installed for any of this, and with `--record` what the agent does
-is written down as a spec.
+focused. `WEB_WINDOW` picks one by pid or by `--name` when several are up. With
+`--record`, what the agent does is written down as a spec.
 
 ### Recording
 
@@ -792,27 +770,24 @@ Then `attach 9222`, typed in the console or run from a script:
 - The browser `web` started is shut down unless `--keep` said otherwise. The one
   it attached to is never shut down; quitting leaves it running.
 - `--keep` is asked of the browser, not the run: while any window has asked for
-  this browser to stay, no window's quit will shut it down. The request dies
-  with the browser.
+  this browser to stay, no window's quit shuts it down. The request dies with
+  the browser.
 - The device metrics override goes on their page too, so Playwright sees the
   viewport the frames are drawn at.
 - `--port N` against a browser already answering there takes it over rather than
-  starting a second, which is what makes `--keep --port` work. With no address
-  it leaves that browser on whatever page it is on.
-- Unless that browser is one of ours: a run records the port it started Chrome
-  on, so a later `--port` at the same browser knows it is an earlier run's, takes
-  a tab of its own, and can shut it down like any other run.
+  starting a second. With no address it leaves that browser on whatever page it
+  is on.
+- A browser one of ours started is the exception: a later `--port` at it takes a
+  tab of its own, and can shut it down like any other run.
 
 ## Zoom and width
 
 `[` and `]` change the *viewport width* rather than magnifying pixels, so the
-page reflows: text gets genuinely larger and responsive sites drop to their
-narrow layout.
+page reflows: text gets larger and responsive sites drop to their narrow layout.
 
-After each change `web` asks the page whether it still fits, and a page that
-cannot reflow that narrow gets its viewport widened back until it does. The
-status line says so (`zoom 77% - page needs 1240px`) and the stored zoom drops
-to what the page allowed.
+A page that cannot reflow that narrow gets its viewport widened back until it
+does. The status line says so — `zoom 77% - page needs 1240px` — and the stored
+zoom drops to what the page allowed.
 
 `alt+f` turns fitting off if you would rather have the magnification and scroll
 sideways with `h` and `l`. `alt+0` resets to 100%.
@@ -852,7 +827,7 @@ make browser
 ```
 
 Then System Settings > Desktop & Dock > Default web browser > web, and confirm
-the prompt macOS puts up. `duti` and other third-party setters cannot do it.
+the prompt macOS puts up.
 
 A link opens as a tab in the `web` window most recently used, which selects its
 own tmux pane if it is in one. With no window running, it starts one outwards
