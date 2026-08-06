@@ -1825,34 +1825,7 @@ static void draw_status(App *a) {
         static const char KEYS[] = "? keys";
 
         const char *left = a->title[0] ? a->title : a->url;
-        char stats[160];
-        const char *hint;
-        if (a->show_stats) {
-            // The port leads: it is the one number here that something outside
-            // this process needs, and it is how playwright finds the browser.
-            // The cell and the frame it implies come last: they are what says
-            // whether the size everything else is derived from was measured or
-            // guessed, which is not visible from any of the numbers before them.
-            // Which profile, but only when it is not the shared one: a window
-            // that is off on its own has different logins and a browser of its
-            // own, and nothing else on screen says so.
-            char prof[80] = "";
-            char pname[64];
-            if (chrome_profile_named(pname, sizeof pname))
-                snprintf(prof, sizeof prof, "%s  ", pname);
-            snprintf(stats, sizeof stats,
-                     "%scdp:%d  %zuKB %.0fms %.1ffps  %dx%d@%gx z%.0f%%  "
-                     "cell %dx%d cast %dx%d  %us%s",
-                     prof, a->chrome.port,
-                     a->last_bytes / 1024, a->last_write_ms, a->fps,
-                     a->css_w, a->css_h, a->scale,
-                     100.0 * (sw * a->term.cell_w) / (a->css_w ? a->css_w : 1),
-                     a->term.cell_w, a->term.cell_h, a->cast_w, a->cast_h,
-                     a->stills, a->in_motion ? " moving" : "");
-            hint = stats;
-        } else {
-            hint = KEYS;
-        }
+        const char *hint = KEYS;
         int hintlen = (int)strlen(hint);
         // A narrow window drops the hint rather than shrinking the address to
         // nothing; when it goes, its room goes to the address.
@@ -3248,7 +3221,6 @@ static bool do_action(App *a, Event *ev, Act act) {
 
     case ACT_CONSOLE: console_toggle(a); return true;
     case ACT_HELP:    help_toggle(a);    return true;
-    case ACT_STATS:   a->show_stats = !a->show_stats;   return true;
     case ACT_STATUS:  a->hide_status = !a->hide_status; return true;
     case ACT_TRACE:   trace_toggle(a);   return true;
     }
@@ -4009,7 +3981,7 @@ static void usage(void) {
         "  --full      take over the whole terminal instead of drawing a window\n"
         "  --rows N    how many cell rows the window gets (default 40)\n"
         "  --cols N    how many cell columns the window gets (default 80)\n"
-        "  --no-status start with the status line hidden (^S toggles it)\n"
+        "  --no-status start with the status line hidden (^G toggles it)\n"
         "  --no-clear  leave the window on screen on exit instead of erasing it\n"
         "  --mute      start with the page's audio switched off\n"
         "  --eval JS   run javascript in the page and print what it answers\n"

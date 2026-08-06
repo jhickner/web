@@ -71,9 +71,8 @@ web --profile - --screenshot shot.png example.com   # throwaway, removed on exit
 
 A named profile gets its own browser, history, and tabs. `--endpoint`, `--list`,
 `--kill` and `--open` answer for one profile, so a run against one leaves every
-other window alone. `^G` names the profile when it is not the shared one, and
-`--exec` puts it in the environment as `WEB_PROFILE`, which a window started
-from there inherits.
+other window alone. `--exec` puts the profile in the environment as
+`WEB_PROFILE`, which a window started from there inherits.
 
 ## Keys
 
@@ -85,9 +84,8 @@ from there inherits.
 | `^Y` | copy the page selection, or the address if nothing is selected |
 | `^E` | open this page in the desktop browser |
 | `^F` | find in page, then `f3` / `shift+f3` |
-| `^G` | devtools port, frame size, write time, throughput |
+| `^G` | hide or show the status line |
 | `^D` | start or stop a trace into `/tmp/web_input.log` |
-| `^S` | hide or show the status line |
 | `^Q` | quit |
 | `^T` / `^W` | new tab / close tab (the last one closes the window) |
 | `^N` / `^B` | next tab / previous tab (`shift+alt+→` / `shift+alt+←` too) |
@@ -364,7 +362,7 @@ web [options] <url>...
 --rows N    how many cell rows the window gets (default 40)
 --cols N    how many cell columns the window gets (default 80, and
             never wider than the terminal)
---no-status start with the status line hidden (^S toggles it)
+--no-status start with the status line hidden (^G toggles it)
 --no-clear  leave the window on screen on exit instead of erasing it
 --full      take over the whole terminal instead of drawing a window
 --show      run Chrome with a visible window too
@@ -544,9 +542,8 @@ selector for what you hit into the console instead of activating it.
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
 ```
 
-`^G` shows the port when Chrome picked one itself. The port names the browser,
-not the page, so `--endpoint` reports every running window as one JSON object
-per line, without starting a browser:
+The port names the browser, not the page, so `--endpoint` reports every running
+window as one JSON object per line, without starting a browser:
 
 ```console
 $ web --endpoint
@@ -781,7 +778,7 @@ does not fit is reached with `h` and `l`.
 | `WEB_CHROME` | path to a different Chrome build |
 | `WEB_PROFILE` | the profile to run in, as `--profile` names it. Set for what `--exec` starts |
 | `WEB_WINDOW` | which window a script attaches to, by pid, when several are up |
-| `WEB_CELL` | `WxH` cell size, if the page aspect looks stretched. A terminal reporting no pixel geometry leaves it a guess (8x17 default); `^G` says which you have |
+| `WEB_CELL` | `WxH` cell size, if the page aspect looks stretched. A terminal reporting no pixel geometry leaves it a guess (8x17 default); a trace (`^D`) records which you have |
 
 ## How it works
 

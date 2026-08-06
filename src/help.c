@@ -82,7 +82,6 @@ static const Bind BINDS[] = {
     {0},
     {.what = "the rest"},
     {.act = ACT_CONSOLE,                       .what = "console"},
-    {.act = ACT_STATS,                         .what = "stats on the status line"},
     {.act = ACT_STATUS,                        .what = "hide the status line"},
     {.act = ACT_TRACE,                         .what = "trace to /tmp/web_input.log"},
     {.act = ACT_HELP,                          .what = "this list"},

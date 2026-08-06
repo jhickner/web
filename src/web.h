@@ -237,7 +237,7 @@ typedef enum {
     ACT_ZOOM_IN, ACT_ZOOM_OUT, ACT_ZOOM_RESET, ACT_SMALLER, ACT_LARGER,
     ACT_FIT, ACT_PAGE_WIDER, ACT_PAGE_NARROWER, ACT_SCALE,
     ACT_BOX_TALLER, ACT_BOX_SHORTER, ACT_BOX_WIDER, ACT_BOX_NARROWER,
-    ACT_CONSOLE, ACT_HELP, ACT_STATS, ACT_STATUS, ACT_TRACE, ACT_QUIT,
+    ACT_CONSOLE, ACT_HELP, ACT_STATUS, ACT_TRACE, ACT_QUIT,
     ACT_INVALID,          // a name the file gave that is not one of these
 } Act;
 
@@ -537,7 +537,6 @@ typedef struct {
     double  last_unwedge;      // when the screencast was last restarted for it
     int     unwedge_run;       // restarts since the last frame that answered one
 
-    bool    show_stats;        // ^G
     double  zoom;              // page magnification, alt+= / alt+-
     // What the last relayout actually put on screen. A page held wider than it
     // was asked to be is magnified less than `zoom` says, and the difference is
@@ -547,7 +546,7 @@ typedef struct {
     bool    inline_mode;       // a block in the shell's flow, like rom
     int     want_rows;         // rows for that block, 0 = pick one
     int     status_row;
-    bool    hide_status;       // the status line is not wanted, ^S
+    bool    hide_status;       // the status line is not wanted, ^G
     bool    status_open;       // whether it is on screen right now
 
     bool    pause_on_blur;     // stop drawing while the terminal is not focused

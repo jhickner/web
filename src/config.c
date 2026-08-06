@@ -123,7 +123,6 @@ static const struct { const char *name; Act act; const char *section; } ACTS[] =
 
     {"console",        ACT_CONSOLE, "the rest"},
     {"help",           ACT_HELP, NULL},
-    {"stats",          ACT_STATS, NULL},
     {"status-line",    ACT_STATUS, NULL},
     {"trace",          ACT_TRACE, NULL},
     {"quit",           ACT_QUIT, NULL},
@@ -400,8 +399,7 @@ static const KeyDef DEFAULTS[] = {
     {MOD_CTRL, 'y', ACT_COPY},
     {MOD_CTRL, 'e', ACT_EXTERNAL},
     {MOD_CTRL, 'x', ACT_CONSOLE},
-    {MOD_CTRL, 'g', ACT_STATS},
-    {MOD_CTRL, 's', ACT_STATUS},
+    {MOD_CTRL, 'g', ACT_STATUS},
     {MOD_CTRL, 'd', ACT_TRACE},
     {MOD_CTRL, 't', ACT_TAB_NEW},
     {MOD_CTRL, 'w', ACT_TAB_CLOSE},
