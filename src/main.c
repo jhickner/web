@@ -268,11 +268,16 @@ void notify(App *a, const char *s) {
 #define MOTION_SCALE_SSH 0.5
 #define MOTION_RUN   3       // quick frames in a row before it is a scroll
 #define MOTION_GAP   0.20    // a frame this soon after the last is still moving
-#define MOTION_IDLE  0.30    // and this long without one is stopped
-#define MOTION_QUIET 0.25    // and this long since the last key or wheel
+// How long nothing may happen before the scroll is called over and the full
+// size goes back on: this long without a frame, and this long since the last
+// key or wheel. `still-delay` moves it, and it is the whole of the wait anyone
+// sees - the relayout it fires restarts the screencast, and the sharp frame
+// that comes back cancels the still below before its own delay is up.
+#define SETTLE_WAIT  300     // ms
 // Long enough that a frame Chrome was going to send anyway arrives first and
 // cancels the ask, short enough that the picture is not left soft for a beat
-// somebody would notice.
+// somebody would notice. The backstop for when no frame comes at all, so it is
+// not the delay to reach for.
 #define STILL_WAIT   0.15
 // A capture can itself provoke a compositor frame, which would arrive as an
 // ordinary screencast frame and ask for another still. This is what stops the
@@ -4254,6 +4259,7 @@ int main(int argc, char **argv) {
     a.motion_auto = true;
     a.motion_scale = (getenv("SSH_CONNECTION") || getenv("SSH_TTY"))
         ? MOTION_SCALE_SSH : MOTION_SCALE;
+    a.settle_ms = SETTLE_WAIT;
     a.zoom = 1.5;
     a.want_rows = 40;
     a.want_cols = 80;
@@ -4767,8 +4773,8 @@ int main(int argc, char **argv) {
         if (a.in_motion) {
             // Whichever of the two goes quiet last, since motion ends only when
             // both have.
-            double f = a.last_draw + MOTION_IDLE;
-            double k = a.last_input + MOTION_QUIET;
+            double f = a.last_draw + a.settle_ms / 1000.0;
+            double k = a.last_input + a.settle_ms / 1000.0;
             double left = (f > k ? f : k) - now_sec();
             int ms = left > 0 ? (int)(left * 1000.0) + 1 : 0;
             if (wait < 0 || ms < wait) wait = ms;
@@ -4940,8 +4946,8 @@ int main(int argc, char **argv) {
         // Both halves, because either alone is wrong: the frames stop while a
         // trackpad is still coasting, and the input stops while Chrome is
         // dropping frames in the middle of a scroll.
-        if (a.in_motion && now_sec() - a.last_draw > MOTION_IDLE &&
-            now_sec() - a.last_input > MOTION_QUIET) {
+        if (a.in_motion && now_sec() - a.last_draw > a.settle_ms / 1000.0 &&
+            now_sec() - a.last_input > a.settle_ms / 1000.0) {
             a.in_motion = false;
             a.motion_run = 0;
             term_log("%.3f motion off", now_sec());

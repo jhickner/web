@@ -544,7 +544,8 @@ static const KeyPair VIM_PAIRS[] = {
 // key moves them afterwards and the file never hears about it, so the several
 // windows usually up at once each keep their own - what is written here is an
 // opening position, not a record of one.
-typedef enum { S_BOOL, S_BOOL_NOT, S_SCALE, S_ZOOM, S_COUNT, S_MS } SetKind;
+typedef enum { S_BOOL, S_BOOL_NOT, S_SCALE, S_ZOOM, S_RATIO, S_COUNT,
+               S_MS, S_SETTLE } SetKind;
 
 static const struct {
     const char *name;
@@ -560,6 +561,8 @@ static const struct {
     {"raw-keys",      S_BOOL_NOT, offsetof(App, claim_keys)},
     {"keep",          S_BOOL,     offsetof(App, keep)},
     {"scale",         S_SCALE,    0},
+    {"motion-scale",  S_RATIO,    offsetof(App, motion_scale)},
+    {"still-delay",   S_SETTLE,   offsetof(App, settle_ms)},
     {"zoom",          S_ZOOM,     offsetof(App, zoom)},
     {"rows",          S_COUNT,    offsetof(App, want_rows)},
     {"cols",          S_COUNT,    offsetof(App, want_cols)},
@@ -600,10 +603,29 @@ static bool setting_set(App *a, int i, const char *v) {
         *double_at(a, SETTINGS[i].off) = d;
         return true;
     }
+    // How far the picture drops while the page is moving, as a fraction of the
+    // width. 1 is no drop at all, which is the way to turn the trade off
+    // without giving up the rest of what `scale auto` does.
+    if (SETTINGS[i].kind == S_RATIO) {
+        double d = strtod(v, &end);
+        if (end == v || *end || d < 0.1 || d > 1.0) return false;
+        *double_at(a, SETTINGS[i].off) = d;
+        return true;
+    }
     if (SETTINGS[i].kind == S_COUNT) {
         if (!strcasecmp(v, "auto")) { *int_at(a, SETTINGS[i].off) = 0; return true; }
         long n = strtol(v, &end, 10);
         if (end == v || *end || n < 1 || n > 1000) return false;
+        *int_at(a, SETTINGS[i].off) = (int)n;
+        return true;
+    }
+    // Milliseconds again, with a floor under it: a scroll called over between
+    // one of its own frames and the next is a scroll that goes back to full
+    // size in the middle of itself, and then straight back down. 50 is below
+    // anything a trackpad leaves between frames.
+    if (SETTINGS[i].kind == S_SETTLE) {
+        long n = strtol(v, &end, 10);
+        if (end == v || *end || n < 50 || n > 5000) return false;
         *int_at(a, SETTINGS[i].off) = (int)n;
         return true;
     }
@@ -627,7 +649,7 @@ static void setting_text(const App *a, int i, char *out, size_t cap) {
         else                snprintf(out, cap, "%g", a->want_scale);
         return;
     }
-    if (SETTINGS[i].kind == S_ZOOM) {
+    if (SETTINGS[i].kind == S_ZOOM || SETTINGS[i].kind == S_RATIO) {
         snprintf(out, cap, "%g", *double_at((App *)a, SETTINGS[i].off));
         return;
     }
@@ -637,7 +659,7 @@ static void setting_text(const App *a, int i, char *out, size_t cap) {
         else       snprintf(out, cap, "auto");
         return;
     }
-    if (SETTINGS[i].kind == S_MS) {
+    if (SETTINGS[i].kind == S_MS || SETTINGS[i].kind == S_SETTLE) {
         snprintf(out, cap, "%d", *int_at((App *)a, SETTINGS[i].off));
         return;
     }
@@ -867,8 +889,11 @@ static int read_config(const char *path, App *a, bool keys) {
                 const char *want = "yes or no";
                 if (SETTINGS[s].kind == S_SCALE)      want = "size";
                 else if (SETTINGS[s].kind == S_ZOOM)  want = "magnification";
+                else if (SETTINGS[s].kind == S_RATIO) want = "fraction of 1";
                 else if (SETTINGS[s].kind == S_COUNT) want = "count";
                 else if (SETTINGS[s].kind == S_MS)    want = "number of milliseconds";
+                else if (SETTINGS[s].kind == S_SETTLE)
+                    want = "number of milliseconds from 50 to 5000";
                 fprintf(stderr, "web: %s:%d: `%s` is not a %s for %s\n", path,
                         lineno, name, want, spec);
                 bad++;

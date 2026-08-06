@@ -291,6 +291,8 @@ here in the same session. The next start reads what is on disk.
 | `raw-keys` | `no` | yes/no | let a key the page did not want reach the window system |
 | `keep` | `no` | yes/no | leave Chrome running on exit |
 | `scale` | `auto` | `auto`, 0.1–3 | frame size as a fraction of the viewport; `auto` is full size when the page is still, smaller while it moves |
+| `motion-scale` | `0.65` | 0.1–1 | frame width while the page is moving, as a fraction of its still size; `1` keeps it full size throughout. Over ssh the default is `0.5` |
+| `still-delay` | `300` | 50–5000 | milliseconds with no frame and no key before the page counts as still and the full-size picture goes back |
 | `zoom` | `1.5` | 0.5–3 | page magnification a new window opens at |
 | `rows` | `40` | `auto`, a count | cell rows a new window opens at |
 | `cols` | `80` | `auto`, a count | cell columns a new window opens at |
@@ -300,8 +302,13 @@ here in the same session. The next start reads what is on disk.
 | `tmux-zoom` | `no` | yes/no | grow the window to fill the pane while tmux has it zoomed, and put its size back when the zoom ends |
 
 Booleans also take `true`, `on` and `1`. Each setting is the command line
-option of the same name, which wins for that run. `hint-only` and `hint-skip`
-lines go in the same file, one per site — see [Site rules](#site-rules).
+option of the same name, which wins for that run; `motion-scale` and
+`still-delay` are this file only. `hint-only` and `hint-skip` lines go in the
+same file, one per site — see [Site rules](#site-rules).
+
+`motion-scale` and `still-delay` apply under `scale = auto` and nowhere else.
+Below about 100, a scroll can be called over between two of its own frames and
+go back to full size in the middle of itself.
 
 `zoom`, `rows` and `cols` are where a new window opens. `[` `]` `alt+0` and
 `shift`+arrows move a running window from there, and nothing is written back.

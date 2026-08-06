@@ -583,6 +583,7 @@ typedef struct {
     bool    in_motion;         // whether it is doing so right now
     int     motion_run;        // quick frames in a row seen so far
     double  motion_scale;      // how far down, harder over ssh than locally
+    int     settle_ms;         // nothing happening for this long ends the motion
 
     // The sharp picture, fetched rather than waited for. Restarting the
     // screencast is an ask nothing answers: a page with nothing moving on it
