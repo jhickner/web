@@ -487,6 +487,11 @@ typedef struct {
 
 #define BOX_MIN_ROWS 2     // the least picture an inline window can be left with
 
+// The longest a setting written as text may be, which is the search template
+// and nothing else so far. Long enough for the query strings the engines with
+// something to say about themselves ask for.
+#define SETTING_TEXT_MAX 512
+
 typedef struct {
     Term    term;
     Kitty   kitty;
@@ -566,6 +571,7 @@ typedef struct {
     int     pend_key;          // second; key 0 when nothing is waiting
     int     prompt;            // 0 none, 1 address, 2 find
     char    find[256];         // last search, for n and N
+    char    search[SETTING_TEXT_MAX];   // where a phrase goes, %s for the words
 
     int     box_rows;          // inline: cell rows the window occupies, BOX_MIN_ROWS up
     int     box_cols;          // inline: cell columns, 0 = from the proportion
@@ -762,6 +768,11 @@ void navigate(App *a, const char *raw);
 // address `navigate` would have used, for the caller that wants it in a tab of
 // its own instead.
 void bar_url(const char *raw, char *url, size_t cap);
+
+// The template a phrase becomes an address through, once the config file has
+// been read. bar_url works from this rather than from the App: the MCP tools
+// resolve a line without one, and both have to land in the same place.
+void search_set(const char *tpl);
 void run_js(App *a, const char *js);
 void relayout(App *a);
 

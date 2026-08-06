@@ -2031,31 +2031,62 @@ static void start_url(const char *raw, char *out, size_t cap) {
 }
 
 // What the address bar makes of a line: an address as it stands, a path that
-// is really there, a bare host, or - a space in it, or no dot anywhere - the
-// search nothing else could have been. Apart from navigate itself because the
-// address bar now has two ways out of it, and a line typed for a new tab has
-// to become the same address it would have become for this one.
+// is really there, a bookmark the words name, a bare host, or - a space in it,
+// or no dot anywhere - the search nothing else could have been. Apart from
+// navigate itself because the address bar now has two ways out of it, and a
+// line typed for a new tab has to become the same address it would have become
+// for this one.
+//
+// The bookmarks are asked the same question the command line asks them, and
+// only for a line that is not itself somewhere to go: `hn` is the bookmark
+// where there is one, and the search it always was where there is not.
+// Google's plain search, which is the one it answers a bare query with. The
+// engines all take the same shape - a query string with the words on the end -
+// so `search` in web.conf is any of them written out.
+#define SEARCH_URL "https://www.google.com/search?q=%s"
+
+// Where a phrase goes. The template `search` names, with the words in place of
+// its `%s`, percent-encoded on the way in - so an engine only has to be written
+// down once here rather than reached for through a browser that, headless, has
+// no address bar of its own to ask.
+//
+// Kept as a copy rather than read out of the App, because the address bar is
+// not the only caller: the MCP tools resolve a line with no window in hand, and
+// both have to make the same address of it.
+static char g_search[SETTING_TEXT_MAX] = SEARCH_URL;
+
+void search_set(const char *tpl) {
+    if (tpl && *tpl) snprintf(g_search, sizeof g_search, "%s", tpl);
+}
+
+static void search_url(const char *raw, char *url, size_t cap) {
+    char q[1024];
+    size_t o = 0;
+    for (const unsigned char *s = (const unsigned char *)raw;
+         *s && o < sizeof q - 4; s++) {
+        if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+            (*s >= '0' && *s <= '9') || strchr("-_.~", *s)) {
+            q[o++] = (char)*s;
+        } else {
+            o += (size_t)snprintf(q + o, sizeof q - o, "%%%02X", *s);
+        }
+    }
+    q[o] = 0;
+
+    // The first `%s` and only that one. Every other percent in the template is
+    // an encoded character the engine asked for, and is left where it is.
+    const char *at = strstr(g_search, "%s");
+    if (!at) { snprintf(url, cap, "%s", g_search); return; }
+    snprintf(url, cap, "%.*s%s%s", (int)(at - g_search), g_search, q, at + 2);
+}
+
 void bar_url(const char *raw, char *url, size_t cap) {
     if (strstr(raw, "://") || strncmp(raw, "about:", 6) == 0) {
         snprintf(url, cap, "%s", raw);
     } else if (!file_url(raw, url, cap)) {
-        if (strchr(raw, ' ') || !strchr(raw, '.')) {
-            char q[1024];
-            size_t o = 0;
-            for (const unsigned char *s = (const unsigned char *)raw;
-                 *s && o < sizeof q - 4; s++) {
-                if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
-                    (*s >= '0' && *s <= '9') || strchr("-_.~", *s)) {
-                    q[o++] = (char)*s;
-                } else {
-                    o += (size_t)snprintf(q + o, sizeof q - o, "%%%02X", *s);
-                }
-            }
-            q[o] = 0;
-            snprintf(url, cap, "https://duckduckgo.com/?q=%s", q);
-        } else {
-            snprintf(url, cap, "https://%s", raw);
-        }
+        if (!looks_addressed(raw) && omni_best_bookmark(raw, url, cap)) return;
+        if (strchr(raw, ' ') || !strchr(raw, '.')) search_url(raw, url, cap);
+        else snprintf(url, cap, "https://%s", raw);
     }
 }
 
@@ -3993,6 +4024,8 @@ static void usage(void) {
         "              run with several workers opens as one tile each\n"
         "  --tmux-zoom grow the window to fill the pane while tmux has it\n"
         "              zoomed, and put its size back when the zoom ends\n"
+        "  --search T  the search a phrase becomes, as a url with %%s where the\n"
+        "              words go (default google)\n"
         "  --record F  write what is done to the page to F as a playwright\n"
         "              spec, until alt+r stops it\n"
         "  --profile N run in a profile of its own - its own logins, history\n"
@@ -4263,6 +4296,7 @@ int main(int argc, char **argv) {
     a.zoom = 1.5;
     a.want_rows = 40;
     a.want_cols = 80;
+    snprintf(a.search, sizeof a.search, "%s", SEARCH_URL);
     a.pause_on_blur = true;
     a.claim_keys = true;              // --raw-keys hands them to the window system
     a.exec_fd = -1;
@@ -4385,6 +4419,8 @@ int main(int argc, char **argv) {
             a.grid_auto = true;
         } else if (!strcmp(argv[i], "--tmux-zoom")) {
             a.tmux_zoom = true;
+        } else if (!strcmp(argv[i], "--search") && i + 1 < argc) {
+            snprintf(a.search, sizeof a.search, "%s", argv[++i]);
         } else if (!strcmp(argv[i], "--record") && i + 1 < argc) {
             rec_path = argv[++i];
         } else if (!strcmp(argv[i], "--slowmo") && i + 1 < argc) {
@@ -4422,6 +4458,10 @@ int main(int argc, char **argv) {
                         "ignored\n", TAB_MAX, extra_urls,
                 extra_urls == 1 ? " was" : "es were");
     if (nurls) start = urls[0];
+    // The file has been read and the arguments have had their say, so this is
+    // the engine the run works with. Before the first address is resolved, and
+    // before the MCP driver below, which resolves lines of its own.
+    search_set(a.search);
     // Questions about, and an end to, what is already running - all answered
     // without starting anything of our own.
     if (endpoint_only) return print_sessions();

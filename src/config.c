@@ -545,7 +545,7 @@ static const KeyPair VIM_PAIRS[] = {
 // windows usually up at once each keep their own - what is written here is an
 // opening position, not a record of one.
 typedef enum { S_BOOL, S_BOOL_NOT, S_SCALE, S_ZOOM, S_RATIO, S_COUNT,
-               S_MS, S_SETTLE } SetKind;
+               S_MS, S_SETTLE, S_TEXT } SetKind;
 
 static const struct {
     const char *name;
@@ -570,12 +570,14 @@ static const struct {
     {"freeze",        S_BOOL,     offsetof(App, freeze)},
     {"grid",          S_BOOL,     offsetof(App, grid_auto)},
     {"tmux-zoom",     S_BOOL,     offsetof(App, tmux_zoom)},
+    {"search",        S_TEXT,     offsetof(App, search)},
 };
 #define NSETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))
 
 static bool   *bool_at(App *a, size_t off)   { return (bool *)((char *)a + off); }
 static double *double_at(App *a, size_t off) { return (double *)((char *)a + off); }
 static int    *int_at(App *a, size_t off)    { return (int *)((char *)a + off); }
+static char   *text_at(App *a, size_t off)   { return (char *)a + off; }
 
 static bool parse_bool(const char *v, bool *out) {
     if (!strcasecmp(v, "yes") || !strcasecmp(v, "true") ||
@@ -587,6 +589,16 @@ static bool parse_bool(const char *v, bool *out) {
 
 static bool setting_set(App *a, int i, const char *v) {
     char *end;
+    // A url with the words' place marked in it. Refused without the mark: a
+    // template that cannot say where the query goes is a line that would send
+    // every search to the same page, and saying so is better than doing it.
+    if (SETTINGS[i].kind == S_TEXT) {
+        if (strncmp(v, "http://", 7) && strncmp(v, "https://", 8)) return false;
+        if (!strstr(v, "%s")) return false;
+        if (strlen(v) >= SETTING_TEXT_MAX) return false;
+        snprintf(text_at(a, SETTINGS[i].off), SETTING_TEXT_MAX, "%s", v);
+        return true;
+    }
     if (SETTINGS[i].kind == S_SCALE) {
         if (!strcasecmp(v, "auto")) { a->motion_auto = true; return true; }
         double d = strtod(v, &end);
@@ -644,6 +656,10 @@ static bool setting_set(App *a, int i, const char *v) {
 }
 
 static void setting_text(const App *a, int i, char *out, size_t cap) {
+    if (SETTINGS[i].kind == S_TEXT) {
+        snprintf(out, cap, "%s", text_at((App *)a, SETTINGS[i].off));
+        return;
+    }
     if (SETTINGS[i].kind == S_SCALE) {
         if (a->motion_auto) snprintf(out, cap, "auto");
         else                snprintf(out, cap, "%g", a->want_scale);
@@ -779,7 +795,7 @@ static void write_config(const char *path, const App *a) {
     FILE *f = fopen(path, "w");
     if (!f) return;
     for (int i = 0; i < NSETTINGS; i++) {
-        char val[32];
+        char val[SETTING_TEXT_MAX];
         setting_text(a, i, val, sizeof val);
         fprintf(f, "%-16s = %s\n", SETTINGS[i].name, val);
     }
@@ -864,6 +880,23 @@ static int read_config(const char *path, App *a, bool keys) {
         }
         // The last `=`, not the first: the key may be one, as alt+= is.
         char *eq = strrchr(line, '=');
+        // Unless what stands in front of the first one names a setting, in
+        // which case everything after it is the value and the `=` inside a url
+        // - `?q=%s` - belongs to the value rather than to this.
+        char *first = strchr(line, '=');
+        if (first && first != eq) {
+            char head[64];
+            size_t n = (size_t)(first - line);
+            if (n < sizeof head) {
+                memcpy(head, line, n);
+                head[n] = 0;
+                char *h = head;
+                while (isspace((unsigned char)*h)) h++;
+                trim(h);
+                for (int i = 0; i < NSETTINGS; i++)
+                    if (!strcasecmp(SETTINGS[i].name, h)) { eq = first; break; }
+            }
+        }
         if (!eq) {
             trim(line);
             if (line[0] && keys) {
@@ -894,6 +927,8 @@ static int read_config(const char *path, App *a, bool keys) {
                 else if (SETTINGS[s].kind == S_MS)    want = "number of milliseconds";
                 else if (SETTINGS[s].kind == S_SETTLE)
                     want = "number of milliseconds from 50 to 5000";
+                else if (SETTINGS[s].kind == S_TEXT)
+                    want = "url with %s in it";
                 fprintf(stderr, "web: %s:%d: `%s` is not a %s for %s\n", path,
                         lineno, name, want, spec);
                 bad++;

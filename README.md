@@ -79,7 +79,7 @@ from there inherits.
 
 | Key | Action |
 |---|---|
-| `^L` | address bar; a plain phrase becomes a search |
+| `^L` | address bar; a phrase opens the bookmark it names, or becomes a search |
 | `^O` / `^P` | back / forward |
 | `^R` | reload |
 | `^Y` | copy the page selection, or the address if nothing is selected |
@@ -276,6 +276,11 @@ folder, not only the bar, newest-added first.
 A bookmark made in a `--login` window while `web` is up can overwrite one made
 here in the same session. The next start reads what is on disk.
 
+A line typed in the address bar that is not itself an address — a phrase, or a
+word with no dot in it — opens the bookmark whose name or address holds every
+word of it, the same rule an argument on the command line follows. With no
+bookmark to match it, the line is the host or the search it was before.
+
 ## Config
 
 `~/.config/web/web.conf`, written with the defaults on first run:
@@ -300,6 +305,7 @@ here in the same session. The next start reads what is on disk.
 | `freeze` | `no` | yes/no | hold the page where a driver failed until `alt+enter` |
 | `grid` | `no` | yes/no | show the grid whenever there is more than one page |
 | `tmux-zoom` | `no` | yes/no | grow the window to fill the pane while tmux has it zoomed, and put its size back when the zoom ends |
+| `search` | `https://www.google.com/search?q=%s` | an http url with `%s` | where a phrase goes when no bookmark matches it |
 
 Booleans also take `true`, `on` and `1`. Each setting is the command line
 option of the same name, which wins for that run; `motion-scale` and
@@ -309,6 +315,14 @@ same file, one per site — see [Site rules](#site-rules).
 `motion-scale` and `still-delay` apply under `scale = auto` and nowhere else.
 Below about 100, a scroll can be called over between two of its own frames and
 go back to full size in the middle of itself.
+
+`search` takes the words in place of its `%s`, percent-encoded:
+
+```sh
+search = https://duckduckgo.com/?q=%s
+search = https://lite.duckduckgo.com/lite/?q=%s
+search = https://www.bing.com/search?q=%s
+```
 
 `zoom`, `rows` and `cols` are where a new window opens. `[` `]` `alt+0` and
 `shift`+arrows move a running window from there, and nothing is written back.
@@ -381,6 +395,8 @@ web [options] <url>...
             with several workers opens as one tile each
 --tmux-zoom grow the window to fill the pane while tmux has it zoomed,
             and put its size back when the zoom ends
+--search T  the search a phrase becomes, as a url with %s where the words
+            go (default google)
 --record F  write what is done to the page to F as a Playwright spec,
             until alt+r stops it
 --profile N run in a profile of its own: its own logins, history and
