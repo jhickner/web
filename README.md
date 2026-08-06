@@ -297,6 +297,7 @@ here in the same session. The next start reads what is on disk.
 | `slowmo` | `0` | 0–60000 | milliseconds between the actions of what `--exec` starts |
 | `freeze` | `no` | yes/no | hold the page where a driver failed until `alt+enter` |
 | `grid` | `no` | yes/no | show the grid whenever there is more than one page |
+| `tmux-zoom` | `no` | yes/no | grow the window to fill the pane while tmux has it zoomed, and put its size back when the zoom ends |
 
 Booleans also take `true`, `on` and `1`. Each setting is the command line
 option of the same name, which wins for that run. `hint-only` and `hint-skip`
@@ -371,6 +372,8 @@ web [options] <url>...
             down; alt+enter lets the run carry on
 --grid      show the grid whenever there is more than one page, so a run
             with several workers opens as one tile each
+--tmux-zoom grow the window to fill the pane while tmux has it zoomed,
+            and put its size back when the zoom ends
 --record F  write what is done to the page to F as a Playwright spec,
             until alt+r stops it
 --profile N run in a profile of its own: its own logins, history and

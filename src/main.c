@@ -3986,6 +3986,8 @@ static void usage(void) {
         "              and alt+enter lets the run carry on\n"
         "  --grid      show the grid whenever there is more than one page, so a\n"
         "              run with several workers opens as one tile each\n"
+        "  --tmux-zoom grow the window to fill the pane while tmux has it\n"
+        "              zoomed, and put its size back when the zoom ends\n"
         "  --record F  write what is done to the page to F as a playwright\n"
         "              spec, until alt+r stops it\n"
         "  --profile N run in a profile of its own - its own logins, history\n"
@@ -4375,6 +4377,8 @@ int main(int argc, char **argv) {
             a.freeze = true;
         } else if (!strcmp(argv[i], "--grid")) {
             a.grid_auto = true;
+        } else if (!strcmp(argv[i], "--tmux-zoom")) {
+            a.tmux_zoom = true;
         } else if (!strcmp(argv[i], "--record") && i + 1 < argc) {
             rec_path = argv[++i];
         } else if (!strcmp(argv[i], "--slowmo") && i + 1 < argc) {
@@ -4669,6 +4673,9 @@ int main(int argc, char **argv) {
             g_resized = 0;
             if (a.inline_mode) {
                 term_size(&a.term);
+                // Before the blanking below, which clears the rows the block
+                // owns as it stands: this only decides how many that will be.
+                tmux_zoom_track(&a);
                 // Blank the rows the block owns before it goes anywhere. The
                 // status line is ordinary text, so a block that lands on
                 // different rows - which is what relayout does when the pane no

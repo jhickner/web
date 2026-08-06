@@ -569,6 +569,10 @@ typedef struct {
 
     int     box_rows;          // inline: cell rows the window occupies, BOX_MIN_ROWS up
     int     box_cols;          // inline: cell columns, 0 = from the proportion
+    bool    tmux_zoom;         // fill the pane while tmux has it zoomed
+    bool    zoomed;            // whether the pane is zoomed right now
+    int     unzoom_rows;       // the window's size before it was, to come back to
+    int     unzoom_cols;
     int     want_cols;         // cols for that block, 0 = from the proportion
     int     want_width;        // width pinned by w/W, 0 = derived from the cells
     bool    scale_locked;      // the render scale was chosen by hand
