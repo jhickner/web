@@ -4023,9 +4023,25 @@ static void leave_browser(App *a) {
     // Whether this run asked for the browser to stay, or another window did:
     // one window's --keep keeps it for all of them, whichever quits last.
     bool kept = a->keep || chrome_is_kept(c);
-    int others = chrome_other_pages(c);
+
+    // Whether the browser is somebody else's as well as ours. A page in it that
+    // was not ours used to answer this, and mostly it did: another window's
+    // pages are pages we did not open. But a page outlives the window that
+    // opened it whenever that window is killed or crashes rather than quitting,
+    // and one page left behind that way says "shared" for as long as the
+    // browser runs - so the browser is never shut down again, by any window,
+    // and holds the profile and its memory for a page nobody can reach. The
+    // registry is the fact the count was standing in for, and it is a fact:
+    // running_windows drops the entry of a window that has gone.
+    //
+    // A live driver counts too. Its pages are its own, and pulling the browser
+    // out from under a run in progress is a worse end to it than the page it
+    // was driving going away.
+    pid_t others[PROC_MAX];
+    bool shared = running_windows(c->profile, others, PROC_MAX) > 0 ||
+                  driver_attached(a);
     if (kept) chrome_park(c);             // something for the next run to find
-    if (kept || others > 0) {
+    if (kept || shared) {
         chrome_close_target(c);
         if (c->ws.fd > 0) ws_close(&c->ws);
         return;
