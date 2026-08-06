@@ -274,6 +274,16 @@ void notify(App *a, const char *s) {
 // sees - the relayout it fires restarts the screencast, and the sharp frame
 // that comes back cancels the still below before its own delay is up.
 #define SETTLE_WAIT  300     // ms
+// The longest motion may outlive the input that started it. The frame clock
+// alone is allowed to hold motion open past the settle, because a trackpad
+// coasts after the fingers have left - but only this long. Frames still
+// arriving a second and a half after the last key or wheel are the page
+// painting on its own account: a spinner, a video, an advert in a corner. Those
+// never stop, so on that evidence alone the scroll is never over, the cap never
+// goes back up, and still_request() - which declines while the page is moving -
+// is never the one that puts a sharp picture back. A page with anything
+// animated on it would be held soft for as long as it was open.
+#define MOTION_HOLD  1.5     // seconds since the last key, wheel or drag
 // Long enough that a frame Chrome was going to send anyway arrives first and
 // cancels the ask, short enough that the picture is not left soft for a beat
 // somebody would notice. The backstop for when no frame comes at all, so it is
@@ -3464,7 +3474,15 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         // After the ack rather than before it: dropping the resolution restarts
         // the screencast, and the frame just drawn is still owed an answer on
         // the session it arrived on.
-        if (a->motion_auto && !a->in_motion && a->motion_run >= MOTION_RUN) {
+        // And only while the input that would explain it is recent. Every way
+        // of moving a page from here says so on the input itself, which is the
+        // path that matters; this is the backstop for motion those miss, and a
+        // backstop measuring nothing but how fast frames arrive cannot tell a
+        // scroll from a page that simply animates. Read on its own it calls
+        // every such page a permanent scroll, from the moment it loads and
+        // without anybody touching it.
+        if (a->motion_auto && !a->in_motion && a->motion_run >= MOTION_RUN &&
+            now_sec() - a->last_input < MOTION_HOLD) {
             a->in_motion = true;
             term_log("%.3f motion on", now_sec());
             relayout(a);
@@ -4816,6 +4834,9 @@ int main(int argc, char **argv) {
             double f = a.last_draw + a.settle_ms / 1000.0;
             double k = a.last_input + a.settle_ms / 1000.0;
             double left = (f > k ? f : k) - now_sec();
+            // Whichever bound comes first, since either one ends it.
+            double hold = a.last_input + MOTION_HOLD - now_sec();
+            if (hold < left) left = hold;
             int ms = left > 0 ? (int)(left * 1000.0) + 1 : 0;
             if (wait < 0 || ms < wait) wait = ms;
         }
@@ -4986,8 +5007,15 @@ int main(int argc, char **argv) {
         // Both halves, because either alone is wrong: the frames stop while a
         // trackpad is still coasting, and the input stops while Chrome is
         // dropping frames in the middle of a scroll.
-        if (a.in_motion && now_sec() - a.last_draw > a.settle_ms / 1000.0 &&
-            now_sec() - a.last_input > a.settle_ms / 1000.0) {
+        // Or the input has been quiet long enough that whatever is still
+        // painting is not the scroll any more. The frame half is what covers
+        // the coast, and a clock that only ever runs forwards on frames is one
+        // a page can hold open for good simply by animating - so it gets to
+        // hold motion open, and not to keep it.
+        double quiet = now_sec() - a.last_input;
+        if (a.in_motion &&
+            ((now_sec() - a.last_draw > a.settle_ms / 1000.0 &&
+              quiet > a.settle_ms / 1000.0) || quiet > MOTION_HOLD)) {
             a.in_motion = false;
             a.motion_run = 0;
             term_log("%.3f motion off", now_sec());
