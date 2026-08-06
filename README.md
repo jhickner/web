@@ -103,7 +103,7 @@ other window alone. `--exec` puts the profile in the environment as
 | `alt+d` | bookmark this page, or take the bookmark off it |
 | `alt+space` | play or pause the page's video, whatever has focus |
 | `alt+b` | find a bookmark — see [Finding a page](#finding-a-page) |
-| `?` | key list over the page; any key dismisses it |
+| `?` | key list over the page, a page at a time; any other key dismisses it |
 | mouse | click, drag to select, wheel to scroll, hover to lift what a pointer lifts |
 | `opt`+click | open the link under the pointer in a tab behind this one (middle-click too) |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
@@ -126,7 +126,7 @@ While reading. Letters this table does not name are typed into the page;
 | `P` | picking: click the page for a CSS selector, into the console |
 | `i` | hand the keyboard to the page |
 | `:` | open the console |
-| `?` | key list; `↓` / `↑` to scroll it |
+| `?` | key list; `←` / `→` or `space` to turn its pages, dots below say which |
 | `esc` | take the keyboard back |
 
 ## Vim keys

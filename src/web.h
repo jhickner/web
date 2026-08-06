@@ -708,7 +708,7 @@ typedef struct {
     // The key list, `?`. It is drawn into the cells the picture occupies, so
     // there is no row of its own to account for anywhere.
     bool     help_open;
-    int      help_scroll;         // lines past the top, when it does not all fit
+    int      help_page;           // the page of the list on show, from zero
     unsigned help_grid;           // the grid count it was last drawn over
     Buf      help_buf, help_last;
 
