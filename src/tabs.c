@@ -287,6 +287,19 @@ bool tab_adopt(App *a, const char *target, const char *url) {
     return true;
 }
 
+bool tab_take(App *a, const char *target, const char *url, const char *title) {
+    if (!target || !*target || a->ntabs >= TAB_MAX) return false;
+    if (tab_index_of(a, target) >= 0) return false;
+    Tab *t = &a->tabs[a->ntabs];
+    memset(t, 0, sizeof *t);
+    snprintf(t->target, sizeof t->target, "%s", target);
+    snprintf(t->url, sizeof t->url, "%s", url && *url ? url : "about:blank");
+    if (title && *title) snprintf(t->title, sizeof t->title, "%s", title);
+    t->ours = true;
+    a->ntabs++;
+    return true;
+}
+
 // One of those pages has gone. The tab in front is not this one's business:
 // its socket closing is what says it went, and tab_lost answers that.
 bool tab_forget(App *a, const char *target) {

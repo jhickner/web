@@ -230,7 +230,7 @@ typedef enum {
     ACT_FIND, ACT_FIND_NEXT, ACT_FIND_PREV,
     ACT_HINT, ACT_HINT_TAB, ACT_HINT_COPY, ACT_HINT_ALL,
     ACT_INSERT, ACT_INSERT_OFF, ACT_FOCUS_INPUT, ACT_PICK,
-    ACT_TAB_NEW, ACT_TAB_CLOSE, ACT_TAB_NEXT, ACT_TAB_PREV,
+    ACT_TAB_NEW, ACT_TAB_CLOSE, ACT_TAB_NEXT, ACT_TAB_PREV, ACT_MERGE,
     ACT_SEARCH_TABS, ACT_SEARCH_HISTORY, ACT_SEARCH_BOOKMARKS, ACT_BOOKMARK,
     ACT_TAB_1, ACT_TAB_2, ACT_TAB_3, ACT_TAB_4, ACT_TAB_5,
     ACT_TAB_6, ACT_TAB_7, ACT_TAB_8, ACT_TAB_9,
@@ -668,6 +668,18 @@ typedef struct {
     int     grid_attach_req[GRID_MAX];  // the session each tile is waiting for
     Popup   popups[POPUP_MAX];    // pages ours opened, waiting for an address
     int     npopups;
+    // Windows folded into this one, and this one folded into another. A window
+    // is on one side or the other of it, never both: the tabs move in a
+    // direction, and a collector that also gave its own away would lose them.
+    double  merge_until;          // collecting replies until here, 0 when not
+    int     merge_want;           // windows still owing one
+    int     merge_got;            // tabs taken so far
+    int     merge_lost;           // and ones the bar had no room for
+    bool    giving_tabs;          // ours are offered to another window
+    bool    gave_tabs;            // and taken, so they are its to close, not ours
+    double  giving_until;         // give the offer up here if nobody has taken it
+    char    giving_path[820];     // the offer, removed when it is taken
+
     bool    tabs_open;            // whether the bar has a row right now
     int     tabs_row;             // 1-based row it is drawn on
     Buf     tabs_buf, tabs_last;
@@ -891,6 +903,11 @@ void tab_close(App *a);
 bool tab_adopt(App *a, const char *target, const char *url);
 int  tab_index_of(const App *a, const char *target);   // -1 when it is not one
 bool tab_forget(App *a, const char *target);
+
+// A page handed over by another window that is about to go. Unlike an adopted
+// one it becomes ours: the window that opened it is leaving, so this is the
+// only one left to close it. The window does not move onto it.
+bool tab_take(App *a, const char *target, const char *url, const char *title);
 
 void tab_go(App *a, int idx);          // 0-based
 void tab_step(App *a, int delta);      // wraps

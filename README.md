@@ -91,6 +91,7 @@ window started from there inherits.
 | `^Q` | quit |
 | `^T` / `^W` | new tab / close tab (the last one closes the window) |
 | `^N` / `^B` | next tab / previous tab (`shift+alt+→` / `shift+alt+←` too) |
+| `alt+m` | every other window's tabs into this one; those windows close |
 | `alt+1`…`alt+9` | go to that tab |
 | `alt+0` | reset zoom, pinned width, and window proportion |
 | `alt+f` | fit-to-width on/off |

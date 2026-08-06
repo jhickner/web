@@ -96,6 +96,7 @@ static const struct { const char *name; Act act; const char *section; } ACTS[] =
     {"tab-close",      ACT_TAB_CLOSE, NULL},
     {"tab-next",       ACT_TAB_NEXT, NULL},
     {"tab-prev",       ACT_TAB_PREV, NULL},
+    {"merge",          ACT_MERGE, NULL},
     {"tab-1",          ACT_TAB_1, NULL},
     {"tab-2",          ACT_TAB_2, NULL},
     {"tab-3",          ACT_TAB_3, NULL},
@@ -415,6 +416,7 @@ static const KeyDef DEFAULTS[] = {
     {MOD_ALT, 'r', ACT_RECORD},
     {MOD_ALT, 'd', ACT_BOOKMARK},
     {MOD_ALT, 'b', ACT_SEARCH_BOOKMARKS},
+    {MOD_ALT, 'm', ACT_MERGE},
 
     {MOD_ALT | MOD_SHIFT, KEY_RIGHT, ACT_TAB_NEXT},
     {MOD_ALT | MOD_SHIFT, KEY_LEFT, ACT_TAB_PREV},

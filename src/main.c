@@ -615,10 +615,11 @@ void session_write(App *a) {
     // "handoff" says this window listens for a url handed to it. Nothing but
     // its presence matters: a window from a version that predates the signal
     // would be killed by it, and the file it left behind is the only place a
-    // sender can find that out before sending.
+    // sender can find that out before sending. "merge" is the same promise
+    // about a request for this window's tabs.
     fprintf(f, "{\"pid\":%d,\"port\":%d,\"cdp\":\"http://127.0.0.1:%d\","
                "\"target\":\"%s\",\"url\":\"%s\",\"title\":\"%s\","
-               "\"handoff\":true,\"drive\":\"%s\",\"freeze\":\"%s\","
+               "\"handoff\":true,\"merge\":true,\"drive\":\"%s\",\"freeze\":\"%s\","
                "\"pages\":\"%s\"}\n",
             (int)getpid(), a->chrome.port, a->chrome.port,
             a->chrome.target, url, title, drive_esc, freeze_esc, pages_esc);
@@ -822,12 +823,15 @@ static int hand_url(const char *url) {
     return 0;
 }
 
+static void merge_forget(const char *profile, pid_t pid);
+
 static void session_forget(App *a) {
     if (!a->chrome.profile[0]) return;
     char path[700];
     session_file(a, path, sizeof path);
     unlink(path);
     handoff_take(a->chrome.profile, getpid(), NULL);
+    merge_forget(a->chrome.profile, getpid());
 }
 
 // Every window running now, one JSON object to a line. Nothing else tidies the
@@ -1088,6 +1092,252 @@ static int kill_everything(void) {
                         "to end; kill %d if it is yours\n",
                 (int)stray[i], (int)stray[i]);
     return 0;
+}
+
+// ------------------------------------------------------------------- merge
+
+// Every window's tabs folded into one of them. Nothing moves between browsers:
+// the profile has one, a tab is a page of it, and which window draws which page
+// is only a list each window keeps. What moves is who owns the page - the
+// windows asked give theirs up and go, and the one that asked is left holding
+// all of them.
+//
+// Two files, the way a handed url works and for the same reason: the signal is
+// only the nudge to look, and the request is the file. The reply is the tab
+// list, and the collector removing it is what tells the window that wrote it
+// that its pages are in somebody's bar - a window whose offer is never taken
+// keeps its tabs and carries on drawing them.
+static void merge_dir(const char *profile, char *out, size_t cap) {
+    snprintf(out, cap, "%s/merge", profile);
+}
+
+// How long each side waits. The window handing over waits the longer of the
+// two, so a collector that has already given up cannot leave an offer standing
+// that is about to be taken - which would be one page in two windows' lists,
+// and both of them closing it on the way out.
+#define MERGE_WAIT 5.0
+#define GIVE_WAIT  8.0
+
+// Whether a window would understand being asked. One from a version that
+// predates this treats the signal as a handed url, finds nothing addressed to
+// it and carries on, so asking costs a file nobody reads - but there is no
+// point waiting on an answer it is never going to give.
+static bool window_merges(const char *profile, pid_t pid) {
+    char path[800];
+    snprintf(path, sizeof path, "%s/sessions/%d.json", profile, (int)pid);
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    char line[4096];
+    bool ok = fgets(line, sizeof line, f) && json_has(line, "merge");
+    fclose(f);
+    return ok;
+}
+
+// Every file this window is one end of, taken away. Both names carry the two
+// pids, the window it is for first and the window that wrote it second, so a
+// pid at either end is this window's business - a request it was sent, a
+// request it sent, or an offer it wrote. Left behind, any of them would be read
+// by whatever process next wears the pid.
+static void merge_forget(const char *profile, pid_t pid) {
+    char dir[600];
+    merge_dir(profile, dir, sizeof dir);
+    DIR *d = opendir(dir);
+    if (!d) return;
+    char first[32], last[32];
+    size_t flen = (size_t)snprintf(first, sizeof first, "%d-", (int)pid);
+    size_t llen = (size_t)snprintf(last, sizeof last, "-%d", (int)pid);
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        size_t n = strlen(e->d_name);
+        bool mine = strncmp(e->d_name, first, flen) == 0 ||
+                    (n > llen && !strcmp(e->d_name + n - llen, last));
+        if (!mine) continue;
+        char path[800];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        unlink(path);
+    }
+    closedir(d);
+}
+
+// A line of the tab list. The title is whatever the page called itself, so a
+// control byte in it - a newline above all - would be a second line here and a
+// tab that is not a tab.
+static void oneline(char *dst, size_t cap, const char *src) {
+    size_t o = 0;
+    for (; src[o] && o + 1 < cap; o++)
+        dst[o] = (unsigned char)src[o] < 0x20 ? ' ' : src[o];
+    dst[o] = 0;
+}
+
+// Ask every other window on this profile for its tabs.
+static void merge_ask(App *a) {
+    // The tabs go one way. A window that has already offered its own is not
+    // somewhere to be collecting anybody else's.
+    if (a->giving_tabs) { notify(a, "these tabs are already going elsewhere"); return; }
+
+    pid_t windows[PROC_MAX];
+    int n = running_windows(a->chrome.profile, windows, PROC_MAX);
+    char dir[600];
+    merge_dir(a->chrome.profile, dir, sizeof dir);
+    mkdirs(dir);
+    int asked = 0;
+    for (int i = 0; i < n; i++) {
+        if (!window_merges(a->chrome.profile, windows[i])) continue;
+        char path[820], tmp[840];
+        snprintf(path, sizeof path, "%s/%d-%d", dir, (int)windows[i], (int)getpid());
+        snprintf(tmp, sizeof tmp, "%s.tmp", path);
+        FILE *f = fopen(tmp, "w");
+        if (!f) continue;
+        fprintf(f, "%d\n", (int)getpid());
+        fclose(f);
+        if (rename(tmp, path) != 0) { unlink(tmp); continue; }
+        if (kill(windows[i], SIGUSR1) != 0) { unlink(path); continue; }
+        asked++;
+    }
+    if (!asked) { notify(a, "no other window to take tabs from"); return; }
+    a->merge_until = now_sec() + MERGE_WAIT;
+    a->merge_want = asked;
+    a->merge_got = 0;
+    notify(a, asked == 1 ? "asking the other window for its tabs"
+                         : "asking the other windows for their tabs");
+}
+
+// A request for this window's pages. The offer is written and the window goes
+// on drawing until it is taken: ending here instead would be a window closing
+// on the strength of a file nobody may ever read.
+static void merge_give(App *a) {
+    char dir[600];
+    merge_dir(a->chrome.profile, dir, sizeof dir);
+    DIR *d = opendir(dir);
+    if (!d) return;
+    char prefix[32];
+    int plen = snprintf(prefix, sizeof prefix, "%d-", (int)getpid());
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, prefix, (size_t)plen) != 0) continue;
+        if (strstr(e->d_name, ".tmp")) continue;
+        char path[800];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        FILE *f = fopen(path, "r");
+        unlink(path);
+        if (!f) continue;
+        char line[32];
+        int to = fgets(line, sizeof line, f) ? atoi(line) : 0;
+        fclose(f);
+        // Refused rather than queued, and the request gone with the refusal:
+        // the tabs go one way, and a window on both ends of that - already
+        // giving its own away, or collecting somebody else's - would lose them.
+        if (to <= 0 || a->giving_tabs || a->merge_until > 0) continue;
+
+        char rpath[820], rtmp[840];
+        snprintf(rpath, sizeof rpath, "%s/reply-%d-%d", dir, to, (int)getpid());
+        snprintf(rtmp, sizeof rtmp, "%s.tmp", rpath);
+        FILE *r = fopen(rtmp, "w");
+        if (!r) continue;
+        int listed = 0;
+        for (int i = 0; i < a->ntabs; i++) {
+            // Only pages this window opened. One a driver claimed is the
+            // driver's to close and the driver is attached to this window, not
+            // to the one the tabs are moving to.
+            if (!a->tabs[i].ours) continue;
+            // The tab in front is asked of the window rather than of the list,
+            // for the reason tab_label gives: the list only learns where a tab
+            // is when the window looks away from it.
+            char url[1100], title[300];
+            oneline(url, sizeof url, i == a->tab ? a->url : a->tabs[i].url);
+            oneline(title, sizeof title, i == a->tab ? a->title : a->tabs[i].title);
+            fprintf(r, "%s\t%s\t%s\n", a->tabs[i].target, url, title);
+            listed++;
+        }
+        fclose(r);
+        if (!listed || rename(rtmp, rpath) != 0) { unlink(rtmp); continue; }
+        a->giving_tabs = true;
+        a->giving_until = now_sec() + GIVE_WAIT;
+        snprintf(a->giving_path, sizeof a->giving_path, "%s", rpath);
+        notify(a, "handing these tabs over");
+        break;                       // a window has only one set to give
+    }
+    closedir(d);
+}
+
+// The offer standing, checked for having been taken. Its removal is the whole
+// of the answer: the pages are in another window's bar, and this one has
+// nothing of its own left to draw.
+static void give_tick(App *a) {
+    if (!a->giving_tabs) return;
+    if (access(a->giving_path, F_OK) != 0) {
+        a->giving_tabs = false;
+        a->gave_tabs = true;
+        g_quit = 1;
+        return;
+    }
+    if (now_sec() < a->giving_until) return;
+    unlink(a->giving_path);
+    a->giving_tabs = false;
+    a->giving_path[0] = 0;
+    notify(a, "nobody took the tabs");
+}
+
+// The replies, made into tabs. Read rather than waited on, the way a claim is:
+// a reply is a file appearing, and the window is not told about files.
+static void merge_collect(App *a) {
+    if (a->merge_until <= 0) return;
+    static double next;
+    double t = now_sec();
+    if (t >= next) {
+        next = t + 0.1;
+        char dir[600], prefix[40];
+        merge_dir(a->chrome.profile, dir, sizeof dir);
+        int plen = snprintf(prefix, sizeof prefix, "reply-%d-", (int)getpid());
+        DIR *d = opendir(dir);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL) {
+                if (strncmp(e->d_name, prefix, (size_t)plen) != 0) continue;
+                if (strstr(e->d_name, ".tmp")) continue;
+                char path[800];
+                snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+                FILE *f = fopen(path, "r");
+                if (!f) continue;
+                char line[1500];
+                while (fgets(line, sizeof line, f)) {
+                    line[strcspn(line, "\r\n")] = 0;
+                    char *url = strchr(line, '\t');
+                    if (!url) continue;
+                    *url++ = 0;
+                    char *title = strchr(url, '\t');
+                    if (title) *title++ = 0;
+                    if (tab_take(a, line, url, title)) a->merge_got++;
+                    // The bar is full and the window that had this page is on
+                    // its way out. Left open it would be a page in nobody's
+                    // list, which is gone with the memory still spent.
+                    else if (tab_index_of(a, line) < 0) {
+                        chrome_close_id(&a->chrome, line);
+                        a->merge_lost++;
+                    }
+                }
+                fclose(f);
+                // Last, so that until the pages are in this bar the window that
+                // offered them still has them: the file going is its cue to go.
+                unlink(path);
+                if (a->merge_want > 0) a->merge_want--;
+            }
+            closedir(d);
+        }
+    }
+    if (a->merge_want > 0 && t < a->merge_until) return;
+
+    char m[80];
+    int got = a->merge_got, lost = a->merge_lost;
+    a->merge_until = 0;
+    a->merge_want = 0;
+    a->merge_got = 0;
+    a->merge_lost = 0;
+    if (!got && !lost) snprintf(m, sizeof m, "no window had a tab to give");
+    else if (!lost)    snprintf(m, sizeof m, "%d tab%s taken", got, got == 1 ? "" : "s");
+    else snprintf(m, sizeof m, "%d tab%s taken, %d over the limit and closed",
+                  got, got == 1 ? "" : "s", lost);
+    notify(a, m);
 }
 
 // -------------------------------------------------------------------- exec
@@ -2744,6 +2994,7 @@ static bool do_action(App *a, Event *ev, Act act) {
         return true;
     }
     case ACT_RESUME: exec_resume(a); return true;
+    case ACT_MERGE:  merge_ask(a);   return true;
     case ACT_RECORD: record_toggle(a); return true;
     case ACT_GRID:
         // Closed by hand is closed for good: a window that opened it again a
@@ -3750,6 +4001,14 @@ static void leave_browser(App *a) {
     // its terminal back and the window actually going.
     if (c->ws.fd > 0 && !c->ws.closed) cdp_call(c, "Page.stopScreencast", "");
 
+    // A window leaving because another one took its tabs. The pages are that
+    // window's now and are named in its bar, so none of the closing below is
+    // this window's to do any more: it is only letting go of the socket.
+    if (a->gave_tabs) {
+        if (c->ws.fd > 0) ws_close(&c->ws);
+        return;
+    }
+
     // Every tab this window opened, whoever the browser belongs to. They exist
     // because we asked for them, so they go when we do - and closed here rather
     // than below, so the count of what is left is a count of somebody else's.
@@ -4280,6 +4539,7 @@ int main(int argc, char **argv) {
         if (g_handed) {
             g_handed = 0;
             handoff_take(a.chrome.profile, getpid(), &a);
+            merge_give(&a);
         }
         if (g_resized) {
             g_resized = 0;
@@ -4391,6 +4651,11 @@ int main(int argc, char **argv) {
             int ms = left > 0 ? (int)(left * 1000.0) + 1 : 0;
             if (wait < 0 || ms < wait) wait = ms;
         }
+        // Tabs asked of the other windows, or offered to one: the answer either
+        // way is a file appearing or going, and no event says so. Only while
+        // one of the two is outstanding, which is a few seconds at most.
+        if ((a.merge_until > 0 || a.giving_tabs) && (wait < 0 || wait > 100))
+            wait = 100;
         // A driver stopping to wait is a file appearing, which nothing wakes
         // the loop for. Only while one is running, and only until it says it
         // has stopped: a frozen window has nothing left to look for.
@@ -4457,6 +4722,10 @@ int main(int argc, char **argv) {
         check_driven(&a);
         // Pages a driver has opened for its workers, and ones it has closed.
         claims_scan(&a);
+        // Tabs another window has offered this one, and this one's own once
+        // somebody has taken them.
+        merge_collect(&a);
+        give_tick(&a);
         // Asked for with --grid: a run that fans out into several pages is one
         // to watch all of at once, and it is not worth a keypress at the moment
         // the second worker starts.
@@ -4638,6 +4907,11 @@ int main(int argc, char **argv) {
         kitty_free(&a.kitty);
         term_restore(&a.term, a.clear_exit);
     }
+    // An offer still standing when the window is quitting for its own reasons.
+    // Asked before session_forget clears the file away, because the file gone
+    // is the only thing that says the pages are somebody else's now - after it
+    // has been removed there is no telling the two apart.
+    give_tick(&a);
     session_forget(&a);
     // The child is driving the page we are about to take away, so it goes
     // first; anything it still had to say goes to a terminal being handed back.

@@ -67,6 +67,7 @@ static const Bind BINDS[] = {
     {.act = ACT_SEARCH_BOOKMARKS,                .what = "find a bookmark"},
     {.act = ACT_TAB_NEW,  .act2 = ACT_TAB_CLOSE, .what = "new / close"},
     {.act = ACT_TAB_NEXT, .act2 = ACT_TAB_PREV,  .what = "next / previous"},
+    {.act = ACT_MERGE,                           .what = "every other window's tabs, into this one"},
     {.act = ACT_TAB_1, .act2 = ACT_TAB_9,        .what = "that tab, and the ones between"},
     {0},
     {.what = "the window"},
