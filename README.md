@@ -339,6 +339,10 @@ search = https://lite.duckduckgo.com/lite/?q=%s
 search = https://www.bing.com/search?q=%s
 ```
 
+`~/.config/web/start.html` is written beside it on the same run, and that run
+opens on it — in a tab behind the page when the command line named an address.
+It is never written over, so it can be edited or emptied.
+
 `zoom`, `rows` and `cols` are where a new window opens. `[` `]` `alt+0` and
 `shift`+arrows move a running window from there, and nothing is written back.
 `rows` and `cols` do nothing under `full = yes`; a `cols` wider than the

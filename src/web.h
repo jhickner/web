@@ -574,6 +574,7 @@ typedef struct {
     bool    hover;             // pass moves with no button down to the page
     bool    hovering;          // the page believes the pointer is over it
     bool    click_newtab;      // and it was the one that opens a link in a tab
+    bool    show_start;        // this run wrote the start page, so it opens on it
     bool    vim;               // the vim layer, under the keys web.conf names
     int     vim_shadowed;      // and how many of it that file took back
     int     pend_mods;         // the first key of a pair, still waiting for its
@@ -741,6 +742,9 @@ typedef struct {
 // made no sense, each already reported on stderr.
 int  config_load(App *a);
 void config_dir(char *out, size_t cap);
+
+// The start page beside the config, and whether there is one there to open.
+bool start_page_path(char *out, size_t cap);
 
 // The selector a `hint-only` or `hint-skip` line in the file gave this page's
 // host, or NULL where the file said nothing about it. `skip` picks which of the

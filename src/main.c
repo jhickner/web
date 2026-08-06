@@ -4641,8 +4641,21 @@ int main(int argc, char **argv) {
         script_load(&a, "-");
     }
 
+    // The start page, on the run that wrote it beside the config. Where the
+    // window goes when nothing else was asked for; a tab behind the page when
+    // something was, since an address on the command line is the whole reason
+    // that run exists. Not for a run with a job to do - a shot or a script is
+    // aimed at one page, and a tab it never looks at is a load paid for twice.
+    char welcome[1200] = "";
+    if (a.show_start && !a.shot_path && !eval_js && isatty(STDIN_FILENO)) {
+        char page[600];
+        if (start_page_path(page, sizeof page))
+            start_url(page, welcome, sizeof welcome);
+    }
+
     char first[1200];
     start_url(start, first, sizeof first);
+    if (welcome[0] && !nurls) snprintf(first, sizeof first, "%s", welcome);
     snprintf(a.url, sizeof a.url, "%s", first);
 
     term_log("%.3f start", now_sec());
@@ -4828,6 +4841,11 @@ int main(int argc, char **argv) {
             start_url(urls[i], u, sizeof u);
             if (!tab_open_url(&a, u)) break;
         }
+        tab_go(&a, 0);
+    }
+    // Last of the tabs, and the window stays on the address that was asked for.
+    if (welcome[0] && nurls && !a.shot_path && !a.script.drain_exit) {
+        tab_open_url(&a, welcome);
         tab_go(&a, 0);
     }
     // Timed from here rather than from the top of main: what the picture is

@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>web</title>
+<style>
+:root{
+  color-scheme: dark;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --bg:#0d1017; --panel:#141a26; --line:#232b3b; --line2:#2e3849;
+  --fg:#ccd4e3; --dim:#7b8599; --dimmer:#5c6577;
+  --key:#f0c07c; --acc:#7fd6a2; --link:#82b6f2;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{font-size:15px}
+body{
+  background:var(--bg); color:var(--fg);
+  font-family:var(--sans); font-size:1rem; line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+  padding:0 18px 44px;
+}
+.wrap{max-width:620px;margin:0 auto}
+
+/* scroll position, always visible — the scroll keys have something to move */
+#bar{position:fixed;top:0;left:0;height:2px;width:0;background:var(--acc);z-index:9}
+
+/* ── type ───────────────────────────────────────────── */
+/* Without this the mono face ligates "--" into an em dash and every flag on
+   the page reads as a single-dash one. */
+code,kbd,pre,.mono{font-family:var(--mono);font-variant-ligatures:none}
+kbd{
+  font-size:.8em; color:var(--key); background:#1a2130;
+  border:1px solid var(--line2); border-bottom-color:#151b28;
+  border-radius:4px; padding:1px 5px; white-space:nowrap;
+}
+code{color:var(--acc);font-size:.88em}
+a{color:var(--link);text-decoration:none;border-bottom:1px solid #2f4864}
+p{margin:.6em 0}
+.dim{color:var(--dim)}
+.small{font-size:.86rem;line-height:1.5}
+
+/* ── masthead ───────────────────────────────────────── */
+header{padding:18px 0 4px}
+h1{
+  font-family:var(--mono); font-size:2.6rem; font-weight:700;
+  letter-spacing:-.03em; line-height:1; color:#eef2f8;
+}
+h1::before{content:"";display:inline-block;width:.42em;height:.9em;
+  background:var(--acc);margin-right:.22em;vertical-align:-.06em}
+.tag{font-family:var(--mono);color:var(--acc);font-size:.95rem;margin-top:.5em}
+.lede{color:var(--dim);margin-top:.7em;font-size:.94rem}
+
+/* ── section headings ───────────────────────────────── */
+h2{
+  display:flex; align-items:center; gap:10px;
+  font-family:var(--mono); font-size:.76rem; font-weight:600;
+  letter-spacing:.16em; text-transform:uppercase; color:var(--dimmer);
+  margin:30px 0 12px;
+}
+h2::after{content:"";flex:1;height:1px;background:var(--line)}
+
+/* ── normal / vim selector ──────────────────────────── */
+.seg{order:1;display:inline-flex;border:1px solid var(--line2);border-radius:5px;overflow:hidden}
+.seg button{
+  font-family:var(--mono); font-size:.72rem; font-weight:600;
+  letter-spacing:.1em; text-transform:uppercase;
+  color:var(--dim); background:transparent; border:0;
+  padding:2px 9px; cursor:pointer;
+}
+.seg button.on{background:var(--acc);color:#0d1017}
+#qs .kv{display:none}
+#qs.vim .kv{display:inline}
+#qs.vim .kn{display:none}
+
+/* ── panels ─────────────────────────────────────────── */
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 15px}
+pre.flow{
+  font-size:.8rem; line-height:1.5; color:var(--dim);
+  overflow-x:auto; padding:2px 0;
+}
+pre.flow b{color:var(--fg);font-weight:400}
+
+/* ── the quick start ────────────────────────────────── */
+ol.try{list-style:none}
+ol.try li{display:flex;gap:11px;padding:9px 0;border-top:1px solid var(--line)}
+ol.try li:first-child{border-top:0}
+ol.try .k{flex:0 0 60px;text-align:right;padding-top:1px}
+ol.try .t{flex:1;font-size:.92rem}
+ol.try .t b{color:#e6ecf6;font-weight:600}
+
+/* ── feature list ───────────────────────────────────── */
+dl.more{display:grid;grid-template-columns:1fr;gap:0}
+dl.more dt{font-family:var(--mono);font-size:.85rem;color:var(--key);
+  padding-top:11px;border-top:1px solid var(--line)}
+dl.more dt:first-of-type{border-top:0;padding-top:0}
+dl.more dd{font-size:.88rem;color:var(--dim);padding-bottom:11px}
+dl.more dd code{color:var(--acc)}
+
+/* ── other apps ─────────────────────────────────────── */
+.apps{display:grid;grid-template-columns:1fr;gap:10px}
+.apps a{display:block;background:var(--panel);border:1px solid var(--line);
+  border-radius:8px;padding:11px 13px;color:inherit}
+.apps .n{font-family:var(--mono);font-size:.85rem;color:var(--key)}
+.apps .d{font-size:.85rem;color:var(--dim);margin-top:3px;line-height:1.45}
+
+pre.conf{font-size:.83rem;line-height:1.7;color:var(--fg);overflow-x:auto}
+pre.conf .c{color:var(--dimmer)}
+pre.conf .v{color:var(--acc)}
+
+footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);
+  font-family:var(--mono);font-size:.82rem;color:var(--dimmer);
+  display:flex;flex-wrap:wrap;gap:6px 18px}
+footer a{color:var(--dim);border-bottom-color:#2a3444}
+
+/* Wider than a default window: the feature list goes to two columns, so
+   [ ] and w W visibly change the layout, not just the size. */
+@media (min-width:600px){
+  html{font-size:15.5px}
+  dl.more{grid-template-columns:auto 1fr;gap:0 20px}
+  dl.more dt{padding:11px 0 11px;border-top:1px solid var(--line)}
+  dl.more dd{padding:11px 0;border-top:1px solid var(--line)}
+  dl.more dt:first-of-type,dl.more dd:first-of-type{border-top:0}
+  .apps{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+<div id="bar"></div>
+<div class="wrap">
+
+<header>
+  <h1>web</h1>
+  <div class="tag">Headless Chrome, visible in your terminal.</div>
+  <p class="lede">Chrome draws this page, the frame arrives as a PNG, and your
+  terminal paints it with kitty graphics — and keys and clicks go back the
+  other way.</p>
+</header>
+
+<pre class="flow mono">
+<b>chrome</b> ─► png ─► kitty ─► <b>terminal</b>
+   ▲                             │
+   └───── keys, mouse ───────────┘
+</pre>
+
+<h2>Quick start<span class="seg" role="group" aria-label="key layer"><button
+  id="m-n" class="on" aria-pressed="true">normal</button><button
+  id="m-v" aria-pressed="false">vim</button></span></h2>
+<div id="qs">
+<ol class="try">
+  <li><span class="k mono"><kbd>?</kbd></span>
+      <span class="t"><b>Help menu.</b> Every key, drawn over the page. Any key
+      puts it away.</span></li>
+  <li><span class="k mono"><kbd>f</kbd></span>
+      <span class="t"><b>Labelled links, for keyboard-only navigation.</b> Type
+      a label to follow it — try it on
+      <a href="https://github.com/jhickner/web">the repo</a>. <kbd>F</kbd> opens
+      one in a new tab, <kbd>esc</kbd> puts the labels away.</span></li>
+  <li><span class="k mono"><kbd>[</kbd> <kbd>]</kbd></span>
+      <span class="t"><b>Resize the browser window within your terminal.</b>
+      It grows and shrinks from both edges.</span></li>
+  <li><span class="k mono"><kbd>w</kbd> <kbd>W</kbd></span>
+      <span class="t"><b>Change the reported browser size — the zoom level.</b>
+      The page is told it has a different width and reflows to it.
+      <kbd>alt+0</kbd> puts both back.</span></li>
+  <li><span class="k mono"><span class="kn"><kbd>^L</kbd></span><span
+      class="kv"><kbd>o</kbd></span></span>
+      <span class="t"><b>The location bar.</b> A phrase with no dot in it opens
+      the bookmark it names, or becomes a search.<span class="kv"> <kbd>O</kbd>
+      opens a blank one in a new tab.</span></span></li>
+  <li><span class="k mono"><span class="kn"><kbd>^X</kbd> <kbd>:</kbd></span><span
+      class="kv"><kbd>^X</kbd></span></span>
+      <span class="t"><b>The JavaScript console.</b> It runs in the page — try
+      <code>document.title</code>.<span class="kv"> The vi layer takes
+      <kbd>:</kbd> for the location bar, so the console is <kbd>^X</kbd>
+      alone.</span></span></li>
+</ol>
+<p class="small dim" style="margin-top:11px">
+  <span class="kn">These are the default keys. <code>vim = yes</code> in
+  <code>web.conf</code> turns on the vi layer: <kbd>j</kbd> <kbd>k</kbd> move,
+  <kbd>gg</kbd> <kbd>G</kbd> top and bottom, <kbd>/</kbd> then <kbd>n</kbd>
+  finds, <kbd>H</kbd> <kbd>L</kbd> go back and forward.</span>
+  <span class="kv">The vi layer, <code>vim = yes</code> in <code>web.conf</code>.
+  <kbd>j</kbd> <kbd>k</kbd> <kbd>d</kbd> <kbd>u</kbd> move, <kbd>gg</kbd>
+  <kbd>G</kbd> top and bottom, <kbd>/</kbd> then <kbd>n</kbd> finds,
+  <kbd>H</kbd> <kbd>L</kbd> go back and forward, <kbd>ZZ</kbd> quits. It sits
+  under <code>web.conf</code>, so any key the file names keeps what the file
+  gave it.</span></p>
+</div>
+
+<h2>A note on optimization</h2>
+<p class="small dim">The picture downscales while moving or scrolling, then
+resolves when stopped. You can disable this by pressing <kbd>s</kbd> or by
+setting <code>motion-scale = 1</code> in <code>web.conf</code>.</p>
+
+<h2>More than reading</h2>
+<dl class="more">
+  <dt>logins</dt>
+  <dd><code>web --login</code> opens a normal Chrome window on this profile.
+      Sign in to whatever you need there, and every window keeps the
+      session.</dd>
+
+  <dt>tabs</dt>
+  <dd><kbd>^T</kbd> <kbd>^W</kbd> open and close, <kbd>^N</kbd> <kbd>^B</kbd>
+      move between them, <kbd>alt+g</kbd> draws every one at once in a grid.</dd>
+
+  <dt>finding</dt>
+  <dd><kbd>alt+b</kbd> the bookmarks, <kbd>alt+d</kbd> to add this page. Type
+      words in any order; each one narrows the list.</dd>
+
+  <dt>scripting</dt>
+  <dd>Piped JavaScript runs a line at a time, the page still on screen:
+      <code>echo 'document.title' | web example.com</code></dd>
+
+  <dt>driving</dt>
+  <dd><code>web --mcp</code> gives an agent this window — your logins, your
+      tabs — and you watch it work. <code>web --exec 'npx playwright test'</code>
+      runs a suite in it.</dd>
+
+  <dt>recording</dt>
+  <dd><kbd>alt+r</kbd> writes what you do to the page out as a Playwright spec,
+      rewritten after every step.</dd>
+
+  <dt>screenshots</dt>
+  <dd><code>web --screenshot shot.png example.com</code>, and <code>-</code>
+      for stdout.</dd>
+</dl>
+
+<h2>Customization</h2>
+<div class="panel">
+<pre class="conf mono"><span class="c">~/.config/web/web.conf</span>
+
+vim       = <span class="v">yes</span>   <span class="c"># the whole vi layer</span>
+zoom      = <span class="v">1.5</span>
+cols      = <span class="v">100</span>
+search    = <span class="v">https://duckduckgo.com/?q=%s</span>
+f5        = <span class="v">reload</span></pre>
+</div>
+<p class="small dim" style="margin-top:10px">Written with the defaults on first
+run. Every setting is also a command-line option, and any key can be rebound to
+any action by name.</p>
+
+<h2>Other graphical terminal apps</h2>
+<div class="apps">
+  <a href="https://github.com/jhickner/rom"><div class="n">jhickner/rom</div>
+    <div class="d">Play ROMs directly in your terminal.</div></a>
+  <a href="https://github.com/jhickner/vid"><div class="n">jhickner/vid</div>
+    <div class="d">Play video — kitty graphics, audio sync, subtitles.</div></a>
+  <a href="https://github.com/jhickner/pix"><div class="n">jhickner/pix</div>
+    <div class="d">Image browser: thumbnail grid, preview, full size.</div></a>
+  <a href="https://github.com/jhickner/piano"><div class="n">jhickner/piano</div>
+    <div class="d">Play a piano in your terminal. The newest of them.</div></a>
+</div>
+<p class="small dim" style="margin-top:10px">Press <kbd>f</kbd> and type a label
+to follow any of them.</p>
+
+<footer>
+  <span><kbd>?</kbd> help</span>
+  <span><kbd>^G</kbd> toggle status bar</span>
+  <span><kbd>^Q</kbd> quit</span>
+  <span><a href="https://github.com/jhickner/web">github.com/jhickner/web</a></span>
+</footer>
+
+</div>
+<script>
+// No transitions or animation anywhere on this page: a still page is sent at
+// full size, a moving one is scaled down while it moves.
+function scrolled() {
+  var max = document.documentElement.scrollHeight - innerHeight
+  document.getElementById('bar').style.width =
+    (max > 0 ? Math.round(scrollY / max * 100) : 100) + '%'
+}
+addEventListener('scroll', scrolled, { passive: true })
+addEventListener('resize', scrolled)
+scrolled()
+
+var qs = document.getElementById('qs')
+var mn = document.getElementById('m-n'), mv = document.getElementById('m-v')
+
+function layer(vim) {
+  qs.classList.toggle('vim', vim)
+  mn.classList.toggle('on', !vim); mv.classList.toggle('on', vim)
+  mn.setAttribute('aria-pressed', !vim); mv.setAttribute('aria-pressed', vim)
+  try { localStorage.setItem('web.layer', vim ? 'vim' : 'normal') } catch (e) {}
+  scrolled()
+}
+
+mn.addEventListener('click', function () { layer(false) })
+mv.addEventListener('click', function () { layer(true) })
+try { if (localStorage.getItem('web.layer') === 'vim') layer(true) } catch (e) {}
+</script>
+</body>
+</html>

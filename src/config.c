@@ -6,6 +6,7 @@
 #include <strings.h>
 #include <unistd.h>
 #include "web.h"
+#include "start_html.h"
 
 // ~/.config/web/web.conf: the settings, and what every key does. The defaults
 // are compiled in and the file is read over the top of them, so a line the
@@ -1072,6 +1073,31 @@ static void load_vim(void) {
     }
 }
 
+// The page a first run opens on, put beside the config so it can be read
+// without a network and edited or emptied like the rest of what is there. Never
+// written over: the copy in the binary is only ever a starting point, and a
+// file somebody has changed is theirs. True when this run is the one that put
+// it there, which is the run that opens on it.
+static bool write_start(const char *dir) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/start.html", dir);
+    if (access(path, F_OK) == 0) return false;
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fwrite(START_HTML, 1, sizeof START_HTML, f) == sizeof START_HTML;
+    fclose(f);
+    if (!ok) unlink(path);      // half a page is worse than none
+    return ok;
+}
+
+// Where that page is, for the run that is about to open on it.
+bool start_page_path(char *out, size_t cap) {
+    char dir[512];
+    config_dir(dir, sizeof dir);
+    snprintf(out, cap, "%s/start.html", dir);
+    return access(out, R_OK) == 0;
+}
+
 int config_load(App *a) {
     g_nbinds = 0;
     g_nvim = 0;
@@ -1086,8 +1112,10 @@ int config_load(App *a) {
     if (access(path, F_OK) != 0) {
         mkdirs(dir);
         write_config(path, a);
+        a->show_start = write_start(dir);
         return 0;               // just written, so it says what is already loaded
     }
+    a->show_start = write_start(dir);
     // Settings first, because one of them decides what the keys are laid on
     // top of; then the layer; then the file's own keys, which win, since a key
     // named in a file is a key someone meant.
