@@ -2612,6 +2612,22 @@ static void find_next(App *a, bool backwards) {
     "function ed(e){if(!e)return false;var t=e.tagName;" \
     "return e.isContentEditable||t==='INPUT'||t==='TEXTAREA'||t==='SELECT';}"
 
+// The other kind of element the keyboard belongs to. A player clicked into
+// reads the arrows as its transport - seek along the track, volume across it -
+// and a window that turned them into a scroll first would leave a video with
+// no way to be wound back.
+//
+// The element in focus and no ancestor of it: a page holding a video holds it
+// somewhere under the body, so a walk upwards would answer yes with focus
+// nowhere near the player and take the arrows away from the whole document.
+// A player shell is what focus actually lands on when the video is clicked -
+// the div the site made focusable, with the media somewhere inside it - so
+// looking one level out from the media covers both that and a bare <video>.
+#define PLAYER_FN \
+    "function pl(e){if(!e||e===document.body)return false;" \
+    "var t=e.tagName;if(t==='VIDEO'||t==='AUDIO')return true;" \
+    "return !!(e.querySelector&&e.querySelector('video,audio'));}"
+
 // The page tells us when focus lands on something typable, so j and k scroll
 // when you are reading and type themselves when you are filling in a form.
 // The listeners go on once per document, whatever else happens: switching tabs
@@ -2626,7 +2642,9 @@ static void find_next(App *a, bool backwards) {
 static const char FOCUS_WATCHER[] =
     "(function(){"
     EDITABLE_FN
-    "function rep(){try{__webmode(ed(document.activeElement)?'1':'0');}catch(e){}}"
+    PLAYER_FN
+    "function rep(){try{var e=document.activeElement;"
+    "__webmode(ed(e)?'1':pl(e)?'2':'0');}catch(e){}}"
     "if(!window.__webwatch){window.__webwatch=1;"
     "document.addEventListener('focusin',rep,true);"
     "document.addEventListener('focusout',function(){setTimeout(rep,0);},true);}"
@@ -2679,8 +2697,8 @@ static const char WEB_HELPERS[] =
 // and cannot wait for one. Asked of the page's own world, where it leaves
 // nothing behind: it defines no globals and the answer comes back by value.
 static const char FOCUS_READ[] =
-    "(function(){" EDITABLE_FN
-    "return ed(document.activeElement)?'1':'0';})()";
+    "(function(){" EDITABLE_FN PLAYER_FN
+    "var e=document.activeElement;return ed(e)?'1':pl(e)?'2':'0';})()";
 
 // A key the page does not claim is handed back to the browser process, and on
 // macOS that means the menu bar: the keystroke is routed through
@@ -2706,13 +2724,22 @@ static const char FOCUS_READ[] =
 //
 // A text field is left alone - the editor claims those keys itself, and
 // cancelling them would stop the caret moving.
+//
+// So is a focused player, for a reason the paragraph above turns out to be
+// wrong about in one case: a handler that runs is not the same as a handler
+// that acts. YouTube reads defaultPrevented and does nothing when it is
+// already set, so claiming the key first is claiming it from the player - the
+// arrows arrive and the video does not move. Left unclaimed the player cancels
+// them itself, which is the same protection from the menu bar by a different
+// hand, and the seek happens.
 static const char KEY_CLAIMER[] =
     "(function(){if(window.__webkeys)return;window.__webkeys=1;"
+    EDITABLE_FN PLAYER_FN
     "var K={ArrowLeft:1,ArrowRight:1,ArrowUp:1,ArrowDown:1};"
     "window.addEventListener('keydown',function(e){"
     "if(!K[e.key])return;"
-    "var t=document.activeElement,n=t&&t.tagName;"
-    "if(t&&(t.isContentEditable||n==='INPUT'||n==='TEXTAREA'||n==='SELECT'))return;"
+    "var t=document.activeElement;"
+    "if(ed(t)||pl(t))return;"
     "e.preventDefault();},true);})()";
 
 // The shortest selector that finds the element again: its id where it has one,
@@ -3024,10 +3051,13 @@ static bool do_action(App *a, Event *ev, Act act) {
     // On a clicked-into PDF the arrows are handed over rather than turned into
     // a scroll, because where they go is the viewer's business: in the document
     // they move the view, and with the thumbnail rail focused they change the
-    // page. Neither is something to imitate from here.
+    // page. Neither is something to imitate from here. A focused player is the
+    // same case: up and down are its volume, and scrolling the page under it
+    // would be an answer to a key nobody pressed for that.
     case ACT_LINE_DOWN:
     case ACT_LINE_UP:
-        if (a->pdf && a->pdf_clicked && special_key(a, ev->key, ev->mods)) return true;
+        if (((a->pdf && a->pdf_clicked) || a->player) &&
+            special_key(a, ev->key, ev->mods)) return true;
         scroll_by(a, act == ACT_LINE_DOWN ? 40 : -40);
         return true;
     case ACT_SCROLL_DOWN:  scroll_by(a, 60);  return true;
@@ -3498,6 +3528,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         a->expect_frame = now_sec() + 2.0;
         a->kitty.grid_dirty = true;
         a->pdf = a->pdf_clicked = false;   // until the new document says so
+        a->player = false;                 // and its focus is nowhere yet
         size_t n;
         // The frame object leads with its own id, and this is the one message
         // that says which frame is the page rather than something inside it.
@@ -3582,6 +3613,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         size_t n;
         const char *p = json_str(msg, "payload", &n);
         a->insert = (p && n && p[0] == '1');
+        a->player = (p && n && p[0] == '2');
         return;
     }
 
@@ -3695,6 +3727,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         size_t n;
         const char *v = json_eval_str(msg, &n);
         a->insert = v && n && v[0] == '1';
+        a->player = v && n && v[0] == '2';
         return;
     }
 

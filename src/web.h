@@ -562,6 +562,7 @@ typedef struct {
     bool    claim_keys;
 
     bool    insert;            // a text field has focus: keys belong to the page
+    bool    player;            // a media player has focus: the arrows are its own
     bool    mouse_down;        // a button went down on the page and is still held
     bool    click_newtab;      // and it was the one that opens a link in a tab
     bool    vim;               // the vim layer, under the keys web.conf names
