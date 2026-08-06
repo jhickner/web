@@ -2821,8 +2821,18 @@ static bool being_driven(App *a) {
     return was;
 }
 
+#define PAUSE_WAIT 2.0
+
+static bool picture_up(App *a) {
+    if (!a->grid_on) return kitty_tile_live(&a->kitty, 0);
+    for (int i = 1; i <= GRID_MAX; i++)
+        if (kitty_tile_live(&a->kitty, i)) return true;
+    return false;
+}
+
 static void resume_drawing(App *a) {
     a->paused = false;
+    a->pause_wait = 0;
     // The page may not have changed while it was away, and an unchanged frame
     // is hash-skipped - which would leave the block empty until something on
     // the page moved. Ask for it as though it were new.
@@ -2898,10 +2908,24 @@ static void check_driven(App *a) {
         if (a->paused) resume_drawing(a);
         return;
     }
-    bool driven = being_driven(a);
-    if (driven && a->paused)        resume_drawing(a);
-    else if (!driven && !a->paused && g_handoff_owed <= now_sec())
-        pause_drawing(a);
+    if (being_driven(a)) {
+        if (a->paused) resume_drawing(a);
+        return;
+    }
+    if (g_handoff_owed > now_sec()) return;
+    if (picture_up(a)) {
+        a->pause_wait = 0;
+    } else if (a->pause_wait >= 0) {
+        double now = now_sec();
+        if (a->pause_wait == 0) {
+            if (a->paused) resume_drawing(a);
+            a->pause_wait = now + PAUSE_WAIT;
+            return;
+        }
+        if (now < a->pause_wait) return;
+        a->pause_wait = -1;
+    }
+    if (!a->paused) pause_drawing(a);
 }
 
 // The point in the page a cell is: the terminal only says which cell the

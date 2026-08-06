@@ -558,6 +558,7 @@ typedef struct {
     bool    pause_on_blur;     // stop drawing while the terminal is not focused
     bool    no_pause_arg;      // --no-pause was given, so no site rule turns it on
     bool    paused;            // and whether that has happened
+    double  pause_wait;        // 0 none, >0 the deadline, -1 waited and gave up
     bool    blurred;           // what the terminal last said, which is not the
                                // same: a window being driven draws through it
 
