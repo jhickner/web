@@ -437,7 +437,6 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     argv[a++] = "--no-first-run";
     argv[a++] = "--no-default-browser-check";
     argv[a++] = "--disable-background-networking";
-    argv[a++] = "--disable-component-update";
     argv[a++] = "--disable-sync";
     if (mute) argv[a++] = "--mute-audio";
     argv[a++] = "--noerrdialogs";
