@@ -1939,6 +1939,12 @@ bool special_key(App *a, int key, int mods) {
     }
     note_input(a, moves);
     switch (key) {
+    // Sent as a key rather than as the character it also is: the character
+    // alone is a keypress with no keydown in front of it, and every site that
+    // does anything with the space bar - a player above all - is listening for
+    // the keydown. Typing one into a field still works, since a keydown
+    // carrying text puts the character in as well.
+    case ' ':           send_key(a, 32, " ", "Space", " ", mods); return true;
     case KEY_ENTER:     send_key(a, 13, "Enter", "Enter", "\\r", mods); return true;
     case KEY_TAB:       send_key(a, 9, "Tab", "Tab", NULL, mods); return true;
     case KEY_BACKSPACE: send_key(a, 8, "Backspace", "Backspace", NULL, mods); return true;
@@ -2631,6 +2637,26 @@ static void find_next(App *a, bool backwards) {
     "var t=e.tagName;if(t==='VIDEO'||t==='AUDIO')return true;" \
     "return !!(e.querySelector&&e.querySelector('video,audio'));}"
 
+// The key that works without pointing at anything first. Which video it means
+// is the question the page cannot be asked: the one already playing where
+// there is one, since that is the one being listened to, and the largest of
+// them otherwise - an advert in a corner is a video element too, and a page
+// that opens with one has two players before it has any.
+//
+// Told to the element rather than to the site's own button, because there is
+// no button a page is obliged to have. What a site draws around it follows
+// either way: the play and pause events are the same events its own controls
+// raise, and its bar redraws itself on them.
+static const char PLAY_PAUSE_JS[] =
+    "(function(){var l=[].slice.call(document.querySelectorAll('video,audio'));"
+    "l=l.filter(function(e){return e.readyState||e.currentSrc||e.src});"
+    "if(!l.length)return '';"
+    "var v=l.filter(function(e){return !e.paused})[0];"
+    "if(!v)v=l.sort(function(a,b){return b.offsetWidth*b.offsetHeight-"
+    "a.offsetWidth*a.offsetHeight})[0];"
+    "if(v.paused)v.play();else v.pause();"
+    "return v.paused?'paused':'playing';})()";
+
 // The page tells us when focus lands on something typable, so j and k scroll
 // when you are reading and type themselves when you are filling in a form.
 // The listeners go on once per document, whatever else happens: switching tabs
@@ -3136,8 +3162,17 @@ static bool do_action(App *a, Event *ev, Act act) {
     case ACT_SCROLL_LEFT:  scroll_side(a, -a->css_w / 4); return true;
     case ACT_HALF_DOWN:    scroll_by(a, a->css_h / 2);  return true;
     case ACT_HALF_UP:      scroll_by(a, -(a->css_h / 2)); return true;
-    case ACT_PAGE_DOWN:    scroll_by(a, (int)(a->css_h * 0.9));  return true;
-    case ACT_PAGE_UP:      scroll_by(a, -(int)(a->css_h * 0.9)); return true;
+    // The space bar is a screen down here and the play key everywhere else,
+    // and a focused player is what tells the two apart - the same rule the
+    // arrows follow above. Tested on the key rather than the action, so
+    // `pgdn` still turns a page of a document with a video on it.
+    case ACT_PAGE_DOWN:
+    case ACT_PAGE_UP:
+        if (a->player && ev->key == ' ' &&
+            special_key(a, ev->key, ev->mods)) return true;
+        scroll_by(a, act == ACT_PAGE_DOWN ? (int)(a->css_h * 0.9)
+                                          : -(int)(a->css_h * 0.9));
+        return true;
     // Twice, the way vi asks for it: `gg` is a pair in the key table, so the
     // first `g` is the keyboard waiting rather than anything happening here.
     case ACT_TOP:
@@ -3209,6 +3244,17 @@ static bool do_action(App *a, Event *ev, Act act) {
     case ACT_RESUME: exec_resume(a); return true;
     case ACT_MERGE:  merge_ask(a);   return true;
     case ACT_RECORD: record_toggle(a); return true;
+    case ACT_PLAY_PAUSE: {
+        // As a gesture, or a page that has not been touched yet refuses to
+        // start playing: autoplay is what the browser thinks it is being asked
+        // for, and a key nobody can see pressed is not a reason to allow it.
+        char esc[1200];
+        json_escape(esc, sizeof esc, PLAY_PAUSE_JS);
+        app_req_note(a, app_cdp(a, "Runtime.evaluate",
+            "\"expression\":\"%s\",\"returnByValue\":true,\"userGesture\":true",
+            esc), RQ_PLAY);
+        return true;
+    }
     case ACT_GRID:
         // Closed by hand is closed for good: a window that opened it again a
         // moment later would be a window that could not be closed.
@@ -3827,6 +3873,15 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
             clipboard_put(a->url);          // nothing selected: take the address
             notify(a, "copied url");
         }
+        return;
+    }
+
+    case RQ_PLAY: {
+        size_t n;
+        const char *v = json_eval_str(msg, &n);
+        if (!v || !n)                              notify(a, "nothing to play here");
+        else if (n == 6 && !memcmp(v, "paused", 6)) notify(a, "paused");
+        else                                        notify(a, "playing");
         return;
     }
 

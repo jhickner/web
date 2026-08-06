@@ -75,6 +75,7 @@ static const struct { const char *name; Act act; const char *section; } ACTS[] =
     {"resume",         ACT_RESUME, NULL},
     {"grid",           ACT_GRID, NULL},
     {"record",         ACT_RECORD, NULL},
+    {"play-pause",     ACT_PLAY_PAUSE, NULL},
     {"external",       ACT_EXTERNAL, NULL},
     {"find",           ACT_FIND, NULL},
     {"find-next",      ACT_FIND_NEXT, NULL},
@@ -415,6 +416,10 @@ static const KeyDef DEFAULTS[] = {
     {MOD_ALT, 'd', ACT_BOOKMARK},
     {MOD_ALT, 'b', ACT_SEARCH_BOOKMARKS},
     {MOD_ALT, 'm', ACT_MERGE},
+    // The space bar is the page's own key on a site with a player, and this is
+    // the same key for a page that never gets it: nothing has to be focused
+    // first, and it works from inside the console and a text field alike.
+    {MOD_ALT, ' ', ACT_PLAY_PAUSE},
 
     {MOD_ALT | MOD_SHIFT, KEY_RIGHT, ACT_TAB_NEXT},
     {MOD_ALT | MOD_SHIFT, KEY_LEFT, ACT_TAB_PREV},

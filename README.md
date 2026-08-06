@@ -101,6 +101,7 @@ other window alone. `--exec` puts the profile in the environment as
 | `alt+g` | every tab at once, in a grid — see [The grid](#the-grid) |
 | `alt+r` | start or stop writing what you do as a spec — see [Recording](#recording) |
 | `alt+d` | bookmark this page, or take the bookmark off it |
+| `alt+space` | play or pause the page's video, whatever has focus |
 | `alt+b` | find a bookmark — see [Finding a page](#finding-a-page) |
 | `?` | key list over the page; any key dismisses it |
 | mouse | click, drag to select, wheel to scroll, hover to lift what a pointer lifts |
@@ -113,9 +114,9 @@ While reading. Letters this table does not name are typed into the page;
 
 | Key | Action |
 |---|---|
-| `↓` / `↑` | down / up a line |
+| `↓` / `↑` | down / up a line, or to a focused player |
 | `←` / `→` | passed to the page |
-| `pgdn` / `pgup` | a screen (`space` too) |
+| `pgdn` / `pgup` | a screen (`space` too, and `space` goes to a focused player) |
 | `backspace` / `shift+backspace` | back / forward |
 | `[` / `]` | zoom out / in; inline, scales the window from both edges |
 | `shift`+`↑↓←→` | drag one window edge (`U`/`D`/`L`/`R` too) |
