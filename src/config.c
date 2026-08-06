@@ -558,6 +558,8 @@ static const struct {
 } SETTINGS[] = {
     {"vim",           S_BOOL,     offsetof(App, vim)},
     {"pause-on-blur", S_BOOL,     offsetof(App, pause_on_blur)},
+    {"hide-on-blur",  S_BOOL,     offsetof(App, hide_on_blur)},
+    {"media-pause-on-blur", S_BOOL, offsetof(App, media_pause_on_blur)},
     {"hover",         S_BOOL,     offsetof(App, hover)},
     {"status-line",   S_BOOL_NOT, offsetof(App, hide_status)},
     {"clear-on-exit", S_BOOL,     offsetof(App, clear_exit)},
@@ -777,11 +779,11 @@ static bool host_match(const char *host, const char *pat) {
 }
 
 // The same shape one line further on: a setting with a host in front of its
-// `=` is that setting for that host alone. Only pause-on-blur so far, which is
-// the one whose right answer changes site by site - a page that is only worth
-// drawing while it is looked at, against a video that is worth drawing whether
-// or not the terminal has the focus.
-typedef struct { char host[96]; bool pause; } PauseRule;
+// `=` is that setting for that host alone. pause-on-blur and
+// media-pause-on-blur, which are the ones whose right answer changes site by
+// site - a page that is only worth drawing while it is looked at, against a
+// video that is worth drawing whether or not the terminal has the focus.
+typedef struct { char host[96]; bool on; bool media; } PauseRule;
 #define PAUSE_MAX 32
 
 static PauseRule g_pause[PAUSE_MAX];
@@ -790,41 +792,50 @@ static int       g_npause;
 // The `host = yes/no` half of the line. A value that is not a boolean is
 // refused rather than read as `no`: a misspelling that quietly turns the
 // pausing off is a window that stops drawing for a reason nothing explains.
-static bool pause_add(const char *s) {
+static bool pause_add(const char *s, bool media) {
     const char *eq = strchr(s, '=');
     if (!eq || g_npause >= PAUSE_MAX) return false;
-    PauseRule r = {{0}, false};
+    PauseRule r = {{0}, false, media};
     char val[16];
     if (!copy_field(r.host, sizeof r.host, s, eq)) return false;
     if (!copy_field(val, sizeof val, eq + 1, eq + 1 + strlen(eq + 1))) return false;
-    if (!parse_bool(val, &r.pause)) return false;
+    if (!parse_bool(val, &r.on)) return false;
     for (char *p = r.host; *p; p++) *p = (char)tolower((unsigned char)*p);
     g_pause[g_npause++] = r;
     return true;
 }
 
-// What follows `pause-on-blur` when a host follows it. NULL when the next
-// thing is the `=`, which is the file-wide setting and belongs to the reader
-// below rather than here.
-static const char *pause_keyword(const char *s) {
+// What follows either keyword when a host follows it, and which of the two it
+// was. NULL when the next thing is the `=`, which is the file-wide setting and
+// belongs to the reader below rather than here.
+static const char *pause_keyword(const char *s, bool *media) {
     while (isspace((unsigned char)*s)) s++;
-    if (strncasecmp(s, "pause-on-blur", 13)) return NULL;
-    s += 13;
+    size_t n;
+    if (!strncasecmp(s, "media-pause-on-blur", 19))  { *media = true;  n = 19; }
+    else if (!strncasecmp(s, "pause-on-blur", 13))   { *media = false; n = 13; }
+    else return NULL;
+    s += n;
     if (!isspace((unsigned char)*s)) return NULL;
     while (isspace((unsigned char)*s)) s++;
     return *s == '=' ? NULL : s;
 }
 
-bool pause_rule(const char *url, bool *out) {
+static bool blur_rule(const char *url, bool media, bool *out) {
     if (!url || !*url || !g_npause) return false;
     char host[256];
     url_host(url, host, sizeof host);
     if (!host[0]) return false;
-    // The first that matches, the way the hint rules are read.
+    // The first of its own kind that matches, the way the hint rules are read.
     for (int i = 0; i < g_npause; i++)
-        if (host_match(host, g_pause[i].host)) { *out = g_pause[i].pause; return true; }
+        if (g_pause[i].media == media && host_match(host, g_pause[i].host)) {
+            *out = g_pause[i].on;
+            return true;
+        }
     return false;
 }
+
+bool pause_rule(const char *url, bool *out)  { return blur_rule(url, false, out); }
+bool media_rule(const char *url, bool *out)  { return blur_rule(url, true,  out); }
 
 const char *hint_selector(const char *url, bool skip) {
     if (!url || !*url || !g_nhints) return NULL;
@@ -852,7 +863,7 @@ static void write_config(const char *path, const App *a) {
     for (int i = 0; i < NSETTINGS; i++) {
         char val[SETTING_TEXT_MAX];
         setting_text(a, i, val, sizeof val);
-        fprintf(f, "%-16s = %s\n", SETTINGS[i].name, val);
+        fprintf(f, "%-19s = %s\n", SETTINGS[i].name, val);
     }
     fputs("\n# Which elements the link labels land on, for one site.\n"
           "#hint-only news.ycombinator.com = .titleline > a\n"
@@ -936,10 +947,11 @@ static int read_config(const char *path, App *a, bool keys) {
         // A host in front of the `=` makes the line that setting for that host,
         // and the reading below - which knows only settings and keys - would
         // find neither in it.
-        const char *per = pause_keyword(line);
+        bool per_media = false;
+        const char *per = pause_keyword(line, &per_media);
         if (per) {
             if (!keys) {
-                if (!pause_add(per)) {
+                if (!pause_add(per, per_media)) {
                     fprintf(stderr, "web: %s:%d: `%s` is not a host and a yes or no\n",
                             path, lineno, per);
                     bad++;

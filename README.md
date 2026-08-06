@@ -200,19 +200,31 @@ covers `news.ycombinator.com`; the first rule of each kind that matches wins.
 `hint-all` labels everything whatever the rules say — `gf` under the vim keys,
 bindable anywhere else.
 
-`pause-on-blur` takes a host in front of its `=` and applies to that host
-alone:
+`pause-on-blur` and `media-pause-on-blur` each take a host in front of the `=`
+and apply to that host alone:
 
 ```
-pause-on-blur youtube.com = no
-pause-on-blur twitch.tv   = no
+pause-on-blur       youtube.com = no
+media-pause-on-blur youtube.com = yes
+media-pause-on-blur twitch.tv   = no
 ```
 
-A host named here wins over the file-wide `pause-on-blur`; written without one,
-the line is the file-wide setting. Values are the booleans every other setting
-takes, and a line whose value is neither is reported and dropped. The host
-matches the way the hint rules' does, and the first rule that matches wins.
-`--no-pause` turns the pausing off for the run whatever any of them say.
+A host named here wins over the file-wide setting of the same name; written
+without one, the line is the file-wide setting. Values are the booleans every
+other setting takes, and a line whose value is neither is reported and dropped.
+The host matches the way the hint rules' does, and the first rule of each kind
+that matches wins.
+
+A host set to `no` for `pause-on-blur` keeps `hide-on-blur` off it as well, and
+stops `media-pause-on-blur` for it too — a page still being drawn from another
+pane is one still being watched. A `media-pause-on-blur` line for that host
+says otherwise and wins, as the second line above does.
+
+`media-pause-on-blur no` for a host is also what keeps it playing from a tab
+that is not the one in front.
+
+`--no-pause` turns all three off for the run whatever any of them say;
+`--no-media-pause` turns off the playing alone.
 
 ## The grid
 
@@ -289,6 +301,8 @@ bookmark to match it, the line is the host or the search it was before.
 |---|---|---|---|
 | `vim` | `no` | yes/no | the vim key layer, under whatever keys this file names |
 | `pause-on-blur` | `yes` | yes/no | stop drawing while the terminal is not focused. A window being driven by `--exec` or a script draws either way |
+| `hide-on-blur` | `no` | yes/no | take the window off the screen while the terminal is not focused, instead of leaving the last frame up. Pauses as well, whatever `pause-on-blur` says |
+| `media-pause-on-blur` | `yes` | yes/no | pause whatever is playing in a page while the terminal is not focused, and while its tab is not the one in front; start it again on the way back. Only what it stopped itself starts again |
 | `hover` | `yes` | yes/no | tell the page where the pointer is with no button down, so menus, tooltips and video controls come up under it |
 | `status-line` | `yes` | yes/no | show the status line under the page |
 | `clear-on-exit` | `yes` | yes/no | erase the window on exit instead of leaving it |
@@ -311,8 +325,8 @@ bookmark to match it, the line is the host or the search it was before.
 Booleans also take `true`, `on` and `1`. Each setting is the command line
 option of the same name, which wins for that run; `motion-scale` and
 `still-delay` are this file only. `hint-only`, `hint-skip` and a `pause-on-blur`
-with a host in front of its `=` go in the same file, one per site — see
-[Site rules](#site-rules).
+or `media-pause-on-blur` with a host in front of its `=` go in the same file,
+one per site — see [Site rules](#site-rules).
 
 `motion-scale` and `still-delay` apply under `scale = auto` and nowhere else. A
 `still-delay` below about 100 ends a scroll in the middle of itself.
@@ -409,6 +423,10 @@ web [options] <url>...
             driver instead of its pid. Anything but a number
 --port N    fix Chrome's devtools port instead of letting it pick one
 --no-pause  keep drawing while the terminal is not focused
+--hide-on-blur   take the window off the screen while the terminal is
+            not focused, instead of leaving the last frame up
+--no-media-pause let a video or a track in the page go on playing while
+            the terminal is not focused
 --no-hover  do not tell the page where the pointer is unless a button is
             down
 --raw-keys  let a key the page did not want reach the window system

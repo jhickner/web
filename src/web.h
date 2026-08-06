@@ -353,7 +353,7 @@ typedef struct {
 enum {
     RQ_NONE, RQ_TITLE, RQ_URL, RQ_COPY, RQ_FIT, RQ_SCRIPT,
     RQ_SELECTOR, RQ_RECORD, RQ_PDF, RQ_SHOT_READY, RQ_SHOT, RQ_FRAME,
-    RQ_MODE, RQ_HISTORY, RQ_STILL, RQ_LINK, RQ_PLAY
+    RQ_MODE, RQ_HISTORY, RQ_STILL, RQ_LINK, RQ_PLAY, RQ_HELD
 };
 
 // The isolated world everything we inject for our own use lives in. It shares
@@ -556,8 +556,13 @@ typedef struct {
     bool    status_open;       // whether it is on screen right now
 
     bool    pause_on_blur;     // stop drawing while the terminal is not focused
+    bool    hide_on_blur;      // and take the window off the screen with it
+    bool    media_pause_on_blur;  // and stop whatever is playing in the page
+    bool    media_held;        // something was stopped that way, and owes a play
     bool    no_pause_arg;      // --no-pause was given, so no site rule turns it on
+    bool    no_media_arg;      // --no-media-pause, the same for the playing
     bool    paused;            // and whether that has happened
+    bool    hidden;            // and whether the screen was cleared with it
     double  pause_wait;        // 0 none, >0 the deadline, -1 waited and gave up
     bool    blurred;           // what the terminal last said, which is not the
                                // same: a window being driven draws through it
@@ -756,6 +761,13 @@ const char *hint_selector(const char *url, bool skip);
 // The pause-on-blur rule this page's host is named by, if any. False when no
 // line names it, leaving the file-wide setting to say.
 bool pause_rule(const char *url, bool *out);
+
+// The media-pause-on-blur rule for this page's host, read the same way.
+bool media_rule(const char *url, bool *out);
+
+// A tab going out of the front, and one arriving there.
+void media_tab_leave(App *a);
+void media_tab_enter(App *a);
 
 // Note an outstanding call so its reply can be recognised, and claim the reply.
 void app_req_note(App *a, int id, int kind);

@@ -601,6 +601,7 @@ static void claims_dir(App *a, char *out, size_t cap) {
 
 static void freeze_base(App *a, char *out, size_t cap);
 static bool being_driven(App *a);
+static void show_window(App *a);
 
 void session_write(App *a) {
     if (!a->chrome.profile[0] || a->chrome.port <= 0 || !a->chrome.target[0])
@@ -730,6 +731,7 @@ static void handoff_arrived(App *a) {
     g_handoff_owed = now_sec() + HANDOFF_DRAW_WAIT;
     raise_pane();
     a->paused = false;
+    show_window(a);
     a->last_hash = 0;                 // an unchanged frame is still a new page
     a->kitty.grid_dirty = true;
     a->expect_frame = now_sec() + 2.0;
@@ -1890,6 +1892,7 @@ static void draw_status(App *a) {
 // the address bar is open, and whatever draws after it moves the cursor again.
 static void draw_panes(App *a) {
     if (!a->has_tty) return;
+    if (a->hidden) return;
     status_sync(a);
     tabs_paint(a);
     grid_paint(a);
@@ -2659,6 +2662,20 @@ static const char PLAY_PAUSE_JS[] =
     "if(v.paused)v.play();else v.pause();"
     "return v.paused?'paused':'playing';})()";
 
+// Pause everything playing, marking each one it stopped as `__webheld`.
+static const char MEDIA_HOLD_JS[] =
+    "(function(){var n=0;[].forEach.call(document.querySelectorAll('video,audio'),"
+    "function(e){try{if(!e.paused&&!e.ended){e.pause();e.__webheld=1;n++}}catch(x){}});"
+    "return n?'held':'';})()";
+
+// Play the marked ones and unmark them, dropping the promise play() answers
+// with so a refusal is not an unhandled rejection in the page.
+static const char MEDIA_RESUME_JS[] =
+    "(function(){var n=0;[].forEach.call(document.querySelectorAll('video,audio'),"
+    "function(e){try{if(!e.__webheld)return;e.__webheld=0;if(!e.paused)return;"
+    "var p=e.play();if(p&&p.catch)p.catch(function(){});n++}catch(x){}});"
+    "return n?'played':'';})()";
+
 // The page tells us when focus lands on something typable, so j and k scroll
 // when you are reading and type themselves when you are filling in a form.
 // The listeners go on once per document, whatever else happens: switching tabs
@@ -2830,9 +2847,35 @@ static bool picture_up(App *a) {
     return false;
 }
 
+static void hide_window(App *a) {
+    if (!a->hide_on_blur || a->hidden || !a->has_tty) return;
+    a->hidden = true;
+    for (int i = GRID_MAX; i >= 0; i--) {
+        if (!kitty_tile_live(&a->kitty, i)) continue;
+        kitty_use(&a->kitty, i);
+        kitty_clear(&a->kitty);
+    }
+    kitty_use(&a->kitty, 0);
+    if (a->inline_mode) term_clear_inline(&a->term);
+    else                writeall(a->term.fd, "\x1b[2J", 4);
+    writeall(a->term.fd, "\x1b[?25l", 6);        // cursor off
+}
+
+static void show_window(App *a) {
+    if (!a->hidden) return;
+    a->hidden = false;
+    a->kitty.grid_dirty = true;
+    a->status_last.len = 0;
+    a->tabs_last.len = 0;
+    a->console_last.len = 0;
+    a->help_last.len = 0;
+    a->omni_last.len = 0;
+}
+
 static void resume_drawing(App *a) {
     a->paused = false;
     a->pause_wait = 0;
+    show_window(a);
     // The page may not have changed while it was away, and an unchanged frame
     // is hash-skipped - which would leave the block empty until something on
     // the page moved. Ask for it as though it were new.
@@ -2851,6 +2894,8 @@ static void pause_drawing(App *a) {
     a->motion_run = 0;
     still_cancel(a);            // nothing to photograph for nobody to see
     app_cdp(a, "Page.stopScreencast", "");
+    hide_window(a);
+
     // Not drawing is the whole of it: the page goes on animating into a
     // screencast nobody is reading, and stopping that is the saving.
     //
@@ -2878,10 +2923,63 @@ static void pause_drawing(App *a) {
 static bool pausing(App *a) {
     bool v;
     if (a->no_pause_arg) return false;
-    return pause_rule(a->url, &v) ? v : a->pause_on_blur;
+    if (pause_rule(a->url, &v)) return v;
+    return a->pause_on_blur || a->hide_on_blur;
 }
 
+static bool media_pausing(App *a) {
+    bool v;
+    if (a->no_media_arg || a->no_pause_arg) return false;
+    if (media_rule(a->url, &v)) return v;
+    if (pause_rule(a->url, &v) && !v) return false;
+    return a->media_pause_on_blur;
+}
+
+static const char *media_js(bool focused) {
+    static char hold[1600], resume[1600];
+    if (!hold[0]) {
+        json_escape(hold, sizeof hold, MEDIA_HOLD_JS);
+        json_escape(resume, sizeof resume, MEDIA_RESUME_JS);
+    }
+    return focused ? resume : hold;
+}
+
+static int media_hold(App *a) {
+    return app_cdp(a, "Runtime.evaluate",
+        "\"expression\":\"%s\",\"returnByValue\":true,\"userGesture\":true",
+        media_js(false));
+}
+
+static void media_play(App *a) {
+    app_cdp(a, "Runtime.evaluate",
+        "\"expression\":\"%s\",\"returnByValue\":true,\"userGesture\":true",
+        media_js(true));
+}
+
+static void media_focus(App *a, bool focused) {
+    if (focused) {
+        if (!a->media_held) return;
+        a->media_held = false;
+        media_play(a);
+        return;
+    }
+    if (g_handoff_owed > now_sec()) return;
+    if (being_driven(a)) return;
+    if (!media_pausing(a)) return;
+    a->media_held = true;
+    app_req_note(a, media_hold(a), RQ_HELD);
+}
+
+// Called while the socket is still on the outgoing page.
+void media_tab_leave(App *a) {
+    if (!media_pausing(a) || being_driven(a)) return;
+    media_hold(a);
+}
+
+void media_tab_enter(App *a) { media_play(a); }
+
 static void handle_focus(App *a, bool focused) {
+    if (a->blurred == focused) media_focus(a, focused);
     a->blurred = !focused;
     if (!pausing(a) || focused == !a->paused) return;
     if (!focused) {
@@ -2901,6 +2999,8 @@ static void handle_focus(App *a, bool focused) {
 // for a pane nobody has looked at since.
 static void check_driven(App *a) {
     if (!a->blurred) return;
+    bool driven = being_driven(a);
+    if (driven) media_focus(a, true);
     // Nor on a navigation: a window paused on one site and left alone while it
     // walked to another that is not paused would otherwise stay stopped, since
     // the focus it is waiting for has already been and gone.
@@ -2908,11 +3008,12 @@ static void check_driven(App *a) {
         if (a->paused) resume_drawing(a);
         return;
     }
-    if (being_driven(a)) {
+    if (driven) {
         if (a->paused) resume_drawing(a);
         return;
     }
     if (g_handoff_owed > now_sec()) return;
+    if (a->hidden) return;
     if (picture_up(a)) {
         a->pause_wait = 0;
     } else if (a->pause_wait >= 0) {
@@ -3469,6 +3570,18 @@ static void handle_key(App *a, Event *ev) {
             return;
         }
         if (ev->mods == MOD_CTRL && ev->key == 'u') { a->edit_len = 0; return; }
+        if (ev->mods & (MOD_CTRL | MOD_ALT | MOD_SUPER)) {
+            Act in_bar = keys_lookup(ev->mods, ev->key);
+            if (in_bar == ACT_QUIT || in_bar == ACT_TAB_NEW ||
+                in_bar == ACT_TAB_CLOSE || in_bar == ACT_TAB_NEXT ||
+                in_bar == ACT_TAB_PREV ||
+                (in_bar >= ACT_TAB_1 && in_bar <= ACT_TAB_9)) {
+                a->editing = false;
+                a->prompt = 0;
+                do_action(a, ev, in_bar);
+                return;
+            }
+        }
         if (ev->text[0] && a->edit_len + 8 < sizeof a->edit) {
             size_t n = strlen(ev->text);
             memcpy(a->edit + a->edit_len, ev->text, n);
@@ -3550,6 +3663,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         // any other - what must not happen is a picture of the whole window
         // being drawn over a screen that is now nine thumbnails.
         if (a->grid_on) dlen = 0;
+        if (a->hidden) dlen = 0;
 
         if (dlen) {
             uint64_t h = fnv1a(data, dlen);
@@ -3911,6 +4025,13 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         return;
     }
 
+    case RQ_HELD: {
+        size_t n;
+        const char *v = json_eval_str(msg, &n);
+        if (!v || !n) a->media_held = false;
+        return;
+    }
+
     case RQ_LINK: {
         size_t n;
         const char *v = json_eval_str(msg, &n);
@@ -4212,6 +4333,10 @@ static void usage(void) {
         "  --port N    fix chrome's devtools port so playwright can find it\n"
         "  --no-pause  keep drawing while the terminal is not focused. What\n"
         "              --exec starts already draws through a blur\n"
+        "  --hide-on-blur   take the window off the screen while the terminal\n"
+        "              is not focused, instead of leaving the last frame up\n"
+        "  --no-media-pause let a video or a track in the page go on playing\n"
+        "              while the terminal is not focused\n"
         "  --raw-keys  let a key the page did not want reach the window\n"
         "              system. On macOS that routes it through the menu bar,\n"
         "              which on some pages costs seconds of the thread every\n"
@@ -4477,6 +4602,7 @@ int main(int argc, char **argv) {
     a.want_cols = 80;
     snprintf(a.search, sizeof a.search, "%s", SEARCH_URL);
     a.pause_on_blur = true;
+    a.media_pause_on_blur = true;
     a.hover = true;                   // --no-hover leaves the page the clicks only
     a.claim_keys = true;              // --raw-keys hands them to the window system
     a.exec_fd = -1;
@@ -4623,7 +4749,13 @@ int main(int argc, char **argv) {
             }
         } else if (!strcmp(argv[i], "--no-pause")) {
             a.pause_on_blur = false;      // this run; the file is not written back
+            a.hide_on_blur = false;
             a.no_pause_arg = true;        // over the site rules as well as the file
+        } else if (!strcmp(argv[i], "--hide-on-blur")) {
+            a.hide_on_blur = true;
+        } else if (!strcmp(argv[i], "--no-media-pause")) {
+            a.media_pause_on_blur = false;
+            a.no_media_arg = true;
         } else if (!strcmp(argv[i], "--no-hover")) {
             a.hover = false;
         } else if (!strcmp(argv[i], "--login")) {

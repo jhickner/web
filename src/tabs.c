@@ -182,6 +182,7 @@ static bool tab_show(App *a, int idx) {
     // Nothing is going to draw the old page, and a screencast left running is
     // work the browser goes on doing for a picture nobody will collect.
     app_cdp(a, "Page.stopScreencast", "");
+    media_tab_leave(a);
 
     if (chrome_switch_target(&a->chrome, a->tabs[idx].target) < 0) {
         notify(a, "that tab has gone");
@@ -210,6 +211,7 @@ static bool tab_show(App *a, int idx) {
     snprintf(a->title, sizeof a->title, "%s", a->tabs[idx].title);
 
     session_init(a);
+    media_tab_enter(a);
     ask_where(a);
     relayout(a);
     session_write(a);
