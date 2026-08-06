@@ -2833,9 +2833,19 @@ static void pause_drawing(App *a) {
 // back with it. The page itself is left running: timers, sockets and audio
 // carry on, which is the difference between not drawing something and freezing
 // it, and the reason this stops at the picture.
+// The setting as this page leaves it: a `pause-on-blur host = no` line in the
+// file speaks for that host, and the file-wide value for everywhere else.
+// Asked each time rather than resolved once on arrival, so a rule follows the
+// page across a navigation the window never hears about as one.
+static bool pausing(App *a) {
+    bool v;
+    if (a->no_pause_arg) return false;
+    return pause_rule(a->url, &v) ? v : a->pause_on_blur;
+}
+
 static void handle_focus(App *a, bool focused) {
     a->blurred = !focused;
-    if (!a->pause_on_blur || focused == !a->paused) return;
+    if (!pausing(a) || focused == !a->paused) return;
     if (!focused) {
         // A page just handed in has not been drawn yet, and the blur that says
         // to stop drawing is half of the same click that asked for it.
@@ -2852,7 +2862,14 @@ static void handle_focus(App *a, bool focused) {
 // by with nothing drawn, and one that ends there would leave the window drawing
 // for a pane nobody has looked at since.
 static void check_driven(App *a) {
-    if (!a->pause_on_blur || !a->blurred) return;
+    if (!a->blurred) return;
+    // Nor on a navigation: a window paused on one site and left alone while it
+    // walked to another that is not paused would otherwise stay stopped, since
+    // the focus it is waiting for has already been and gone.
+    if (!pausing(a)) {
+        if (a->paused) resume_drawing(a);
+        return;
+    }
     bool driven = being_driven(a);
     if (driven && a->paused)        resume_drawing(a);
     else if (!driven && !a->paused && g_handoff_owed <= now_sec())
@@ -4515,6 +4532,7 @@ int main(int argc, char **argv) {
             }
         } else if (!strcmp(argv[i], "--no-pause")) {
             a.pause_on_blur = false;      // this run; the file is not written back
+            a.no_pause_arg = true;        // over the site rules as well as the file
         } else if (!strcmp(argv[i], "--no-hover")) {
             a.hover = false;
         } else if (!strcmp(argv[i], "--login")) {

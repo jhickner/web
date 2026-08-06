@@ -556,6 +556,7 @@ typedef struct {
     bool    status_open;       // whether it is on screen right now
 
     bool    pause_on_blur;     // stop drawing while the terminal is not focused
+    bool    no_pause_arg;      // --no-pause was given, so no site rule turns it on
     bool    paused;            // and whether that has happened
     bool    blurred;           // what the terminal last said, which is not the
                                // same: a window being driven draws through it
@@ -745,6 +746,10 @@ void config_dir(char *out, size_t cap);
 // host, or NULL where the file said nothing about it. `skip` picks which of the
 // two kinds is being asked for.
 const char *hint_selector(const char *url, bool skip);
+
+// The pause-on-blur rule this page's host is named by, if any. False when no
+// line names it, leaving the file-wide setting to say.
+bool pause_rule(const char *url, bool *out);
 
 // Note an outstanding call so its reply can be recognised, and claim the reply.
 void app_req_note(App *a, int id, int kind);

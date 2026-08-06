@@ -770,6 +770,56 @@ static bool host_match(const char *host, const char *pat) {
     return h == n || host[h - n - 1] == '.';
 }
 
+// The same shape one line further on: a setting with a host in front of its
+// `=` is that setting for that host alone. Only pause-on-blur so far, which is
+// the one whose right answer changes site by site - a page that is only worth
+// drawing while it is looked at, against a video that is worth drawing whether
+// or not the terminal has the focus.
+typedef struct { char host[96]; bool pause; } PauseRule;
+#define PAUSE_MAX 32
+
+static PauseRule g_pause[PAUSE_MAX];
+static int       g_npause;
+
+// The `host = yes/no` half of the line. A value that is not a boolean is
+// refused rather than read as `no`: a misspelling that quietly turns the
+// pausing off is a window that stops drawing for a reason nothing explains.
+static bool pause_add(const char *s) {
+    const char *eq = strchr(s, '=');
+    if (!eq || g_npause >= PAUSE_MAX) return false;
+    PauseRule r = {{0}, false};
+    char val[16];
+    if (!copy_field(r.host, sizeof r.host, s, eq)) return false;
+    if (!copy_field(val, sizeof val, eq + 1, eq + 1 + strlen(eq + 1))) return false;
+    if (!parse_bool(val, &r.pause)) return false;
+    for (char *p = r.host; *p; p++) *p = (char)tolower((unsigned char)*p);
+    g_pause[g_npause++] = r;
+    return true;
+}
+
+// What follows `pause-on-blur` when a host follows it. NULL when the next
+// thing is the `=`, which is the file-wide setting and belongs to the reader
+// below rather than here.
+static const char *pause_keyword(const char *s) {
+    while (isspace((unsigned char)*s)) s++;
+    if (strncasecmp(s, "pause-on-blur", 13)) return NULL;
+    s += 13;
+    if (!isspace((unsigned char)*s)) return NULL;
+    while (isspace((unsigned char)*s)) s++;
+    return *s == '=' ? NULL : s;
+}
+
+bool pause_rule(const char *url, bool *out) {
+    if (!url || !*url || !g_npause) return false;
+    char host[256];
+    url_host(url, host, sizeof host);
+    if (!host[0]) return false;
+    // The first that matches, the way the hint rules are read.
+    for (int i = 0; i < g_npause; i++)
+        if (host_match(host, g_pause[i].host)) { *out = g_pause[i].pause; return true; }
+    return false;
+}
+
 const char *hint_selector(const char *url, bool skip) {
     if (!url || !*url || !g_nhints) return NULL;
     char host[256];
@@ -876,6 +926,20 @@ static int read_config(const char *path, App *a, bool keys) {
         for (char *p = line; *p; p++) {
             if (*p != '#') continue;
             if (p == line || isspace((unsigned char)p[-1])) { *p = 0; break; }
+        }
+        // A host in front of the `=` makes the line that setting for that host,
+        // and the reading below - which knows only settings and keys - would
+        // find neither in it.
+        const char *per = pause_keyword(line);
+        if (per) {
+            if (!keys) {
+                if (!pause_add(per)) {
+                    fprintf(stderr, "web: %s:%d: `%s` is not a host and a yes or no\n",
+                            path, lineno, per);
+                    bad++;
+                }
+            }
+            continue;
         }
         // The last `=`, not the first: the key may be one, as alt+= is.
         char *eq = strrchr(line, '=');
@@ -1007,6 +1071,7 @@ int config_load(App *a) {
     g_nbinds = 0;
     g_nvim = 0;
     g_nhints = 0;
+    g_npause = 0;
     for (int i = 0; i < NDEFAULTS; i++)
         bind_set(DEFAULTS[i].mods, DEFAULTS[i].key, 0, 0, DEFAULTS[i].act);
 

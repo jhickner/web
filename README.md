@@ -207,6 +207,20 @@ covers `news.ycombinator.com`; the first rule of each kind that matches wins.
 `hint-all` labels everything whatever the rules say — `gf` under the vim keys,
 bindable anywhere else.
 
+`pause-on-blur` takes a host in front of its `=` and applies to that host
+alone:
+
+```
+pause-on-blur youtube.com = no
+pause-on-blur twitch.tv   = no
+```
+
+A host named here wins over the file-wide `pause-on-blur`; written without one,
+the line is the file-wide setting. Values are the booleans every other setting
+takes, and a line whose value is neither is reported and dropped. The host
+matches the way the hint rules' does, and the first rule that matches wins.
+`--no-pause` turns the pausing off for the run whatever any of them say.
+
 ## The grid
 
 `alt+g` draws every tab at once, up to nine, each in a tile with its name under
@@ -308,8 +322,9 @@ bookmark to match it, the line is the host or the search it was before.
 
 Booleans also take `true`, `on` and `1`. Each setting is the command line
 option of the same name, which wins for that run; `motion-scale` and
-`still-delay` are this file only. `hint-only` and `hint-skip` lines go in the
-same file, one per site — see [Site rules](#site-rules).
+`still-delay` are this file only. `hint-only`, `hint-skip` and a `pause-on-blur`
+with a host in front of its `=` go in the same file, one per site — see
+[Site rules](#site-rules).
 
 `motion-scale` and `still-delay` apply under `scale = auto` and nowhere else.
 Below about 100, a scroll can be called over between two of its own frames and
