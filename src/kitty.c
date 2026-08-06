@@ -123,7 +123,7 @@ static void esc_abort(Kitty *k) {
     // doubled, so the inner terminator goes in escaped and the DCS is closed
     // after it.
     const char *seq = k->tmux ? "\x1b\x1b\\\x1b\\" : "\x1b\\";
-    size_t n = k->tmux ? 4 : 2;
+    size_t n = strlen(seq);
     for (int try = 0; try < 3 && n; try++) {
         ssize_t w = write(k->ttyfd, seq, n);
         if (w == (ssize_t)n) return;
