@@ -421,6 +421,8 @@ web [options] <url>...
 --profile N run in a profile of its own: its own logins, history and
             browser, and none of the windows already up. "-" is a
             throwaway one, removed on exit
+--name N    call this window N, so WEB_WINDOW=N picks it out for a
+            driver instead of its pid. Anything but a number
 --port N    fix Chrome's devtools port instead of letting it pick one
 --no-pause  keep drawing while the terminal is not focused
 --no-hover  do not tell the page where the pointer is unless a button is
@@ -565,15 +567,31 @@ selector for what you hit into the console instead of activating it.
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
 ```
 
-The port names the browser, not the page, so `--endpoint` reports every running
-window as one JSON object per line, without starting a browser:
+`--endpoint` reports every running window as one JSON object per line, without
+starting a browser:
 
 ```console
 $ web --endpoint
-{"pid":4123,"port":9222,"cdp":"http://127.0.0.1:9222","target":"0A32…","url":"https://example.com/","title":"Example Domain","handoff":true,"drive":"…/driving/4123","freeze":""}
+{"pid":4123,"name":"hn","port":9222,"cdp":"http://127.0.0.1:9222","target":"0A32…","url":"https://example.com/","title":"Example Domain","handoff":true,"drive":"…/driving/4123","freeze":""}
 ```
 
-Playwright has no accessor for a target id, so match it per page:
+`WEB_WINDOW` picks one of them for a driver, by pid or by the name `--name`
+gave it:
+
+```sh
+web --name hn news.ycombinator.com
+```
+
+```sh
+WEB_WINDOW=hn npx playwright test
+WEB_WINDOW=hn node examples/drive.mjs
+WEB_WINDOW=4123 npx playwright test
+```
+
+A name is anything that is not a number, and holds for the life of the window.
+
+The port names the browser rather than the page, so match the target id per
+page:
 
 ```js
 const browser = await chromium.connectOverCDP(cdp);
@@ -586,9 +604,8 @@ for (const page of ctx.pages()) {
 ```
 
 The package does that loop for you — see [Playwright](#playwright). Playwright
-is not required: CDP is a websocket taking JSON, and Node has had `WebSocket`
-and `fetch` built in since 22. `js/cdp.mjs` is that connection in standard
-library only, and `examples/drive.mjs` is a demo written against it:
+is not required: `js/cdp.mjs` is the same connection over raw CDP with no
+dependencies, and `examples/drive.mjs` is a demo written against it:
 
 ```sh
 node examples/drive.mjs                 # against the one window running
@@ -650,6 +667,8 @@ web --exec 'npx playwright test examples/hn.spec.mjs' about:blank
   directly; a runner started anywhere else says so through the package.
 - `--freeze` holds the page where a test failed — see [Freezing](#freezing).
 - `WEB_PROFILE=ci`, or `--profile ci`, keeps a run off the browser you are using.
+- `WEB_WINDOW` picks the window when several are up: `web --name hn <url>` in
+  one pane, `WEB_WINDOW=hn npx playwright test` in another.
 - A failing test attaches a screenshot of the page as it was left.
 
 ### Freezing
@@ -694,9 +713,9 @@ claude mcp add web -- web --mcp
 | `screenshot` | a picture of the page |
 
 The window keeps drawing while an agent works it, whether or not its pane is
-focused. `WEB_WINDOW` picks one by pid when several are up. Nothing is
-installed for any of this, and with `--record` what the agent does is written
-down as a spec.
+focused. `WEB_WINDOW` picks one by pid or by `--name` when several are up.
+Nothing is installed for any of this, and with `--record` what the agent does
+is written down as a spec.
 
 ### Recording
 
@@ -800,7 +819,7 @@ does not fit is reached with `h` and `l`.
 |---|---|
 | `WEB_CHROME` | path to a different Chrome build |
 | `WEB_PROFILE` | the profile to run in, as `--profile` names it. Set for what `--exec` starts |
-| `WEB_WINDOW` | which window a script attaches to, by pid, when several are up |
+| `WEB_WINDOW` | which window a script attaches to, by pid or by `--name`, when several are up |
 | `WEB_CELL` | `WxH` cell size, if the page aspect looks stretched. A terminal reporting no pixel geometry leaves it a guess (8x17 default); a trace (`^D`) records which you have |
 
 ## How it works

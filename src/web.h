@@ -648,6 +648,7 @@ typedef struct {
     char    rec_path[512];     // where it is being written
     double  nav_asked;         // when the page last said it was going somewhere
     bool    nav_ours;          // and whether this window is what sent it
+    char    name[64];          // --name
     bool    freeze;            // a driver that fails holds the page where it failed
     bool    exec_paused;       // and is waiting to be let go of
     char    exec_note[160];    // what it said it was waiting about

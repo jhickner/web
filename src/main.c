@@ -617,9 +617,10 @@ void session_write(App *a) {
     if (!f) return;
     char url[2100], title[600], drive[700], drive_esc[1400];
     char freeze[700] = "", freeze_esc[1400] = "";
-    char pages[700], pages_esc[1400];
+    char pages[700], pages_esc[1400], name_esc[200];
     json_escape(url, sizeof url, a->url);
     json_escape(title, sizeof title, a->title);
+    json_escape(name_esc, sizeof name_esc, a->name);
     drive_file(a, drive, sizeof drive);
     json_escape(drive_esc, sizeof drive_esc, drive);
     claims_dir(a, pages, sizeof pages);
@@ -635,11 +636,12 @@ void session_write(App *a) {
     // would be killed by it, and the file it left behind is the only place a
     // sender can find that out before sending. "merge" is the same promise
     // about a request for this window's tabs.
-    fprintf(f, "{\"pid\":%d,\"port\":%d,\"cdp\":\"http://127.0.0.1:%d\","
+    fprintf(f, "{\"pid\":%d,\"name\":\"%s\",\"port\":%d,"
+               "\"cdp\":\"http://127.0.0.1:%d\","
                "\"target\":\"%s\",\"url\":\"%s\",\"title\":\"%s\","
                "\"handoff\":true,\"merge\":true,\"drive\":\"%s\",\"freeze\":\"%s\","
                "\"pages\":\"%s\"}\n",
-            (int)getpid(), a->chrome.port, a->chrome.port,
+            (int)getpid(), name_esc, a->chrome.port, a->chrome.port,
             a->chrome.target, url, title, drive_esc, freeze_esc, pages_esc);
     fclose(f);
 }
@@ -4181,6 +4183,8 @@ static void usage(void) {
         "  --profile N run in a profile of its own - its own logins, history\n"
         "              and browser, and none of the windows already up. \"-\"\n"
         "              is a throwaway one, taken away again on exit\n"
+        "  --name N    call this window N, so WEB_WINDOW=N picks it out for a\n"
+        "              driver instead of its pid. Anything but a number\n"
         "  --port N    fix chrome's devtools port so playwright can find it\n"
         "  --no-pause  keep drawing while the terminal is not focused. What\n"
         "              --exec starts already draws through a blur\n"
@@ -4565,6 +4569,14 @@ int main(int argc, char **argv) {
             a.script.json = true;
         } else if (!strcmp(argv[i], "--profile") && i + 1 < argc) {
             i++;                      // already read, above the loop
+        } else if (!strcmp(argv[i], "--name") && i + 1 < argc) {
+            const char *n = argv[++i];
+            // strspn past the digits: nothing after them is a pid, not a name.
+            if (!*n || n[strspn(n, "0123456789")] == 0) {
+                fprintf(stderr, "web: --name wants a name, not a number\n");
+                return 1;
+            }
+            snprintf(a.name, sizeof a.name, "%s", n);
         } else if (!strcmp(argv[i], "--freeze")) {
             a.freeze = true;
         } else if (!strcmp(argv[i], "--grid")) {

@@ -64,19 +64,20 @@ export function endpoint() {
   }).trim();
   if (!out) throw new Error('no web window is running');
   const windows = out.split('\n').map((l) => JSON.parse(l));
-  // Which one, when there are several: WEB_WINDOW names it by pid, and
-  // WEB_PROFILE has already narrowed the list to one profile's windows.
-  const want = Number(process.env.WEB_WINDOW) || 0;
+  // Which one, when there are several: WEB_WINDOW names it by pid or by the
+  // name --name gave it, and WEB_PROFILE has already narrowed the list to one
+  // profile's windows.
+  const want = process.env.WEB_WINDOW || '';
   if (want) {
-    const found = windows.find((w) => w.pid === want);
-    if (!found) throw new Error(`no window with pid ${want}`);
+    const found = windows.find((w) => String(w.pid) === want || w.name === want);
+    if (!found) throw new Error(`no window called ${want}`);
     mark(found);
     return found;
   }
   if (windows.length > 1) {
     throw new Error(
-      'more than one window is running; set WEB_WINDOW to one of these pids:\n' +
-        windows.map((w) => `  ${w.pid}  ${w.url}`).join('\n'),
+      'more than one window is running; set WEB_WINDOW to one of these:\n' +
+        windows.map((w) => `  ${w.name || w.pid}  ${w.url}`).join('\n'),
     );
   }
   mark(windows[0]);

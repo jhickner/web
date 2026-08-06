@@ -61,8 +61,9 @@ static void field(const char *line, const char *key, char *out, size_t cap) {
 }
 
 // Which window: the one most recently used, or the one WEB_WINDOW names when
-// several are up. The same rule the javascript helpers follow, so an agent and
-// a script started side by side land on the same page.
+// several are up, by pid or by the name --name gave it. The same rule the
+// javascript helpers follow, so an agent and a script started side by side land
+// on the same page.
 static bool win_read(void) {
     char dir[600];
     chrome_profile_path(W.profile, sizeof W.profile);
@@ -71,7 +72,10 @@ static bool win_read(void) {
     if (!d) return false;
 
     const char *pick = getenv("WEB_WINDOW");
-    long want = pick ? atol(pick) : 0;
+    if (pick && !*pick) pick = NULL;
+    // strspn past the digits: nothing after them is a pid, anything else a name.
+    bool by_pid = pick && pick[strspn(pick, "0123456789")] == 0;
+    long want = by_pid ? atol(pick) : 0;
     char best[4096] = "";
     time_t best_t = 0;
     struct dirent *e;
@@ -90,8 +94,12 @@ static bool win_read(void) {
         if (!f) continue;
         char line[4096];
         if (fgets(line, sizeof line, f)) {
-            snprintf(best, sizeof best, "%s", line);
-            best_t = st.st_mtime;
+            char name[128];
+            field(line, "name", name, sizeof name);
+            if (by_pid || !pick || !strcmp(name, pick)) {
+                snprintf(best, sizeof best, "%s", line);
+                best_t = st.st_mtime;
+            }
         }
         fclose(f);
     }
