@@ -200,6 +200,7 @@ static bool tab_show(App *a, int idx) {
     a->insert = false;
     a->mouse_down = false;
     a->pdf = a->pdf_clicked = false;
+    a->nav_seq++;              // the width the other tab needed is not this one's
     a->fit_w = 0;
     a->last_hash = 0;
     a->kitty.grid_dirty = true;

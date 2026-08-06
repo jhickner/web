@@ -534,6 +534,10 @@ typedef struct {
 
     bool    show_stats;        // ^G
     double  zoom;              // page magnification, alt+= / alt+-
+    // What the last relayout actually put on screen. A page held wider than it
+    // was asked to be is magnified less than `zoom` says, and the difference is
+    // that page's alone: `zoom` is what was typed and survives it.
+    double  zoom_eff;
 
     bool    inline_mode;       // a block in the shell's flow, like rom
     int     want_rows;         // rows for that block, 0 = pick one
@@ -591,6 +595,8 @@ typedef struct {
 
     bool    fit_width;         // widen the viewport so no page is cut off
     int     fit_w;             // width the page says it needs
+    unsigned nav_seq;          // documents this window has been shown
+    unsigned fit_seq;          // which of them the outstanding measure was for
     size_t  last_bytes;        // base64 size of the frame just drawn
     double  last_write_ms;     // how long it took to reach the terminal
     size_t  total_bytes;       // and every frame's, for what a trace adds up to

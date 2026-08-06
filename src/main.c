@@ -458,6 +458,11 @@ void relayout(App *a) {
     if (w < 120) w = 120;
 
     a->css_w = w;
+    // The magnification this actually comes out at, which is the one the zoom
+    // keys have to walk from: a page widened to fit is showing less of it than
+    // was asked for, and stepping from the asked-for number would spend the
+    // first few presses unwinding magnification that was never on the screen.
+    a->zoom_eff = (double)rect_w / a->css_w;
     // Derived from the width and never clamped on its own: a floor applied to
     // one axis alone changes the viewport's shape, and the whole point of the
     // size below is that the shape already matches the cells it lands on.
@@ -1818,6 +1823,7 @@ void navigate(App *a, const char *raw) {
 // viewport means real horizontal overflow, and nothing else does.
 static void request_fit(App *a) {
     if (!a->fit_width) return;
+    a->fit_seq = a->nav_seq;
     app_req_note(a, app_cdp(a, "Runtime.evaluate",
         "\"expression\":\"Math.max(document.documentElement.scrollWidth,"
         "document.body?document.body.scrollWidth:0)\",\"returnByValue\":true"),
@@ -1953,7 +1959,7 @@ static void resize_box(App *a, int drows, int dcols, bool scale) {
     // is the half that changed and the number worth showing next to it.
     char m[64];
     snprintf(m, sizeof m, "window %dx%d - zoom %.0f%%",
-             a->css_w, a->css_h, a->zoom * 100);
+             a->css_w, a->css_h, a->zoom_eff * 100);
     notify(a, m);
     request_fit(a);
 }
@@ -2061,6 +2067,21 @@ static void trace_toggle(App *a) {
 // that cannot reflow that narrow gets widened back until it fits. Zooming into
 // a wide layout would otherwise just push half of it off the screen.
 static void zoom_by(App *a, double factor) {
+    // A page being held wider than it was asked to be is already as narrow as
+    // it lays out, so magnifying it further has nothing to move: refused, and
+    // said, rather than stored as a number the screen never shows. On the way
+    // back out the walk starts from what is actually on screen, so the first
+    // press moves the picture instead of unwinding steps nobody saw.
+    if (a->fit_w > 0 && a->zoom_eff > 0 && a->zoom_eff < a->zoom * 0.97) {
+        if (factor > 1.0) {
+            char m[80];
+            snprintf(m, sizeof m, "zoom %.0f%% - page needs %dpx",
+                     a->zoom_eff * 100, a->fit_w);
+            notify(a, m);
+            return;
+        }
+        a->zoom = a->zoom_eff;
+    }
     double before = a->zoom;
     a->zoom *= factor;
     if (a->zoom < 0.4) a->zoom = 0.4;
@@ -3117,7 +3138,17 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         if (u) {
             json_unescape(a->url, sizeof a->url, u, n);
             a->title[0] = 0;
-            a->fit_w = 0;              // measured per page
+            a->nav_seq++;              // any measure still out was the last page's
+            // Measured per page - and put back per page. Cleared alone the
+            // widening stayed in the viewport, because nothing between here and
+            // the next measure lays the page out again: a page that fits would
+            // be given the width the page before it needed and never asked
+            // about it, which is what made a page look different depending on
+            // where it was reached from.
+            if (a->fit_w > 0) {
+                a->fit_w = 0;
+                relayout(a);
+            }
             session_write(a);          // what anything attaching would look for
             // Nobody here sent it and the page never asked to go: it was
             // commanded from outside, by a driver or by an agent through --mcp.
@@ -3243,6 +3274,10 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         id = (int)strtol(msg + 6, NULL, 10);
     switch (id ? app_req_take(a, id) : RQ_NONE) {
     case RQ_FIT: {
+        // Measured against the page that asked for it. A reply that outlives
+        // its document arrives after the next one is already up, and applied
+        // there it lays out a page at a width the page before it needed.
+        if (a->fit_seq != a->nav_seq) return;
         int want = (int)json_num(msg, "value", 0);
         if (want > a->css_w + 8 && want < 8000) {
             // A width asked for by number is a command rather than a request:
@@ -3260,16 +3295,15 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
             a->fit_w = want;
             relayout(a);
             // The zoom that survived is whatever the widened viewport allows,
-            // so say so rather than showing a number the page overruled.
-            double eff = (double)(a->term.cols * a->term.cell_w) / a->css_w;
-            if (eff < a->zoom * 0.97) {
-                // Keep the stored zoom honest. Left at the requested value it
-                // would climb invisibly, and zooming back out would do nothing
-                // until those phantom steps had been unwound.
-                a->zoom = eff;
+            // so say so rather than showing a number the page overruled. Said
+            // and not stored: this page needing to be wide is a fact about
+            // this page, and writing it into the zoom would carry it onto
+            // every page visited after it. The keys read it back out of
+            // zoom_eff, which is where the difference belongs.
+            if (a->zoom_eff < a->zoom * 0.97) {
                 char m[80];
                 snprintf(m, sizeof m, "zoom %.0f%% - page needs %dpx",
-                         eff * 100, want);
+                         a->zoom_eff * 100, want);
                 notify(a, m);
             }
         }
@@ -3784,6 +3818,7 @@ int app_attach(App *a, int port, char *msg, size_t cap) {
     a->hint_on = false;        // whatever they were drawn on is not here now
     a->hint_deadline = 0;
     a->pend_key = 0;
+    a->nav_seq++;              // nothing the old browser was measuring is here
     a->fit_w = 0;
     a->last_hash = 0;
     a->kitty.grid_dirty = true;
