@@ -69,11 +69,11 @@ web --profile work news.ycombinator.com
 web --profile - --screenshot shot.png example.com   # throwaway, removed on exit
 ```
 
-A named profile gets its own browser, history, and tabs. `--endpoint`,
-`--browsers`, `--kill` and `--open` answer for one profile, so a run against
-one leaves every other window alone. `^G` names the profile when it is not the
-shared one, and `--exec` puts it in the environment as `WEB_PROFILE`, which a
-window started from there inherits.
+A named profile gets its own browser, history, and tabs. `--endpoint`, `--list`,
+`--kill` and `--open` answer for one profile, so a run against one leaves every
+other window alone. `^G` names the profile when it is not the shared one, and
+`--exec` puts it in the environment as `WEB_PROFILE`, which a window started
+from there inherits.
 
 ## Keys
 
@@ -360,7 +360,7 @@ web [options] <url>...
 --endpoint  print every running window as JSON and exit
 --mcp       drive the window on screen as an MCP server on stdio, for an
             agent to work the page you are watching
---browsers  list the Chrome processes web has running, with pids, and say
+--list      list the Chrome processes web has running, with pids, and say
             which a new window could adopt
 --kill      quit this profile's windows and end its browsers, including
             any nothing can reach
@@ -381,15 +381,15 @@ web [options] <url>...
 --raw-keys  let a key the page did not want reach the window system
 ```
 
-`--browsers` lists the Chrome instances `web` has started:
+`--list` lists the Chrome instances `web` has started:
 
 ```
-$ web --browsers
+$ web --list
 pid 25495   up 04:11        port 53859
 ```
 
 ```
-$ web --browsers
+$ web --list
 pid 50596   up 26:00        stranded - nothing can reach it
 web: 1 stranded browser holding the profile; web --kill ends it
 ```

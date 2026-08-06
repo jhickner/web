@@ -2214,6 +2214,71 @@ static void resize_box(App *a, int drows, int dcols, bool scale) {
     request_fit(a);
 }
 
+// Whether this pane is the zoomed one of its tmux window; -1 when there is no
+// way to know, which is anything that is not a pane. Asked of the server rather
+// than worked out here, because nothing a pane can see about its own size says
+// which of the two it is - a zoomed pane and a pane that simply fills its window
+// are the same size. The wait is a tmux client round trip, and it is paid on a
+// resize, which is the only moment a zoom can have happened.
+static int tmux_zoomed(void) {
+    const char *pane = getenv("TMUX_PANE");
+    if (!getenv("TMUX") || !pane || pane[0] != '%') return -1;
+    for (const char *p = pane + 1; *p; p++)
+        if (*p < '0' || *p > '9') return -1;      // not a pane id; not for sh
+    char cmd[128];
+    snprintf(cmd, sizeof cmd,
+             "tmux display-message -p -t %s '#{window_zoomed_flag}' 2>/dev/null",
+             pane);
+    FILE *f = popen(cmd, "r");
+    if (!f) return -1;
+    char out[16] = {0};
+    char *got = fgets(out, sizeof out, f);
+    pclose(f);
+    if (!got) return -1;
+    return out[0] == '1';
+}
+
+// A zoom hands the pane the whole tmux window, and the window drawn in it stays
+// the size it was: a small picture with a field of empty rows under it. This
+// grows it to fill the pane on the way in and puts back the size it had on the
+// way out.
+//
+// Only the numbers move here. It is called from inside the resize the zoom
+// itself caused, and everything after it there - the blanking, the placement,
+// the relayout - already draws the block from these.
+static void tmux_zoom_track(App *a) {
+    if (!a->tmux_zoom || !a->inline_mode || !a->has_tty) return;
+    int z = tmux_zoomed();
+    if (z < 0 || (z != 0) == a->zoomed) return;
+    a->zoomed = z != 0;
+
+    Term *t = &a->term;
+    if (!a->zoomed) {
+        // Straight back to what it was. A height too tall for the pane it has
+        // come back to is what relayout already trims on every resize.
+        a->box_rows = a->unzoom_rows;
+        a->box_cols = a->unzoom_cols;
+        return;
+    }
+    a->unzoom_rows = a->box_rows;
+    a->unzoom_cols = a->box_cols;
+
+    int fixed = block_rows(a) - a->box_rows;   // the bar, the status line, the console
+    int rows = t->rows - fixed - 1;            // and the row the shell prompts on
+    if (rows < BOX_MIN_ROWS) rows = BOX_MIN_ROWS;
+    if (rows <= a->box_rows) return;
+    // A width set by hand comes along in proportion, the way the scaling keys
+    // move it; one that was never set is still following the proportion and is
+    // left to go on doing so from the new height.
+    if (a->box_cols > 0) {
+        int cols = (int)((double)box_cols_now(a, a->box_rows) * rows / a->box_rows + 0.5);
+        if (cols > t->cols) cols = t->cols;
+        if (cols < BOX_MIN_COLS) cols = BOX_MIN_COLS;
+        a->box_cols = cols;
+    }
+    a->box_rows = rows;
+}
+
 // How big a frame to ask for, against the viewport. This used to step upwards,
 // on the idea that drawing larger and coming back down to the cell rect would
 // buy detail past what the cells can hold. It cannot: the screencast starts at
@@ -3908,7 +3973,7 @@ static void usage(void) {
         "  --endpoint  print every running window as JSON and exit\n"
         "  --mcp       drive the window on screen as an MCP server on stdio,\n"
         "              for an agent to work the page you are watching\n"
-        "  --browsers  list the chrome processes web has running, with pids,\n"
+        "  --list      list the chrome processes web has running, with pids,\n"
         "              and say which of them a new window could still adopt\n"
         "  --kill      quit this profile's windows and end its browsers,\n"
         "              including any nothing can reach any more. A window it\n"
@@ -4199,7 +4264,7 @@ int main(int argc, char **argv) {
 
     // Read out of the arguments before the loop below, because everything
     // between here and there already wants to know where the profile is: the
-    // user agent is read out of it, and --endpoint, --browsers, --kill and
+    // user agent is read out of it, and --endpoint, --list, --kill and
     // --mcp all answer for one profile rather than for the machine.
     // Inherited from the run that started this one - `--exec` puts it in the
     // environment - so a window opened by something a window started is in the
@@ -4219,7 +4284,7 @@ int main(int argc, char **argv) {
     // on the shell rather than over the window. The arguments below still win.
     config_load(&a);
     bool show = false, login = false;
-    bool endpoint_only = false, browsers_only = false, kill_only = false;
+    bool endpoint_only = false, list_only = false, kill_only = false;
     bool mcp_only = false;
     const char *exec_cmd = NULL, *hand_to_window = NULL, *rec_path = NULL;
     double drain_at = 0;              // when the queue first ran out
@@ -4281,8 +4346,8 @@ int main(int argc, char **argv) {
             hand_to_window = argv[++i];
         } else if (!strcmp(argv[i], "--endpoint")) {
             endpoint_only = true;
-        } else if (!strcmp(argv[i], "--browsers")) {
-            browsers_only = true;
+        } else if (!strcmp(argv[i], "--list")) {
+            list_only = true;
         } else if (!strcmp(argv[i], "--kill")) {
             kill_only = true;
         } else if (!strcmp(argv[i], "--mcp")) {
@@ -4353,7 +4418,7 @@ int main(int argc, char **argv) {
     // A driver rather than a window: the protocol owns stdin and stdout, and
     // the page it works is one another window is already drawing.
     if (mcp_only)      return mcp_serve();
-    if (browsers_only) return print_browsers();
+    if (list_only)     return print_browsers();
     if (kill_only)     return kill_everything();
     if (hand_to_window) return hand_url(hand_to_window);
 
