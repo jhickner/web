@@ -1,8 +1,9 @@
-// Drive the page a `web` window is showing. Nothing installed, nothing to set
-// up: js/cdp.mjs is the connection, and it is all standard library.
+// Drive the page a `web` window is showing, over raw CDP with nothing
+// installed. `../js/cdp.mjs` is `@jhickner/web/cdp` once this is a package.
 //
 //   web --exec 'node examples/drive.mjs' news.ycombinator.com
-//   node examples/drive.mjs                 # against the one window running
+//   node examples/drive.mjs                    # the one window running
+//   WEB_WINDOW=hn node examples/drive.mjs      # by --name, or by pid
 
 import { page } from '../js/cdp.mjs';
 

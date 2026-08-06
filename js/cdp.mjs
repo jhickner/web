@@ -120,7 +120,7 @@ async function session({ cdp, target }) {
 
 // The handful of things a demo actually asks a page for. Not an automation
 // library: no waiting, no retries, no selector engine - when you want those,
-// examples/attach.mjs hands the same window to Playwright, which has them.
+// js/playwright.mjs hands the same window to Playwright, which has them.
 export async function page() {
   const cdp = await session(endpoint());
 

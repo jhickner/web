@@ -632,11 +632,21 @@ web --exec 'npx playwright test' about:blank   # watch it run
 npx playwright test                            # against a window already up
 ```
 
-`examples/hn.spec.mjs` is that spec. From a checkout, `npm i @playwright/test`
-and:
+`examples/fleet.spec.mjs` is four pages at once, one per worker. From a
+checkout, `npm i @playwright/test` and:
 
 ```sh
-web --exec 'npx playwright test examples/hn.spec.mjs' about:blank
+web --exec 'npx playwright test examples/fleet.spec.mjs --workers=4' about:blank
+```
+
+For a script of your own rather than a spec, `attach()` is the page:
+
+```js
+import { attach } from '@jhickner/web/playwright';
+
+const page = await attach();
+await page.goto('https://news.ycombinator.com');
+await page.locator('.titleline > a').first().click();
 ```
 
 | Import | What it is |
@@ -653,9 +663,7 @@ web --exec 'npx playwright test examples/hn.spec.mjs' about:blank
 - Playwright's unit of parallelism is the *file*: four tests in one file are one
   worker however many `--workers` allows, and so one tile. `test.describe
   .configure({ mode: 'parallel' })` in the file, or `fullyParallel` in the
-  config, is what spreads them. `examples/fleet.spec.mjs` is four pages at once;
-  `examples/hn.spec.mjs` is deliberately the other way, its tests handing the
-  same page on to each other.
+  config, is what spreads them. `examples/fleet.spec.mjs` sets it.
 - The tab is the context, so cookies, storage and the page itself carry from one
   test to the next; there is no fresh context per test.
 - The viewport is the window's — `--cols`, `--rows`, `[` and `]` set it, not
@@ -764,7 +772,7 @@ test('recorded', async ({ page }) => {
 output in the console while the page stays live above it:
 
 ```sh
-web --exec 'node examples/attach.mjs' example.com
+web --exec 'node examples/drive.mjs' example.com
 ```
 
 The child gets `WEB_CDP_URL`, `WEB_CDP_PORT`, `WEB_TARGET_ID`, and

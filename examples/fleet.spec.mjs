@@ -1,7 +1,9 @@
 // Several pages at once, one per worker, to be watched in the grid.
+// `../js/test.mjs` is `@jhickner/web/test` once this is a package.
 //
 //   npm i @playwright/test         # in this checkout
 //   web --exec 'npx playwright test examples/fleet.spec.mjs --workers=4' about:blank
+//   WEB_WINDOW=hn npx playwright test examples/fleet.spec.mjs --workers=4
 //
 // Then `alt+g`: four tiles, four workers, all running at the same time. The
 // first worker drives the window's own tab and the rest open pages of their
@@ -10,8 +12,7 @@
 // `mode: 'parallel'` is what spreads the tests of ONE file across workers.
 // Playwright's unit of parallelism is the file, so four tests in one file with
 // `--workers=4` and nothing else said would still be one worker doing them in
-// turn - and one tile. examples/hn.spec.mjs is deliberately the other way: its
-// tests hand the same page on to each other, and it must stay on one worker.
+// turn - and one tile.
 
 import { test, expect } from '../js/test.mjs';
 
