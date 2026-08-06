@@ -2815,6 +2815,35 @@ static void handle_mouse(App *a, Event *ev) {
         return;
     }
 
+    // Opt+click and middle-click open the link under the pointer in a tab
+    // behind this one, which is what cmd+click does in a window. Cmd itself is
+    // not on offer: a mouse report carries shift, alt and ctrl and nothing
+    // else, so a terminal never hears about it.
+    //
+    // The release is consumed by the flag rather than by testing the modifier
+    // again, since a key let go of between the press and the release would
+    // otherwise leave the page with a button up it never saw go down.
+    if (ev->press && !ev->motion && (ev->button == 1 ||
+                                     (ev->button == 0 && (ev->mods & MOD_ALT)))) {
+        a->click_newtab = true;
+        char js[512], esc[1100];
+        snprintf(js, sizeof js,
+                 "(function(x,y){var e=document.elementFromPoint(x,y);"
+                 "e=e&&e.closest?e.closest('a[href],area[href]'):null;"
+                 "if(!e)return '';var h=e.href;"
+                 "if(h&&h.baseVal!==undefined)h=h.baseVal;"     // svg <a>
+                 "try{h=new URL(h,location.href).href}catch(_){return ''}"
+                 "return /^(https?|file):/i.test(h)?h:''})(%d,%d)", x, y);
+        json_escape(esc, sizeof esc, js);
+        app_req_note(a, app_cdp(a, "Runtime.evaluate",
+            "\"expression\":\"%s\",\"returnByValue\":true", esc), RQ_LINK);
+        return;
+    }
+    if (a->click_newtab && ev->button < 3) {
+        if (!ev->press && !ev->motion) a->click_newtab = false;
+        return;                        // the drag half of it goes nowhere either
+    }
+
     int cdp_mods = 0;
     if (ev->mods & MOD_ALT)   cdp_mods |= 1;
     if (ev->mods & MOD_CTRL)  cdp_mods |= 2;
@@ -3607,6 +3636,19 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         return;
     }
 
+    case RQ_LINK: {
+        size_t n;
+        const char *v = json_eval_str(msg, &n);
+        char url[1100];
+        size_t len = (v && n) ? json_unescape(url, sizeof url, v, n) : 0;
+        if (!len) {
+            notify(a, "no link there");
+            return;
+        }
+        if (tab_open_bg(a, url)) notify(a, "opened in a tab behind this one");
+        return;
+    }
+
     case RQ_SELECTOR: {
         size_t n;
         const char *v = json_eval_str(msg, &n);
@@ -4090,6 +4132,7 @@ int app_attach(App *a, int port, char *msg, size_t cap) {
     a->loading = false;
     a->insert = false;
     a->mouse_down = false;
+    a->click_newtab = false;
     a->hint_on = false;        // whatever they were drawn on is not here now
     a->hint_deadline = 0;
     a->pend_key = 0;

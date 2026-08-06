@@ -106,6 +106,7 @@ window started from there inherits.
 | `alt+b` | find a bookmark — see [Finding a page](#finding-a-page) |
 | `?` | key list over the page; any key dismisses it |
 | mouse | click, drag to select, wheel to scroll |
+| `opt`+click | open the link under the pointer in a tab behind this one (middle-click too) |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
 | console border | drag up or down to resize the pane |
 

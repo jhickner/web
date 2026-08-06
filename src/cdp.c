@@ -670,10 +670,18 @@ static int browser_call(Chrome *c, const char *method, const char *params,
 // the page out from under both. The separate window is what makes it drawable:
 // Chrome only paints the tab in front, so a second tab in the same window
 // screencasts nothing at all - a title, and no picture under it.
-int chrome_open_tab(Chrome *c, char *out, size_t cap) {
+//
+// It opens where it is told to rather than blank and navigating after: a tab
+// nothing has switched to has no session to navigate through, and the browser
+// is the only thing that can put an address into a page nobody is attached to.
+int chrome_open_tab(Chrome *c, const char *url, char *out, size_t cap) {
+    if (!url || !*url) url = "about:blank";
+    char esc[2200], args[2400];
+    json_escape(esc, sizeof esc, url);
+    snprintf(args, sizeof args, "\"url\":\"%s\",\"newWindow\":true", esc);
+
     Buf reply = {0};
-    int rc = browser_call(c, "Target.createTarget",
-                          "\"url\":\"about:blank\",\"newWindow\":true", &reply);
+    int rc = browser_call(c, "Target.createTarget", args, &reply);
     size_t n = 0;
     const char *id = rc == 0 ? json_str(reply.p, "targetId", &n) : NULL;
     if (id && n && n < cap)
@@ -687,8 +695,9 @@ int chrome_open_tab(Chrome *c, char *out, size_t cap) {
     // the worse of the two. Everything after the ? is the address, and since
     // Chrome 111 /json/new answers nothing but PUT.
     Buf resp = {0};
-    char path[256];
-    bool ok = http_req(c->port, "PUT", "/json/new?about:blank", &resp) == 0 &&
+    char path[256], req[1200];
+    snprintf(req, sizeof req, "/json/new?%s", url);
+    bool ok = http_req(c->port, "PUT", req, &resp) == 0 &&
               ws_path_at(resp.p, path, sizeof path);
     if (ok) {
         const char *slash = strrchr(path, '/');
@@ -733,7 +742,7 @@ int chrome_attach(Chrome *c) {
 
     if (c->adopted) {
         char id[96];
-        if (chrome_open_tab(c, id, sizeof id) == 0)
+        if (chrome_open_tab(c, NULL, id, sizeof id) == 0)
             snprintf(ws_path, sizeof ws_path, "/devtools/page/%s", id);
         else
             TRACE("no tab of our own; sharing the browser's");

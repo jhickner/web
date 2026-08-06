@@ -199,6 +199,7 @@ static bool tab_show(App *a, int idx) {
     a->loading = false;
     a->insert = false;
     a->mouse_down = false;
+    a->click_newtab = false;
     a->pdf = a->pdf_clicked = false;
     a->nav_seq++;              // the width the other tab needed is not this one's
     a->fit_w = 0;
@@ -243,7 +244,7 @@ static bool tab_add(App *a) {
         return false;
     }
     char target[96];
-    if (chrome_open_tab(&a->chrome, target, sizeof target) < 0) {
+    if (chrome_open_tab(&a->chrome, NULL, target, sizeof target) < 0) {
         notify(a, "chrome would not open another page");
         return false;
     }
@@ -329,6 +330,34 @@ bool tab_open_url(App *a, const char *url) {
     snprintf(a->url, sizeof a->url, "%s", url);
     snprintf(a->tabs[a->tab].url, sizeof a->tabs[a->tab].url, "%s", url);
     navigate(a, url);
+    return true;
+}
+
+// A tab on the end of the list with the window left where it is, which is what
+// opening a link in a new tab means: the page being read stays in front and the
+// one just opened waits its turn. The browser is asked to open it at its address
+// rather than blank, since nothing is going to attach to it and navigate it.
+//
+// Not claimed, so its title only arrives when the window switches to it - the
+// bar names it by host until then. The flag says a driver owns the page and
+// will say when it goes, and a tab carrying it is dropped the moment no driver
+// claims it, which is every pass for one of these.
+bool tab_open_bg(App *a, const char *url) {
+    if (a->ntabs >= TAB_MAX) {
+        char m[48];
+        snprintf(m, sizeof m, "%d tabs is the limit", TAB_MAX);
+        notify(a, m);
+        return false;
+    }
+    char target[96];
+    if (chrome_open_tab(&a->chrome, url, target, sizeof target) < 0) {
+        notify(a, "chrome would not open another page");
+        return false;
+    }
+    if (!tab_take(a, target, url, NULL)) {
+        chrome_close_id(&a->chrome, target);
+        return false;
+    }
     return true;
 }
 

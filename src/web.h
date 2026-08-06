@@ -120,7 +120,7 @@ int  chrome_other_pages(Chrome *c);
 void chrome_close_target(Chrome *c);
 
 // A further page of our own, in a window of its own, and the id it answers to.
-int  chrome_open_tab(Chrome *c, char *out, size_t cap);
+int  chrome_open_tab(Chrome *c, const char *url, char *out, size_t cap);
 
 // Ask to be told when a page appears in this browser or goes away, on a socket
 // of its own. A page is not the only thing that opens a page - a link asking for
@@ -347,7 +347,7 @@ typedef struct {
 enum {
     RQ_NONE, RQ_TITLE, RQ_URL, RQ_COPY, RQ_FIT, RQ_SCRIPT,
     RQ_SELECTOR, RQ_RECORD, RQ_PDF, RQ_SHOT_READY, RQ_SHOT, RQ_FRAME,
-    RQ_MODE, RQ_HISTORY, RQ_STILL
+    RQ_MODE, RQ_HISTORY, RQ_STILL, RQ_LINK
 };
 
 // The isolated world everything we inject for our own use lives in. It shares
@@ -559,6 +559,7 @@ typedef struct {
 
     bool    insert;            // a text field has focus: keys belong to the page
     bool    mouse_down;        // a button went down on the page and is still held
+    bool    click_newtab;      // and it was the one that opens a link in a tab
     bool    vim;               // the vim layer, under the keys web.conf names
     int     vim_shadowed;      // and how many of it that file took back
     int     pend_mods;         // the first key of a pair, still waiting for its
@@ -895,6 +896,7 @@ void tab_new(App *a);
 // A tab opened on an address instead of on the address bar, for the addresses
 // after the first on the command line. The window is left on it.
 bool tab_open_url(App *a, const char *url);
+bool tab_open_bg(App *a, const char *url); // a tab behind this one, not switched to
 
 void tab_close(App *a);
 // A page opened by whatever is driving this browser, taken into the bar as it
