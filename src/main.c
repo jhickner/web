@@ -109,8 +109,11 @@ static void queue_move(App *a, int x, int y, const char *btn, int buttons,
                        int mods) {
     Pending *p = &a->pend;
     // A drag is the page moving; a bare hover is not, and softening the picture
-    // under a pointer that is only crossing it would be a poor trade.
-    note_input(a, buttons != 0);
+    // under a pointer that is only crossing it would be a poor trade. Nor does
+    // a hover count as input at all: last_input is the clock that ends a
+    // scroll, and a page with anything animating on it would hold motion open
+    // for as long as the pointer sat anywhere over the terminal.
+    if (buttons) note_input(a, true);
     if (p->kind != PEND_MOVE) flush_pending(a);
     p->kind = PEND_MOVE;
     p->x = x;
@@ -2856,6 +2859,30 @@ static void check_driven(App *a) {
         pause_drawing(a);
 }
 
+// The point in the page a cell is: the terminal only says which cell the
+// pointer is in, so the center is the least wrong point inside it. A pointer
+// that has wandered off the picture is answered by the nearest edge cell, which
+// is what a window does with one dragged past its frame.
+static void page_point(App *a, int cx, int cy, int *px, int *py) {
+    Kitty *k = &a->kitty;
+    if (cx < k->x)               cx = k->x;
+    if (cx > k->x + k->cols - 1) cx = k->x + k->cols - 1;
+    if (cy < k->y)               cy = k->y;
+    if (cy > k->y + k->rows - 1) cy = k->y + k->rows - 1;
+    double fx = (cx - k->x + 0.5) / (double)k->cols;
+    double fy = (cy - k->y + 0.5) / (double)k->rows;
+    *px = (int)(fx * a->css_w);
+    *py = (int)(fy * a->css_h);
+}
+
+static int cdp_mods_of(const Event *ev) {
+    int m = 0;
+    if (ev->mods & MOD_ALT)   m |= 1;
+    if (ev->mods & MOD_CTRL)  m |= 2;
+    if (ev->mods & MOD_SHIFT) m |= 8;
+    return m;
+}
+
 static void handle_mouse(App *a, Event *ev) {
     // Not while a button is held: a drag that wandered up over the bar is the
     // page's until it is let go of, and switching tabs under it would leave the
@@ -2868,6 +2895,47 @@ static void handle_mouse(App *a, Event *ev) {
     }
     if (a->omni_open) {
         if (ev->press && !ev->motion && ev->button < 3) omni_close(a);
+        return;
+    }
+    // A move with nothing held down is a hover, and the page is told about it
+    // the way a window would be: it is what lifts a menu, a tooltip, or the
+    // controls over a video, none of which a click can reach because they are
+    // not there to be clicked until the pointer is on them. It is a claim on
+    // nothing else - it never takes the keyboard, never opens a tab, and is
+    // never the page moving - so it is answered here and goes no further.
+    if (ev->button == BTN_NONE) {
+        Kitty *k = &a->kitty;
+        // A cell of slack all the way round, and the point clamped back onto
+        // the picture. The edge of the picture is not the edge of anything the
+        // page drew: a video's controls lie along the bottom of the frame, the
+        // row under that is the status line, and a pointer reaching for a
+        // control is a cell away from being off the page altogether. Called a
+        // departure, that cell takes the controls out from under the pointer
+        // going for them - which is the one thing a hover was added to fix.
+        // Not into a grid, whose tiles are pictures of pages laid out at a
+        // size none of them was drawn at, and not into a page that is paused:
+        // a pointer crossing a window nobody is looking at is not a hover.
+        bool on = a->hover && !a->grid_on && !a->paused && !a->mouse_down &&
+                  ev->mx >= k->x - 1 && ev->mx <= k->x + k->cols &&
+                  ev->my >= k->y - 1 && ev->my <= k->y + k->rows;
+        // Further off than that, the page would be left believing the pointer
+        // is still where it last saw it, and whatever that lifted would stay
+        // up over a page nobody is pointing at any more. One move to nowhere
+        // is what leaving a window looks like from inside it.
+        if (!on) {
+            if (a->hovering) {
+                a->hovering = false;
+                queue_move(a, -1, -1, "none", 0, 0);
+                term_log("%.3f hover out", now_sec());
+            }
+            return;
+        }
+        a->hovering = true;
+        int hx, hy;
+        page_point(a, ev->mx, ev->my, &hx, &hy);
+        term_log("%.3f hover cell %d,%d -> %d,%d", now_sec(), ev->mx, ev->my,
+                 hx, hy);
+        queue_move(a, hx, hy, "none", 0, cdp_mods_of(ev));
         return;
     }
     // First: a border being dragged owns the pointer wherever it goes, and the
@@ -2896,20 +2964,8 @@ static void handle_mouse(App *a, Event *ev) {
     // not take the keyboard away from a half typed command.
     if (ev->press && !ev->motion && ev->button < 3) a->console_focus = false;
 
-    // Aim at the middle of the cell: the terminal only tells us which cell was
-    // clicked, so the center is the least wrong point inside it. A drag that
-    // has wandered off the picture is answered by the nearest edge cell, which
-    // is what a window does with a pointer dragged past its frame.
-    int cx = ev->mx, cy = ev->my;
-    if (cx < k->x)               cx = k->x;
-    if (cx > k->x + k->cols - 1) cx = k->x + k->cols - 1;
-    if (cy < k->y)               cy = k->y;
-    if (cy > k->y + k->rows - 1) cy = k->y + k->rows - 1;
-
-    double fx = (cx - k->x + 0.5) / (double)k->cols;
-    double fy = (cy - k->y + 0.5) / (double)k->rows;
-    int x = (int)(fx * a->css_w);
-    int y = (int)(fy * a->css_h);
+    int x, y;
+    page_point(a, ev->mx, ev->my, &x, &y);
 
     // Picker mode deliberately consumes the click. Keeping it armed makes it
     // useful for inspecting several controls in a row; `pick` toggles it off.
@@ -2955,10 +3011,7 @@ static void handle_mouse(App *a, Event *ev) {
         return;                        // the drag half of it goes nowhere either
     }
 
-    int cdp_mods = 0;
-    if (ev->mods & MOD_ALT)   cdp_mods |= 1;
-    if (ev->mods & MOD_CTRL)  cdp_mods |= 2;
-    if (ev->mods & MOD_SHIFT) cdp_mods |= 8;
+    int cdp_mods = cdp_mods_of(ev);
 
     if (ev->button >= 3) {
         // Only the vertical notches move the page. A trackpad reports a
@@ -4017,6 +4070,8 @@ static void usage(void) {
         "  --no-status start with the status line hidden (^G toggles it)\n"
         "  --no-clear  leave the window on screen on exit instead of erasing it\n"
         "  --mute      start with the page's audio switched off\n"
+        "  --no-hover  do not tell the page where the pointer is unless a\n"
+        "              button is down\n"
         "  --eval JS   run javascript in the page and print what it answers\n"
         "  --delay MS  pause between lines of piped javascript\n"
         "  --step      wait for a key between those lines\n"
@@ -4260,6 +4315,7 @@ int app_attach(App *a, int port, char *msg, size_t cap) {
     a->loading = false;
     a->insert = false;
     a->mouse_down = false;
+    a->hovering = false;       // and no page here has been pointed at yet
     a->click_newtab = false;
     a->hint_on = false;        // whatever they were drawn on is not here now
     a->hint_deadline = 0;
@@ -4321,6 +4377,7 @@ int main(int argc, char **argv) {
     a.want_cols = 80;
     snprintf(a.search, sizeof a.search, "%s", SEARCH_URL);
     a.pause_on_blur = true;
+    a.hover = true;                   // --no-hover leaves the page the clicks only
     a.claim_keys = true;              // --raw-keys hands them to the window system
     a.exec_fd = -1;
     a.fit_width = true;
@@ -4458,6 +4515,8 @@ int main(int argc, char **argv) {
             }
         } else if (!strcmp(argv[i], "--no-pause")) {
             a.pause_on_blur = false;      // this run; the file is not written back
+        } else if (!strcmp(argv[i], "--no-hover")) {
+            a.hover = false;
         } else if (!strcmp(argv[i], "--login")) {
             login = true;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
@@ -4633,6 +4692,7 @@ int main(int argc, char **argv) {
     }
 
     if (a.has_tty) term_enter(&a.term, a.inline_mode);
+    if (a.has_tty && a.hover) term_hover(&a.term, true);
     // Armed only now, because only now is there a mode to put back: term_enter
     // is what asks for the keyboard, and before it there is nothing a crash
     // would leave behind.
@@ -4876,6 +4936,12 @@ int main(int argc, char **argv) {
         if (fds[0].revents & POLLIN) {
             term_read(&a.term);
             Event ev;
+            // A hover on its own is not something the page owes a frame for:
+            // most of the window has nothing under it that reacts, and a
+            // watchdog counting a pointer crossing a still page as a page that
+            // has stopped answering would restart the screencast every few
+            // seconds of the mouse being moved anywhere near it.
+            bool owed = false;
             while (term_next(&a.term, &ev)) {
                 // Mouse events say where and which button rather than key=0:
                 // a trace of something that was clicked has to name the click.
@@ -4887,6 +4953,7 @@ int main(int argc, char **argv) {
                 else
                     term_log("%.3f event type=%d key=%d mods=%d text=%s", now_sec(),
                              ev.type, ev.key, ev.mods, ev.text[0] ? ev.text : "");
+                if (ev.type != EV_MOUSE || ev.button != BTN_NONE) owed = true;
                 if (ev.type == EV_KEY) handle_key(&a, &ev);
                 else if (ev.type == EV_MOUSE) handle_mouse(&a, &ev);
                 else if (ev.type == EV_FOCUS) handle_focus(&a, ev.press);
@@ -4901,7 +4968,7 @@ int main(int argc, char **argv) {
             draw_panes(&a);
             // Whatever that was, the page should have something to say about
             // it. If it does not, the watchdog below finds out.
-            if (a.expect_frame == 0) a.expect_frame = now_sec() + 2.0;
+            if (owed && a.expect_frame == 0) a.expect_frame = now_sec() + 2.0;
         }
 
         // Chrome sends the next frame only once the last one is acknowledged,

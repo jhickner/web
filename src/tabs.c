@@ -199,6 +199,7 @@ static bool tab_show(App *a, int idx) {
     a->loading = false;
     a->insert = false;
     a->mouse_down = false;
+    a->hovering = false;       // the page being left is the one that was pointed at
     a->click_newtab = false;
     a->pdf = a->pdf_clicked = false;
     a->nav_seq++;              // the width the other tab needed is not this one's

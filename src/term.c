@@ -22,8 +22,14 @@ static bool g_have_saved = false;
 // keyboard, which is the only way this side can know nobody is looking. Inside
 // tmux it needs `set -g focus-events on`, and a terminal that does not know the
 // mode simply never sends either sequence.
+// 1003 is the one mode that is asked for separately, because it is the one a
+// user may not want: it reports the pointer crossing the window with nothing
+// held down, which is a report per cell rather than a report per click, and
+// 1002 keeps working underneath it either way.
 #define MOUSE_ON  "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h"
-#define MOUSE_OFF "\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l"
+#define MOUSE_OFF "\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
+#define HOVER_ON  "\x1b[?1003h"
+#define HOVER_OFF "\x1b[?1003l"
 
 // Ask for kitty's key reporting, which is the only way a cmd chord can reach us
 // at all: the legacy encoding has no bit for super. A terminal that does not
@@ -126,6 +132,12 @@ void term_enter(Term *t, bool inline_mode) {
     writeall(t->fd, MOUSE_ON, strlen(MOUSE_ON));
     writeall(t->fd, KBD_ON, strlen(KBD_ON));
     term_size(t);
+}
+
+void term_hover(Term *t, bool on) {
+    if (t->fd < 0) return;
+    const char *s = on ? HOVER_ON : HOVER_OFF;
+    writeall(t->fd, s, strlen(s));
 }
 
 // Scroll a block of rows into view and take the bottom of the screen for it.
@@ -497,6 +509,11 @@ int term_next(Term *t, Event *ev) {
                 // Buttons 4 to 7 are the wheel, and the last two of them are
                 // its horizontal pair rather than more of the vertical one.
                 ev->button = 3 + (code & 3);
+            } else if ((code & 3) == 3) {
+                // The fourth button is no button: a move with nothing held
+                // down. Told apart from the wheel above rather than after it,
+                // since the two are the same three bits.
+                ev->button = BTN_NONE;
             } else {
                 ev->button = code & 3;
             }

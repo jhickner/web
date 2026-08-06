@@ -103,7 +103,7 @@ other window alone. `--exec` puts the profile in the environment as
 | `alt+d` | bookmark this page, or take the bookmark off it |
 | `alt+b` | find a bookmark — see [Finding a page](#finding-a-page) |
 | `?` | key list over the page; any key dismisses it |
-| mouse | click, drag to select, wheel to scroll |
+| mouse | click, drag to select, wheel to scroll, hover to lift what a pointer lifts |
 | `opt`+click | open the link under the pointer in a tab behind this one (middle-click too) |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
 | console border | drag up or down to resize the pane |
@@ -287,6 +287,7 @@ bookmark to match it, the line is the host or the search it was before.
 |---|---|---|---|
 | `vim` | `no` | yes/no | the vim key layer, under whatever keys this file names |
 | `pause-on-blur` | `yes` | yes/no | stop drawing while the terminal is not focused. A window being driven by `--exec` or a script draws either way |
+| `hover` | `yes` | yes/no | tell the page where the pointer is with no button down, so menus, tooltips and video controls come up under it |
 | `status-line` | `yes` | yes/no | show the status line under the page |
 | `clear-on-exit` | `yes` | yes/no | erase the window on exit instead of leaving it |
 | `full` | `no` | yes/no | take over the whole terminal instead of drawing a window |
@@ -402,6 +403,8 @@ web [options] <url>...
             throwaway one, removed on exit
 --port N    fix Chrome's devtools port instead of letting it pick one
 --no-pause  keep drawing while the terminal is not focused
+--no-hover  do not tell the page where the pointer is unless a button is
+            down
 --raw-keys  let a key the page did not want reach the window system
 ```
 

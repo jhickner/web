@@ -210,6 +210,11 @@ enum {
 
 enum { MOD_SHIFT = 1, MOD_ALT = 2, MOD_CTRL = 4, MOD_SUPER = 8 };
 
+// A move with nothing held down. Below zero rather than another button number,
+// so the wheel tests - which are all "the button is 3 or more" - keep meaning
+// what they meant before there was anything else for a move to be.
+#define BTN_NONE (-1)
+
 typedef enum { EV_NONE, EV_KEY, EV_MOUSE, EV_PASTE, EV_FOCUS, EV_EOF } EvType;
 
 // ------------------------------------------------------------------- keys
@@ -274,7 +279,7 @@ typedef struct {
     int    px, py;       // pixel coords when the terminal reports them
     bool   have_pixels;
     int    button;       // 0 left, 1 middle, 2 right, 3 wheel-up, 4 wheel-down,
-                         // 5 wheel-left, 6 wheel-right
+                         // 5 wheel-left, 6 wheel-right, BTN_NONE on a hover
     bool   press;
     bool   motion;
 } Event;
@@ -294,6 +299,7 @@ typedef struct {
 
 int  term_probe(Term *t);                 // open the tty and measure it
 void term_enter(Term *t, bool inline_mode); // raw mode, alt screen, mouse
+void term_hover(Term *t, bool on);        // report moves with no button down
 void term_reserve_inline(Term *t, int rows);
 void term_resize_inline(Term *t, int rows);   // caller drops the image first
 void term_clear_inline(Term *t);              // blank the rows the block owns
@@ -564,6 +570,8 @@ typedef struct {
     bool    insert;            // a text field has focus: keys belong to the page
     bool    player;            // a media player has focus: the arrows are its own
     bool    mouse_down;        // a button went down on the page and is still held
+    bool    hover;             // pass moves with no button down to the page
+    bool    hovering;          // the page believes the pointer is over it
     bool    click_newtab;      // and it was the one that opens a link in a tab
     bool    vim;               // the vim layer, under the keys web.conf names
     int     vim_shadowed;      // and how many of it that file took back

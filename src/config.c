@@ -552,6 +552,7 @@ static const struct {
 } SETTINGS[] = {
     {"vim",           S_BOOL,     offsetof(App, vim)},
     {"pause-on-blur", S_BOOL,     offsetof(App, pause_on_blur)},
+    {"hover",         S_BOOL,     offsetof(App, hover)},
     {"status-line",   S_BOOL_NOT, offsetof(App, hide_status)},
     {"clear-on-exit", S_BOOL,     offsetof(App, clear_exit)},
     {"full",          S_BOOL_NOT, offsetof(App, inline_mode)},
