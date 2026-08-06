@@ -44,10 +44,13 @@ typedef struct {
     char  profile[512];
     WS    ws;
     int   next_id;
-    bool  marked;
+    char  marked[768];     // the drive file standing now, which window it is for
 } Win;
 
 static Win W = {.ws = {.fd = -1}};
+
+static bool cdp_do(const char *method, const char *params, Buf *reply,
+                   char *err, size_t errcap);
 
 // A copy, so a value read out of a session line survives the next read.
 static void field(const char *line, const char *key, char *out, size_t cap) {
@@ -109,19 +112,25 @@ static bool win_read(void) {
 // not. Chrome tells nobody who else is attached, so the driver is the only one
 // who can say.
 static void drive_release(void) {
-    if (!W.marked) return;
-    W.marked = false;
-    unlink(W.drive);
+    if (!W.marked[0]) return;
+    unlink(W.marked);
+    W.marked[0] = 0;
     if (W.pid > 0) kill(W.pid, SIGUSR1);
 }
 
+// Held against the window it is for, not once and for all: a client outlives
+// the windows it works, and one quit and opened again is a different window
+// with a different file to say so in. Marking the one that has gone leaves the
+// new one dark.
 static void drive_hold(void) {
-    if (W.marked || !W.drive[0] || W.pid <= 0) return;
+    if (!W.drive[0] || W.pid <= 0) return;
+    if (W.marked[0] && !strcmp(W.marked, W.drive)) return;
+    drive_release();
     FILE *f = fopen(W.drive, "w");
     if (!f) return;                        // an older window, with nowhere to say it
     fprintf(f, "%d\n", (int)getpid());
     fclose(f);
-    W.marked = true;
+    snprintf(W.marked, sizeof W.marked, "%s", W.drive);
     // The window is asleep in a poll: the signal is what makes it look now.
     kill(W.pid, SIGUSR1);
 }
@@ -165,6 +174,13 @@ static bool win_ready(char *err, size_t cap) {
             return false;
         }
         W.ws = (WS){.fd = fd};
+        // Nothing here subscribes to the page, but a navigation announcing
+        // itself is what tells a click it is not finished - and Page has to be
+        // enabled before it says anything at all.
+        char why[200];
+        Buf reply = {0};
+        cdp_do("Page.enable", "", &reply, why, sizeof why);
+        buf_free(&reply);
     }
     drive_hold();
     return true;
@@ -172,8 +188,15 @@ static bool win_ready(char *err, size_t cap) {
 
 // ---------------------------------------------------------------- devtools
 
+// The page saying it is about to go somewhere - a link, a form, a script - seen
+// while waiting for something else. A click sets the navigation off inside the
+// call that made it, so this news usually arrives before the answer to the
+// click does, and dropping it would lose the only warning there is.
+static bool g_going;
+
 // One devtools call, answered before we return. Events arriving meanwhile are
-// dropped: this process asks questions and nothing subscribes to anything.
+// dropped, apart from the one above: this process asks questions and subscribes
+// to nothing.
 static bool cdp_do(const char *method, const char *params, Buf *reply,
                    char *err, size_t errcap) {
     int id = ++W.next_id;
@@ -199,7 +222,11 @@ static bool cdp_do(const char *method, const char *params, Buf *reply,
             if (W.ws.closed) break;
             continue;
         }
-        if ((int)json_num(msg, "id", 0) != id) { W.ws.msg.len = 0; continue; }
+        if ((int)json_num(msg, "id", 0) != id) {
+            if (strstr(msg, "Page.frameRequestedNavigation")) g_going = true;
+            W.ws.msg.len = 0;
+            continue;
+        }
         buf_add(reply, msg, len);
         W.ws.msg.len = 0;
         return true;
@@ -207,6 +234,36 @@ static bool cdp_do(const char *method, const char *params, Buf *reply,
     win_drop();
     snprintf(err, errcap, "the page did not answer within %.0f seconds",
              CALL_SECS);
+    return false;
+}
+
+// What the page said while nobody was listening. Between calls this process
+// sits in getline and the socket fills up, so an action that wants to hear the
+// answer to itself starts by throwing away the answers to everything before.
+static void events_drop(void) {
+    g_going = false;
+    if (W.ws.fd < 0) return;
+    ws_fill(&W.ws);
+    char *msg;
+    size_t len;
+    while (ws_next(&W.ws, &msg, &len) == 1) W.ws.msg.len = 0;
+}
+
+static bool event_wait(const char *method, double secs) {
+    double deadline = now_sec() + secs;
+    while (now_sec() < deadline) {
+        struct pollfd p = {W.ws.fd, POLLIN, 0};
+        if (poll(&p, 1, 50) > 0 && ws_fill(&W.ws) < 0) return false;
+        char *msg;
+        size_t len;
+        if (ws_next(&W.ws, &msg, &len) != 1) {
+            if (W.ws.closed) return false;
+            continue;
+        }
+        bool hit = strstr(msg, method) != NULL;
+        W.ws.msg.len = 0;
+        if (hit) return true;
+    }
     return false;
 }
 
@@ -299,6 +356,42 @@ static bool want_target(const char *args, char *out, size_t cap,
     return false;
 }
 
+// Where the page settles, not where it was sent. An address is only the
+// request; what the agent needs back is what arrived, which after a redirect
+// is somewhere else entirely.
+static bool settle(Buf *out, char *err, size_t errcap) {
+    double deadline = now_sec() + 10.0;
+    for (;;) {
+        Buf state = {0};
+        bool ok = page_eval("document.readyState", &state, err, errcap);
+        bool done = ok && state.p && !strcmp(state.p, "complete");
+        buf_free(&state);
+        if (!ok) return false;
+        if (done || now_sec() > deadline) break;
+        struct timespec ts = {0, 200000000};
+        nanosleep(&ts, NULL);
+    }
+    return page_eval(
+        "document.title?document.title+' - '+location.href:location.href",
+        out, err, errcap);
+}
+
+// A click is not finished when the click returns. Whatever it set off commits
+// after it, and an agent told "clicked" acts on the next line against the page
+// it has just left - which is how a link is followed and then gone back from
+// before the page it went to ever existed. So if the page said it was going
+// somewhere, this waits until it has got there and says where that was.
+static void nav_after(Buf *out, char *err, size_t errcap) {
+    if (!g_going && !event_wait("Page.frameRequestedNavigation", 0.5)) return;
+    g_going = false;
+    if (!event_wait("Page.frameNavigated", 15.0)) return;
+    g_refs = 0;                          // another page: the old refs are lies
+    Buf where = {0};
+    if (settle(&where, err, errcap) && where.len)
+        buf_addf(out, ", now on %s", where.p);
+    buf_free(&where);
+}
+
 // ------------------------------------------------------------------ tools
 
 // Everything on the page worth acting on, one to a line: what it is, what a
@@ -386,6 +479,7 @@ static bool tool_click(const char *args, Buf *out, char *err, size_t errcap) {
     buf_addf(&js, "');if(!e)return 'gone';"
                   "e.scrollIntoView({block:'center'});"
                   "if(e.focus)e.focus();e.click();return 'ok'})()");
+    events_drop();
     bool ok = page_eval(js.p, &got, err, errcap);
     buf_free(&js);
     if (ok && strcmp(got.p ? got.p : "", "ok") != 0) {
@@ -393,7 +487,10 @@ static bool tool_click(const char *args, Buf *out, char *err, size_t errcap) {
                  sel);
         ok = false;
     }
-    if (ok) buf_addf(out, "clicked %s", sel);
+    if (ok) {
+        buf_addf(out, "clicked %s", sel);
+        nav_after(out, err, errcap);
+    }
     buf_free(&got);
     return ok;
 }
@@ -411,6 +508,7 @@ static const struct { const char *name; int code; const char *text; } KEYS[] = {
 };
 
 static bool send_key(const char *key, char *err, size_t errcap) {
+    events_drop();
     int code = 0;
     const char *text = "";
     for (size_t i = 0; i < sizeof KEYS / sizeof KEYS[0]; i++)
@@ -473,6 +571,7 @@ static bool tool_type(const char *args, Buf *out, char *err, size_t errcap) {
     if (json_has(args, "submit") && !strstr(args, "\"submit\":false")) {
         if (!send_key("Enter", err, errcap)) return false;
         buf_addf(out, "typed into %s and pressed Enter", sel);
+        nav_after(out, err, errcap);
         return true;
     }
     buf_addf(out, "typed into %s", sel);
@@ -485,25 +584,8 @@ static bool tool_press(const char *args, Buf *out, char *err, size_t errcap) {
     if (!key[0]) { snprintf(err, errcap, "say which key"); return false; }
     if (!send_key(key, err, errcap)) return false;
     buf_addf(out, "pressed %s", key);
+    nav_after(out, err, errcap);
     return true;
-}
-
-// Where the page settles, not where it was sent. An address is only the
-// request; what the agent needs back is what arrived, which after a redirect
-// is somewhere else entirely.
-static bool settle(Buf *out, char *err, size_t errcap) {
-    double deadline = now_sec() + 10.0;
-    for (;;) {
-        Buf state = {0};
-        bool ok = page_eval("document.readyState", &state, err, errcap);
-        bool done = ok && state.p && !strcmp(state.p, "complete");
-        buf_free(&state);
-        if (!ok) return false;
-        if (done || now_sec() > deadline) break;
-        struct timespec ts = {0, 200000000};
-        nanosleep(&ts, NULL);
-    }
-    return page_eval("document.title+' - '+location.href", out, err, errcap);
 }
 
 static bool tool_navigate(const char *args, Buf *out, char *err, size_t errcap) {
@@ -524,6 +606,44 @@ static bool tool_navigate(const char *args, Buf *out, char *err, size_t errcap) 
     if (!ok) return false;
     g_refs = 0;                          // another page: the old refs are lies
     return settle(out, err, errcap);
+}
+
+// Through the browser's own list rather than history.back(), for the reason
+// the window's own back key uses it: the list says when there is nowhere to go,
+// and a call into the page returns whether it moved or not.
+static bool step_history(int delta, Buf *out, char *err, size_t errcap) {
+    Buf reply = {0};
+    if (!cdp_do("Page.getNavigationHistory", "", &reply, err, errcap)) {
+        buf_free(&reply);
+        return false;
+    }
+    const char *arr = strstr(reply.p, "\"entries\":");
+    if (arr) { arr += 10; while (*arr == ' ') arr++; }
+    int want = (int)json_num(reply.p, "currentIndex", -1) + delta;
+    const char *e = (arr && want >= 0) ? json_array_at(arr, want) : NULL;
+    int entry = e ? (int)json_num(e, "id", -1) : -1;
+    buf_free(&reply);
+    if (entry < 0) {
+        snprintf(err, errcap, "nothing to go %s to", delta < 0 ? "back" : "forward");
+        return false;
+    }
+
+    Buf params = {0}, sent = {0};
+    buf_addf(&params, "\"entryId\":%d", entry);
+    bool ok = cdp_do("Page.navigateToHistoryEntry", params.p, &sent, err, errcap);
+    buf_free(&params);
+    buf_free(&sent);
+    if (!ok) return false;
+    g_refs = 0;                          // another page: the old refs are lies
+    return settle(out, err, errcap);
+}
+
+static bool tool_back(const char *args, Buf *out, char *err, size_t errcap) {
+    return step_history(-1, out, err, errcap);
+}
+
+static bool tool_forward(const char *args, Buf *out, char *err, size_t errcap) {
+    return step_history(+1, out, err, errcap);
 }
 
 static bool tool_read(const char *args, Buf *out, char *err, size_t errcap) {
@@ -702,6 +822,12 @@ static const char TOOLS[] =
 
 "{\"name\":\"new_tab\",\"description\":\"Open an address in a new tab of the "
 "window, leaving the current page where it is.\","
+
+"{\"name\":\"back\",\"description\":\"Go back in the tab's history.\","
+"\"inputSchema\":{\"type\":\"object\",\"properties\":{}}},"
+
+"{\"name\":\"forward\",\"description\":\"Go forward in the tab's history.\","
+"\"inputSchema\":{\"type\":\"object\",\"properties\":{}}},"
 "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
 "\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}},"
 
@@ -779,6 +905,8 @@ static void do_call(const char *id, const char *msg) {
     else if (!strcmp(name, "press"))    fn = tool_press;
     else if (!strcmp(name, "navigate")) fn = tool_navigate;
     else if (!strcmp(name, "new_tab"))  fn = tool_new_tab;
+    else if (!strcmp(name, "back"))     fn = tool_back;
+    else if (!strcmp(name, "forward"))  fn = tool_forward;
     else if (!strcmp(name, "read"))     fn = tool_read;
     else if (!strcmp(name, "eval"))     fn = tool_eval;
     else if (!strcmp(name, "wait"))     fn = tool_wait;

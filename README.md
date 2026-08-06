@@ -616,6 +616,7 @@ claude mcp add web -- web --mcp
 | `press` | Enter, Tab, Escape, Backspace, Delete, arrows, PageUp, PageDown, Home, End |
 | `navigate` | an address in the tab on screen |
 | `new_tab` | an address in a new tab of the window |
+| `back` / `forward` | the tab's own history |
 | `read` | the page as text |
 | `eval` | JavaScript in the page; promises are waited for |
 | `wait` | until a JavaScript expression is true |
@@ -635,8 +636,9 @@ web --record login.spec.ts example.com
 ```
 
 `alt+r` starts and stops it, and names the file `web-DATE-TIME.spec.ts` when
-`--record` did not. Clicks, typing, dropdowns, tick boxes, `enter`, and
-addresses opened by hand are recorded. The status line says `REC`.
+`--record` did not. Clicks, typing, dropdowns, tick boxes, `enter`, back and
+forward, and every address opened — typed in, or commanded by a driver over
+CDP, Playwright or `--mcp` — are recorded. The status line says `REC`.
 
 Locators are picked in this order:
 

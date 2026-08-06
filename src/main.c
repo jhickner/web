@@ -1787,6 +1787,7 @@ void navigate(App *a, const char *raw) {
     json_escape(esc, sizeof esc, url);
     app_cdp(a, "Page.navigate", "\"url\":\"%s\"", esc);
     a->loading = true;
+    a->nav_ours = true;
     // An address somebody asked for. A click that navigates writes itself down
     // as the click, and the page it lands on needs no line of its own.
     record_goto(a, url);
@@ -2196,7 +2197,7 @@ void nav_history(App *a, int delta) {
 // The `n`th element of the array at `arr`, or NULL when the array ends first.
 // Strings are stepped over whole, so a brace inside a url cannot be read as
 // the start of an element.
-static const char *json_array_at(const char *arr, int n) {
+const char *json_array_at(const char *arr, int n) {
     if (!arr || *arr != '[') return NULL;
     int depth = 0, idx = -1;
     for (const char *p = arr; *p; p++) {
@@ -2682,11 +2683,13 @@ static bool do_action(App *a, Event *ev, Act act) {
     case ACT_BACK:    nav_history(a, -1); return true;
     case ACT_FORWARD: nav_history(a, +1); return true;
     case ACT_RELOAD:
+        a->nav_ours = true;
         app_cdp(a, "Page.reload", "\"ignoreCache\":false");
         a->loading = true;
         notify(a, "reloading");
         return true;
     case ACT_RELOAD_HARD:
+        a->nav_ours = true;
         app_cdp(a, "Page.reload", "\"ignoreCache\":true");
         a->loading = true;
         notify(a, "reloading, cache ignored");
@@ -3094,7 +3097,34 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
             a->title[0] = 0;
             a->fit_w = 0;              // measured per page
             session_write(a);          // what anything attaching would look for
+            // Nobody here sent it and the page never asked to go: it was
+            // commanded from outside, by a driver or by an agent through --mcp.
+            // That is as much a step as a click is, and a spec that leaves it
+            // out opens on the wrong page and clicks at nothing.
+            if (!a->nav_ours && now_sec() - a->nav_asked > 15.0)
+                record_goto(a, a->url);
         }
+        // Consumed either way. A page says where it is going once per going,
+        // and a request left standing would swallow the next navigation - which
+        // is exactly the commanded one this is here to catch.
+        a->nav_ours = false;
+        a->nav_asked = 0;
+        return;
+    }
+
+    // The page saying where it is about to go, which is how a navigation it
+    // caused itself can be told from one it was given: a link, a form, a script
+    // setting location. A client calling Page.navigate announces nothing, and
+    // that silence is the whole signal.
+    if (strstr(msg, "Page.frameRequestedNavigation")) {
+        size_t n;
+        const char *f = json_str(msg, "frameId", &n);
+        // A frame inside the page going somewhere is not the page going
+        // somewhere, and an advert reloading itself must not stand in for it.
+        if (a->frame[0] && (!f || n != strlen(a->frame) ||
+                            memcmp(f, a->frame, n) != 0))
+            return;
+        a->nav_asked = now_sec();
         return;
     }
 
@@ -3326,6 +3356,8 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
                                         : "nothing to go forward to");
             return;
         }
+        record_history(a, a->hist_delta);
+        a->nav_ours = true;
         app_cdp(a, "Page.navigateToHistoryEntry", "\"entryId\":%d", entry);
         a->loading = true;
         return;

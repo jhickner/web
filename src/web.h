@@ -47,6 +47,9 @@ size_t      json_unescape(char *dst, size_t cap, const char *src, size_t n);
 // answered with anything else.
 const char *json_eval_str(const char *msg, size_t *len);
 
+// The `n`th element of a JSON array, or NULL when the array ends first.
+const char *json_array_at(const char *arr, int n);
+
 // ---------------------------------------------------------------- websocket
 
 typedef struct {
@@ -615,6 +618,8 @@ typedef struct {
     int     slowmo;            // ms between a driver's actions, so it can be watched
     bool    rec_on;            // driving the page is being written down as a spec
     char    rec_path[512];     // where it is being written
+    double  nav_asked;         // when the page last said it was going somewhere
+    bool    nav_ours;          // and whether this window is what sent it
     bool    freeze;            // a driver that fails holds the page where it failed
     bool    exec_paused;       // and is waiting to be let go of
     char    exec_note[160];    // what it said it was waiting about
@@ -889,6 +894,7 @@ void record_stop(App *a);
 void record_toggle(App *a);
 void record_event(App *a, const char *json);   // one interaction, from the page
 void record_goto(App *a, const char *url);
+void record_history(App *a, int delta);        // back, or forward
 void record_install(App *a, bool fresh);       // the watcher, into a new document
 
 // -------------------------------------------------------------------- mcp

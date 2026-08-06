@@ -164,6 +164,14 @@ void record_event(App *a, const char *json) {
     rec_add(a, line);
 }
 
+// Back and forward as the page's own history rather than as the address they
+// land on: a spec that says goBack still does the right thing when the page it
+// was recorded against changes what came before it.
+void record_history(App *a, int delta) {
+    if (!a->rec_on) return;
+    rec_add(a, delta < 0 ? "await page.goBack();" : "await page.goForward();");
+}
+
 // An address the window was told to go to. A click that navigates is already
 // recorded as the click, and the page arriving after it needs no line of its
 // own - so this is only ever what somebody typed, or was handed in.
