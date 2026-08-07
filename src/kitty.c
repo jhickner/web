@@ -19,6 +19,9 @@ static unsigned image_id_for(unsigned gen, int slot) {
 }
 #define PLACEMENT  1
 #define CHUNK      4096
+// tmux resets cursor and mouse modes once per passthrough DCS, so chunks share
+// a wrapper. A DCS over tmux's input-buffer-size is dropped whole; its floor is 1MB.
+#define WRAP_MAX   262144
 
 // unicode placeholder cell for an image chunk
 #define PLACEHOLDER_CP 0x10EEEEu
@@ -177,6 +180,7 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
     // q=2 suppresses terminal replies
     size_t off = 0;
     bool first = true;
+    size_t wrapped = 0;
     while (off < len) {
         size_t n = len - off;
         if (n > CHUNK) n = CHUNK;
@@ -190,15 +194,22 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
         else
             hn = snprintf(hdr, sizeof hdr, "\x1b_Gm=%d;", more);
 
-        esc_open(k);
+        size_t piece = (size_t)hn + n + 2;
+        if (wrapped && wrapped + piece > WRAP_MAX) {
+            esc_close(k);
+            wrapped = 0;
+        }
+        if (!wrapped) esc_open(k);
+
         esc_body(k, hdr, (size_t)hn);
         esc_raw(k, b64 + off, n);
         esc_body(k, "\x1b\\", 2);
-        esc_close(k);
+        wrapped += piece;
 
         off += n;
         first = false;
     }
+    if (wrapped) esc_close(k);
 
     char place[128];
     int pn = snprintf(place, sizeof place,
