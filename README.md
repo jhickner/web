@@ -1,6 +1,6 @@
 # web
 
-<img src="images/ss.png" width="530" alt="Hacker News rendered inline in a terminal, with a tab bar above the page">
+<img src="images/web.png" width="800" alt="A terminal split into panes, with web pages, a YouTube video, source code, and a shell all drawn side by side">
 
 Chrome in your terminal, with tabs, drawn inline as a window in the pane.
 
