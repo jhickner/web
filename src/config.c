@@ -669,18 +669,19 @@ static bool host_match(const char *host, const char *pat) {
     return h == n || host[h - n - 1] == '.';
 }
 
-// pause-on-blur / media-pause-on-blur, per host
-typedef struct { char host[96]; bool on; bool media; } PauseRule;
+// pause-on-blur / media-pause-on-blur / hide-on-blur, per host
+typedef enum { BLUR_PAUSE, BLUR_MEDIA, BLUR_HIDE } BlurKind;
+typedef struct { char host[96]; bool on; BlurKind kind; } PauseRule;
 #define PAUSE_MAX 32
 
 static PauseRule g_pause[PAUSE_MAX];
 static int       g_npause;
 
 // the `host = yes/no` half of the line
-static bool pause_add(const char *s, bool media) {
+static bool pause_add(const char *s, BlurKind kind) {
     const char *eq = strchr(s, '=');
     if (!eq || g_npause >= PAUSE_MAX) return false;
-    PauseRule r = {{0}, false, media};
+    PauseRule r = {{0}, false, kind};
     char val[16];
     if (!copy_field(r.host, sizeof r.host, s, eq)) return false;
     if (!copy_field(val, sizeof val, eq + 1, eq + 1 + strlen(eq + 1))) return false;
@@ -690,12 +691,13 @@ static bool pause_add(const char *s, bool media) {
     return true;
 }
 
-// what follows either keyword, NULL when the next thing is the `=`
-static const char *pause_keyword(const char *s, bool *media) {
+// what follows any of the keywords, NULL when the next thing is the `=`
+static const char *pause_keyword(const char *s, BlurKind *kind) {
     while (isspace((unsigned char)*s)) s++;
     size_t n;
-    if (!strncasecmp(s, "media-pause-on-blur", 19))  { *media = true;  n = 19; }
-    else if (!strncasecmp(s, "pause-on-blur", 13))   { *media = false; n = 13; }
+    if (!strncasecmp(s, "media-pause-on-blur", 19)) { *kind = BLUR_MEDIA; n = 19; }
+    else if (!strncasecmp(s, "pause-on-blur", 13))  { *kind = BLUR_PAUSE; n = 13; }
+    else if (!strncasecmp(s, "hide-on-blur", 12))   { *kind = BLUR_HIDE;  n = 12; }
     else return NULL;
     s += n;
     if (!isspace((unsigned char)*s)) return NULL;
@@ -703,21 +705,22 @@ static const char *pause_keyword(const char *s, bool *media) {
     return *s == '=' ? NULL : s;
 }
 
-static bool blur_rule(const char *url, bool media, bool *out) {
+static bool blur_rule(const char *url, BlurKind kind, bool *out) {
     if (!url || !*url || !g_npause) return false;
     char host[256];
     url_host(url, host, sizeof host);
     if (!host[0]) return false;
     for (int i = 0; i < g_npause; i++)
-        if (g_pause[i].media == media && host_match(host, g_pause[i].host)) {
+        if (g_pause[i].kind == kind && host_match(host, g_pause[i].host)) {
             *out = g_pause[i].on;
             return true;
         }
     return false;
 }
 
-bool pause_rule(const char *url, bool *out)  { return blur_rule(url, false, out); }
-bool media_rule(const char *url, bool *out)  { return blur_rule(url, true,  out); }
+bool pause_rule(const char *url, bool *out)  { return blur_rule(url, BLUR_PAUSE, out); }
+bool media_rule(const char *url, bool *out)  { return blur_rule(url, BLUR_MEDIA, out); }
+bool hide_rule(const char *url, bool *out)   { return blur_rule(url, BLUR_HIDE,  out); }
 
 const char *hint_selector(const char *url, bool skip) {
     if (!url || !*url || !g_nhints) return NULL;
@@ -803,11 +806,11 @@ static int read_config(const char *path, App *a, bool keys) {
             if (p == line || isspace((unsigned char)p[-1])) { *p = 0; break; }
         }
         // a host in front of the `=` makes the line that setting for that host
-        bool per_media = false;
-        const char *per = pause_keyword(line, &per_media);
+        BlurKind per_kind = BLUR_PAUSE;
+        const char *per = pause_keyword(line, &per_kind);
         if (per) {
             if (!keys) {
-                if (!pause_add(per, per_media)) {
+                if (!pause_add(per, per_kind)) {
                     fprintf(stderr, "web: %s:%d: `%s` is not a host and a yes or no\n",
                             path, lineno, per);
                     bad++;

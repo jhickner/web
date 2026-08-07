@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -569,13 +570,51 @@ static int hand_url(const char *url) {
 
 static void merge_forget(const char *profile, pid_t pid);
 
+// the claims directories only ever hold files
+static void dir_wipe(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char path[900];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        unlink(path);
+    }
+    closedir(d);
+    rmdir(dir);
+}
+
 static void session_forget(App *a) {
     if (!a->chrome.profile[0]) return;
     char path[700];
     session_file(a, path, sizeof path);
     unlink(path);
+    drive_file(a, path, sizeof path);
+    unlink(path);
+    claims_dir(a, path, sizeof path);
+    dir_wipe(path);
     handoff_take(a->chrome.profile, getpid(), NULL);
     merge_forget(a->chrome.profile, getpid());
+}
+
+// what windows that never got to clean up after themselves left behind
+static void driving_sweep(const char *profile) {
+    char dir[600];
+    snprintf(dir, sizeof dir, "%s/driving", profile);
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        int pid = atoi(e->d_name);          // <pid> to drive, <pid>.pages to claim
+        if (pid <= 0 || (pid_t)pid == getpid()) continue;
+        if (kill((pid_t)pid, 0) == 0 || errno != ESRCH) continue;
+        char path[900];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        if (strstr(e->d_name, ".pages")) dir_wipe(path);
+        else                             unlink(path);
+    }
+    closedir(d);
 }
 
 // one json object per line
@@ -637,6 +676,21 @@ static int running_windows(const char *profile, pid_t *out, int cap) {
     return n;
 }
 
+// a whole word in the command line, so a url holding the text does not count
+static bool has_arg(const char *line, const char *flag) {
+    size_t n = strlen(flag);
+    for (const char *p = strstr(line, flag); p; p = strstr(p + n, flag)) {
+        if (p > line && !isspace((unsigned char)p[-1])) continue;
+        if (p[n] == 0 || isspace((unsigned char)p[n])) return true;
+    }
+    return false;
+}
+
+// the modes that are not a window of their own: an mcp bridge drives one that
+// is already up, and the rest do their work and go
+static const char *NOT_WINDOW[] = {"--mcp", "--open", "--endpoint", "--list",
+                                   "--kill", "--help", "-h"};
+
 static int stuck_windows(pid_t *out, int cap, const pid_t *known, int nknown) {
     FILE *p = popen("ps -axww -o pid=,command= 2>/dev/null", "r");
     if (!p) return 0;
@@ -650,6 +704,10 @@ static int stuck_windows(pid_t *out, int cap, const pid_t *known, int nknown) {
         const char *base = strrchr(cmd, '/');
         base = base ? base + 1 : cmd;
         if (strcmp(base, "web") != 0) continue;
+        bool mode = false;
+        for (size_t i = 0; i < sizeof NOT_WINDOW / sizeof *NOT_WINDOW; i++)
+            if (has_arg(line, NOT_WINDOW[i])) mode = true;
+        if (mode) continue;
         bool seen = false;
         for (int i = 0; i < nknown; i++) if (known[i] == (pid_t)pid) seen = true;
         if (!seen) out[n++] = (pid_t)pid;
@@ -2025,9 +2083,15 @@ static const char KEY_CLAIMER[] =
     "if(ed(t)||pl(t))return;"
     "e.preventDefault();},true);})()";
 
+// a driver marks the window on every step it takes; the mark goes stale so an
+// idle one does not hold the window awake for as long as it happens to live
+#define DRIVE_FRESH 30.0
+
 static bool driver_attached(App *a) {
     char path[700];
     drive_file(a, path, sizeof path);
+    struct stat st;
+    if (stat(path, &st) != 0) return false;
     FILE *f = fopen(path, "r");
     if (!f) return false;
     int pid = 0;
@@ -2037,7 +2101,7 @@ static bool driver_attached(App *a) {
         unlink(path);
         return false;
     }
-    return true;
+    return now_sec() - (double)st.st_mtime < DRIVE_FRESH;
 }
 
 static bool being_driven(App *a) {
@@ -2061,8 +2125,15 @@ static bool picture_up(App *a) {
     return false;
 }
 
+static bool hiding(App *a) {
+    bool v;
+    if (a->no_pause_arg) return false;
+    if (hide_rule(a->url, &v)) return v;
+    return a->hide_on_blur;
+}
+
 static void hide_window(App *a) {
-    if (!a->hide_on_blur || a->hidden || !a->has_tty) return;
+    if (!hiding(a) || a->hidden || !a->has_tty) return;
     a->hidden = true;
     for (int i = GRID_MAX; i >= 0; i--) {
         if (!kitty_tile_live(&a->kitty, i)) continue;
@@ -2110,7 +2181,7 @@ static bool pausing(App *a) {
     bool v;
     if (a->no_pause_arg) return false;
     if (pause_rule(a->url, &v)) return v;
-    return a->pause_on_blur || a->hide_on_blur;
+    return a->pause_on_blur || hiding(a);
 }
 
 static bool media_pausing(App *a) {
@@ -3217,6 +3288,7 @@ static void usage(void) {
 }
 
 void session_init(App *a) {
+    if (a->chrome.profile[0]) driving_sweep(a->chrome.profile);
     app_cdp(a, "Page.enable", "");
     app_cdp(a, "Runtime.enable", "");
 

@@ -652,6 +652,9 @@ bool pause_rule(const char *url, bool *out);
 // the media-pause-on-blur rule for this page's host
 bool media_rule(const char *url, bool *out);
 
+// the hide-on-blur rule for this page's host
+bool hide_rule(const char *url, bool *out);
+
 // a tab going out of the front, and one arriving there
 void media_tab_leave(App *a);
 void media_tab_enter(App *a);

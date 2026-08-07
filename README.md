@@ -200,13 +200,14 @@ covers `news.ycombinator.com`; the first rule of each kind that matches wins.
 `hint-all` labels everything whatever the rules say — `gf` under the vim keys,
 bindable anywhere else.
 
-`pause-on-blur` and `media-pause-on-blur` each take a host in front of the `=`
-and apply to that host alone:
+`pause-on-blur`, `media-pause-on-blur` and `hide-on-blur` each take a host in
+front of the `=` and apply to that host alone:
 
 ```
 pause-on-blur       youtube.com = no
 media-pause-on-blur youtube.com = yes
 media-pause-on-blur twitch.tv   = no
+hide-on-blur        youtube.com = yes
 ```
 
 A host named here wins over the file-wide setting of the same name; written
@@ -325,9 +326,9 @@ bookmark to match it, the line is the host or the search it was before.
 
 Booleans also take `true`, `on` and `1`. Each setting is the command line
 option of the same name, which wins for that run; `motion-scale` and
-`still-delay` are this file only. `hint-only`, `hint-skip` and a `pause-on-blur`
-or `media-pause-on-blur` with a host in front of its `=` go in the same file,
-one per site — see [Site rules](#site-rules).
+`still-delay` are this file only. `hint-only`, `hint-skip` and a `pause-on-blur`,
+`media-pause-on-blur` or `hide-on-blur` with a host in front of its `=` go in
+the same file, one per site — see [Site rules](#site-rules).
 
 `motion-scale` and `still-delay` apply under `scale = auto` and nowhere else. A
 `still-delay` below about 100 ends a scroll in the middle of itself.
@@ -577,6 +578,11 @@ starting a browser:
 $ web --endpoint
 {"pid":4123,"name":"hn","port":9222,"cdp":"http://127.0.0.1:9222","target":"0A32…","url":"https://example.com/","title":"Example Domain","handoff":true,"drive":"…/driving/4123","freeze":""}
 ```
+
+`drive` is the file a driver writes its own pid to at each step it takes. While
+that file is fresh the window draws through a blur and leaves whatever is
+playing alone. A driver that has not touched it for 30 seconds lets the window
+pause on blur again; the next step it takes wakes it back up.
 
 `WEB_WINDOW` picks one of them for a driver, by pid or by the name `--name`
 gave it:
