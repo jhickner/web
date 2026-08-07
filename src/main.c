@@ -3208,6 +3208,8 @@ static void usage(void) {
         "              is not focused, instead of leaving the last frame up\n"
         "  --no-media-pause let a video or a track in the page go on playing\n"
         "              while the terminal is not focused\n"
+        "  --extension D  load the unpacked extension in folder D. Whatever\n"
+        "              sits in ~/.config/web/extensions is loaded anyway\n"
         "  --raw-keys  let a key the page did not want reach the window\n"
         "              system. On macOS that routes it through the menu bar,\n"
         "              which on some pages costs seconds of the thread every\n"
@@ -3392,6 +3394,7 @@ int main(int argc, char **argv) {
     a.pause_on_blur = true;
     a.media_pause_on_blur = true;
     a.hover = true;
+    a.extensions = true;
     a.claim_keys = true;
     a.exec_fd = -1;
     a.fit_width = true;
@@ -3521,6 +3524,8 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--no-media-pause")) {
             a.media_pause_on_blur = false;
             a.no_media_arg = true;
+        } else if (!strcmp(argv[i], "--extension") && i + 1 < argc) {
+            if (!ext_add(argv[++i])) return 1;
         } else if (!strcmp(argv[i], "--no-hover")) {
             a.hover = false;
         } else if (!strcmp(argv[i], "--login")) {
@@ -3551,6 +3556,8 @@ int main(int argc, char **argv) {
     if (hand_to_window) return hand_url(hand_to_window);
 
     a.status_open = !a.hide_status;
+
+    if (a.extensions) ext_scan();
 
     if (eval_js) {
         script_push(&a, eval_js);
@@ -3628,6 +3635,7 @@ int main(int argc, char **argv) {
              a.chrome.adopted ? "adopted" : "launched");
     if (chrome_attach(&a.chrome) < 0) { chrome_kill(&a.chrome); return 1; }
     term_log("%.3f attached", now_sec());
+    if (ext_count()) ext_load(&a.chrome);
     tabs_init(&a);
     if (a.has_tty && !a.shot_path && !a.script.drain_exit &&
         chrome_watch(&a.chrome) < 0)

@@ -21,10 +21,10 @@ static void out_line(App *a, const char *payload) {
         buf_add(&b, payload, strlen(payload));
         buf_add(&b, "\n", 1);
     }
-    if (a->shot_stdout)       writeall(STDERR_FILENO, b.p, b.len);
-    else if (!a->stdout_tty)  writeall(STDOUT_FILENO, b.p, b.len);
+    if (a->shot_stdout)                            writeall(STDERR_FILENO, b.p, b.len);
+    else if (!a->stdout_tty || s->drain_exit)      writeall(STDOUT_FILENO, b.p, b.len);
     if (a->console_open) console_log(a, payload);
-    else if (a->stdout_tty) notify(a, payload);
+    else if (a->stdout_tty && !s->drain_exit) notify(a, payload);
     buf_free(&b);
 }
 

@@ -476,6 +476,7 @@ static const struct {
     size_t      off;        // field in App
 } SETTINGS[] = {
     {"vim",           S_BOOL,     offsetof(App, vim)},
+    {"extensions",    S_BOOL,     offsetof(App, extensions)},
     {"pause-on-blur", S_BOOL,     offsetof(App, pause_on_blur)},
     {"hide-on-blur",  S_BOOL,     offsetof(App, hide_on_blur)},
     {"media-pause-on-blur", S_BOOL, offsetof(App, media_pause_on_blur)},

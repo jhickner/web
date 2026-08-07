@@ -373,7 +373,6 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
 
     argv[a++] = "--use-mock-keychain";
     argv[a++] = "--password-store=basic";
-    argv[a++] = "--disable-extensions";
     argv[a++] = "--disable-default-apps";
     argv[a++] = "--disable-client-side-phishing-detection";
     argv[a++] = "--disable-domain-reliability";
@@ -686,6 +685,21 @@ int chrome_watch(Chrome *c) {
         return -1;
     }
     TRACE("watching for pages on port %d", c->port);
+    return 0;
+}
+
+int chrome_browser_ws(Chrome *c, WS *out) {
+    if (c->port <= 0) return -1;
+    Buf resp = {0};
+    char path[256];
+    bool have = http_get(c->port, "/json/version", &resp) == 0 &&
+                ws_path_at(resp.p, path, sizeof path);
+    buf_free(&resp);
+    if (!have) return -1;
+    int fd = ws_connect("127.0.0.1", c->port, path);
+    if (fd < 0) return -1;
+    *out = (WS){0};
+    out->fd = fd;
     return 0;
 }
 

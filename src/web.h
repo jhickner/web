@@ -112,6 +112,10 @@ int  chrome_open_tab(Chrome *c, const char *url, char *out, size_t cap);
 int  chrome_watch(Chrome *c);
 void chrome_unwatch(Chrome *c);
 
+// a socket on the browser endpoint, for what belongs to no page. the caller
+// sends, reads and closes it.
+int  chrome_browser_ws(Chrome *c, WS *out);
+
 // move the session onto another page; a failure leaves it where it was
 int  chrome_switch_target(Chrome *c, const char *target);
 void chrome_close_id(Chrome *c, const char *target);
@@ -468,6 +472,8 @@ typedef struct {
     bool    hide_status;       // the status line is not wanted, ^G
     bool    status_open;       // whether it is on screen right now
 
+    bool    extensions;        // load what ~/.config/web/extensions holds
+
     bool    pause_on_blur;     // stop drawing while the terminal is not focused
     bool    hide_on_blur;      // and take the window off the screen with it
     bool    media_pause_on_blur;  // and stop whatever is playing in the page
@@ -649,6 +655,19 @@ bool pause_rule(const char *url, bool *out);
 
 // the media-pause-on-blur rule for this page's host
 bool media_rule(const char *url, bool *out);
+
+// -------------------------------------------------------------- extensions
+
+// an unpacked folder; false when it holds no manifest.json, already reported
+bool ext_add(const char *path);
+
+// every folder under ~/.config/web/extensions holding a manifest.json
+void ext_scan(void);
+void ext_dir(char *out, size_t cap);
+int  ext_count(void);
+
+// hands them to the browser; returns how many loaded
+int  ext_load(Chrome *c);
 
 // a tab going out of the front, and one arriving there
 void media_tab_leave(App *a);

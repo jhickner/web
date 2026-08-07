@@ -226,6 +226,20 @@ that is not the one in front.
 `--no-pause` turns all three off for the run whatever any of them say;
 `--no-media-pause` turns off the playing alone.
 
+## Extensions
+
+Every folder under `~/.config/web/extensions` holding a `manifest.json` is
+loaded, and `--extension D` loads one more. A folder is wanted, not a `.crx`,
+with `manifest.json` at its root:
+
+```sh
+curl -fsSLO https://github.com/uBlockOrigin/uBOL-home/releases/latest/download/uBOLite.chromium.zip
+unzip uBOLite.chromium.zip -d ~/.config/web/extensions/ubolite
+```
+
+`extensions = no` in `web.conf` leaves them all alone. Installing from the
+Chrome Web Store through `--login` does not carry to this window.
+
 ## The grid
 
 `alt+g` draws every tab at once, up to nine, each in a tile with its name under
@@ -300,6 +314,7 @@ bookmark to match it, the line is the host or the search it was before.
 | Setting | Default | Values | Description |
 |---|---|---|---|
 | `vim` | `no` | yes/no | the vim key layer, under whatever keys this file names |
+| `extensions` | `yes` | yes/no | load the unpacked extensions in `~/.config/web/extensions` — see [Extensions](#extensions) |
 | `pause-on-blur` | `yes` | yes/no | stop drawing while the terminal is not focused. A window being driven by `--exec` or a script draws either way |
 | `hide-on-blur` | `no` | yes/no | take the window off the screen while the terminal is not focused, instead of leaving the last frame up. Pauses as well, whatever `pause-on-blur` says |
 | `media-pause-on-blur` | `yes` | yes/no | pause whatever is playing in a page while the terminal is not focused, and while its tab is not the one in front; start it again on the way back. Only what it stopped itself starts again |
@@ -383,6 +398,7 @@ web [options] <url>...
 --rows N    how many cell rows the window gets (default 40)
 --cols N    how many cell columns the window gets (default 80, and
             never wider than the terminal)
+--extension D  load the unpacked extension in folder D
 --no-status start with the status line hidden (^G toggles it)
 --no-clear  leave the window on screen on exit instead of erasing it
 --full      take over the whole terminal instead of drawing a window
