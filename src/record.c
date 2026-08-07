@@ -141,9 +141,8 @@ void record_goto(App *a, const char *url) {
 
 // ------------------------------------------------------------------ on/off
 
-void record_install(App *a, bool fresh) {
+void record_install(App *a) {
     if (!a->rec_on) return;
-    (void)fresh;
     char esc[16384];
     json_escape(esc, sizeof esc, REC_WATCHER);
     app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
@@ -164,7 +163,7 @@ void record_start(App *a, const char *path) {
     }
     g_n = 0;
     a->rec_on = true;
-    record_install(a, false);
+    record_install(a);
     record_goto(a, a->url);
     char m[600];
     snprintf(m, sizeof m, "recording to %.500s", a->rec_path);

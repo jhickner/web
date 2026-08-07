@@ -2,18 +2,24 @@
 
 <img src="images/web.png" width="800" alt="A terminal split into panes, with web pages, a YouTube video, source code, and a shell all drawn side by side">
 
-Chrome in your terminal, with tabs, drawn inline as a window in the pane.
+Chrome in your terminal!
 
-`web` runs headless Chrome, streams the page over the DevTools protocol, and
-draws each frame with the kitty graphics protocol. Keyboard and mouse go back
-the other way, so pages are live: links click, forms type, wheels scroll. Tabs,
-history, bookmarks and logins are Chrome's own. Works in tmux.
+- runs headless chrome, and streams it into kitty graphics windows in
+your terminal (including tmux).
+- `--login` opens a real window with `web`'s profile, so you can use your
+logins
+- includes a tabs implementation that works in the terminal (with grid view,
+and a keybind to merge all tabs from all instances into the current window)
+- supports text entry, mouseovers, etc.
+- can be driven by JS, playwright, or MCP
+- history and bookmark support, with fuzzy search
 
-If you like running things in your terminal, check out these other projects:
+Some of my other projects that run in the terminal:
 - [rom](https://github.com/jhickner/rom) - a terminal game emulator (gba, snes, etc.)
 - [pix](https://github.com/jhickner/pix) - a terminal image viewer with grid layout
-- [vid](https://github.com/jhickner/vid) - a terminal video player with subtitle
-support
+- [vid](https://github.com/jhickner/vid) - a terminal video player with subtitle support
+- [piano](https://github.com/jhickner/piano) - a tiny piano, with playback and
+  pratice mode
 
 ## Quick start
 
@@ -200,13 +206,14 @@ covers `news.ycombinator.com`; the first rule of each kind that matches wins.
 `hint-all` labels everything whatever the rules say — `gf` under the vim keys,
 bindable anywhere else.
 
-`pause-on-blur` and `media-pause-on-blur` each take a host in front of the `=`
-and apply to that host alone:
+`pause-on-blur`, `media-pause-on-blur` and `hide-on-blur` each take a host in
+front of the `=` and apply to that host alone:
 
 ```
 pause-on-blur       youtube.com = no
 media-pause-on-blur youtube.com = yes
 media-pause-on-blur twitch.tv   = no
+hide-on-blur        youtube.com = yes
 ```
 
 A host named here wins over the file-wide setting of the same name; written
@@ -335,13 +342,14 @@ bookmark to match it, the line is the host or the search it was before.
 | `freeze` | `no` | yes/no | hold the page where a driver failed until `alt+enter` |
 | `grid` | `no` | yes/no | show the grid whenever there is more than one page |
 | `tmux-zoom` | `no` | yes/no | grow the window to fill the pane while tmux has it zoomed, and put its size back when the zoom ends |
+| `graphics-check` | `yes` | yes/no | ask the terminal whether it draws kitty graphics at startup, and exit with a message when it says no |
 | `search` | `https://www.google.com/search?q=%s` | an http url with `%s` | where a phrase goes when no bookmark matches it |
 
 Booleans also take `true`, `on` and `1`. Each setting is the command line
 option of the same name, which wins for that run; `motion-scale` and
-`still-delay` are this file only. `hint-only`, `hint-skip` and a `pause-on-blur`
-or `media-pause-on-blur` with a host in front of its `=` go in the same file,
-one per site — see [Site rules](#site-rules).
+`still-delay` are this file only. `hint-only`, `hint-skip` and a `pause-on-blur`,
+`media-pause-on-blur` or `hide-on-blur` with a host in front of its `=` go in
+the same file, one per site — see [Site rules](#site-rules).
 
 `motion-scale` and `still-delay` apply under `scale = auto` and nowhere else. A
 `still-delay` below about 100 ends a scroll in the middle of itself.
@@ -445,6 +453,8 @@ web [options] <url>...
             the terminal is not focused
 --no-hover  do not tell the page where the pointer is unless a button is
             down
+--no-graphics-check start even when the terminal does not answer the
+            kitty graphics question
 --raw-keys  let a key the page did not want reach the window system
 ```
 
@@ -465,7 +475,9 @@ web: 1 stranded browser holding the profile; web --kill ends it
 
 ```
 $ web --kill
-web: window 15902 is running but is not this profile's to end; kill 15902 if it is yours
+web: stopping 1 window
+web: stopping chrome 50596
+web: window 15902 belongs to profile work; left running
 ```
 
 ## Screenshots
@@ -590,6 +602,11 @@ starting a browser:
 $ web --endpoint
 {"pid":4123,"name":"hn","port":9222,"cdp":"http://127.0.0.1:9222","target":"0A32…","url":"https://example.com/","title":"Example Domain","handoff":true,"drive":"…/driving/4123","freeze":""}
 ```
+
+`drive` is the file a driver writes its own pid to at each step it takes. While
+that file is fresh the window draws through a blur and leaves whatever is
+playing alone. A driver that has not touched it for 30 seconds lets the window
+pause on blur again; the next step it takes wakes it back up.
 
 `WEB_WINDOW` picks one of them for a driver, by pid or by the name `--name`
 gave it:

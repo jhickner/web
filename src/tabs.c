@@ -339,13 +339,6 @@ void tabs_close_others(App *a) {
             chrome_close_id(&a->chrome, a->tabs[i].target);
 }
 
-bool tab_session_new(App *a) {
-    if (a->tab < 0 || a->tab >= a->ntabs) return true;
-    if (a->tabs[a->tab].inited) return false;
-    a->tabs[a->tab].inited = true;
-    return true;
-}
-
 // ------------------------------------------------------------------ paint
 
 void tabs_paint(App *a) {

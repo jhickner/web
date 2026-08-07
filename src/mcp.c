@@ -93,16 +93,17 @@ static void drive_release(void) {
     if (W.pid > 0) kill(W.pid, SIGUSR1);
 }
 
+// rewritten on every step, since the window lets the mark go stale
 static void drive_hold(void) {
     if (!W.drive[0] || W.pid <= 0) return;
-    if (W.marked[0] && !strcmp(W.marked, W.drive)) return;
-    drive_release();
+    bool held = W.marked[0] && !strcmp(W.marked, W.drive);
+    if (!held) drive_release();
     FILE *f = fopen(W.drive, "w");
     if (!f) return;
     fprintf(f, "%d\n", (int)getpid());
     fclose(f);
     snprintf(W.marked, sizeof W.marked, "%s", W.drive);
-    kill(W.pid, SIGUSR1);
+    if (!held) kill(W.pid, SIGUSR1);
 }
 
 static void bye(int sig) {

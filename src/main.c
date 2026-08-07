@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -569,13 +570,51 @@ static int hand_url(const char *url) {
 
 static void merge_forget(const char *profile, pid_t pid);
 
+// the claims directories only ever hold files
+static void dir_wipe(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char path[900];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        unlink(path);
+    }
+    closedir(d);
+    rmdir(dir);
+}
+
 static void session_forget(App *a) {
     if (!a->chrome.profile[0]) return;
     char path[700];
     session_file(a, path, sizeof path);
     unlink(path);
+    drive_file(a, path, sizeof path);
+    unlink(path);
+    claims_dir(a, path, sizeof path);
+    dir_wipe(path);
     handoff_take(a->chrome.profile, getpid(), NULL);
     merge_forget(a->chrome.profile, getpid());
+}
+
+// what windows that never got to clean up after themselves left behind
+static void driving_sweep(const char *profile) {
+    char dir[600];
+    snprintf(dir, sizeof dir, "%s/driving", profile);
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        int pid = atoi(e->d_name);          // <pid> to drive, <pid>.pages to claim
+        if (pid <= 0 || (pid_t)pid == getpid()) continue;
+        if (kill((pid_t)pid, 0) == 0 || errno != ESRCH) continue;
+        char path[900];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        if (strstr(e->d_name, ".pages")) dir_wipe(path);
+        else                             unlink(path);
+    }
+    closedir(d);
 }
 
 // one json object per line
@@ -637,7 +676,52 @@ static int running_windows(const char *profile, pid_t *out, int cap) {
     return n;
 }
 
-static int stuck_windows(pid_t *out, int cap, const pid_t *known, int nknown) {
+// a whole word in the command line, so a url holding the text does not count
+static bool has_arg(const char *line, const char *flag) {
+    size_t n = strlen(flag);
+    for (const char *p = strstr(line, flag); p; p = strstr(p + n, flag)) {
+        if (p > line && !isspace((unsigned char)p[-1])) continue;
+        if (p[n] == 0 || isspace((unsigned char)p[n])) return true;
+    }
+    return false;
+}
+
+// the modes that are not a window of their own: an mcp bridge drives one that
+// is already up, and the rest do their work and go
+static const char *NOT_WINDOW[] = {"--mcp", "--open", "--endpoint", "--list",
+                                   "--kill", "--help", "-h"};
+
+typedef struct { pid_t pid; char profile[80]; } Stray;
+
+// which profile's sessions dir holds this pid. false when no profile claims it,
+// which is the answer for a web process that is not a window at all: a fork on
+// its way out or to an exec still carries its parent's command line.
+static bool window_profile(pid_t pid, char *out, size_t cap) {
+    char base[400], path[1024];
+    web_cache_path(base, sizeof base);
+
+    snprintf(path, sizeof path, "%s/profile/sessions/%d.json", base, (int)pid);
+    if (access(path, F_OK) == 0) { snprintf(out, cap, "the shared profile"); return true; }
+
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/profiles", base);
+    DIR *d = opendir(dir);
+    if (!d) return false;
+    bool found = false;
+    struct dirent *e;
+    while (!found && (e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        snprintf(path, sizeof path, "%s/%s/sessions/%d.json", dir, e->d_name,
+                 (int)pid);
+        if (access(path, F_OK) != 0) continue;
+        snprintf(out, cap, "profile %s", e->d_name);
+        found = true;
+    }
+    closedir(d);
+    return found;
+}
+
+static int stuck_windows(Stray *out, int cap, const pid_t *known, int nknown) {
     FILE *p = popen("ps -axww -o pid=,command= 2>/dev/null", "r");
     if (!p) return 0;
     int n = 0;
@@ -650,9 +734,16 @@ static int stuck_windows(pid_t *out, int cap, const pid_t *known, int nknown) {
         const char *base = strrchr(cmd, '/');
         base = base ? base + 1 : cmd;
         if (strcmp(base, "web") != 0) continue;
+        bool mode = false;
+        for (size_t i = 0; i < sizeof NOT_WINDOW / sizeof *NOT_WINDOW; i++)
+            if (has_arg(line, NOT_WINDOW[i])) mode = true;
+        if (mode) continue;
         bool seen = false;
         for (int i = 0; i < nknown; i++) if (known[i] == (pid_t)pid) seen = true;
-        if (!seen) out[n++] = (pid_t)pid;
+        if (seen) continue;
+        if (!window_profile((pid_t)pid, out[n].profile, sizeof out[n].profile))
+            continue;
+        out[n++].pid = (pid_t)pid;
     }
     pclose(p);
     return n;
@@ -734,18 +825,18 @@ static int kill_everything(void) {
     int w = running_windows(profile, windows, PROC_MAX);
     for (int i = 0; i < w; i++) kill(windows[i], SIGTERM);
     if (w) {
-        printf("web: asked %d window%s to quit\n", w, w == 1 ? "" : "s");
+        printf("web: stopping %d window%s\n", w, w == 1 ? "" : "s");
         if (!wait_windows(profile, windows, w, 3.0)) {
             for (int i = 0; i < w; i++)
                 if (!window_gone(profile, windows[i])) {
-                    printf("web: window %d would not quit; ending it\n",
+                    printf("web: window %d did not exit; killed\n",
                            (int)windows[i]);
                     kill(windows[i], SIGKILL);
                 }
         }
     }
 
-    pid_t stray[PROC_MAX];
+    Stray stray[PROC_MAX];
     int s = stuck_windows(stray, PROC_MAX, windows, w);
 
     ChromeProc procs[PROC_MAX];
@@ -754,12 +845,12 @@ static int kill_everything(void) {
     for (int i = 0; i < n; i++) {
         pids[i] = procs[i].pid;
         kill(pids[i], SIGTERM);
-        printf("web: ending chrome %d\n", (int)pids[i]);
+        printf("web: stopping chrome %d\n", (int)pids[i]);
     }
     if (n && !wait_gone(pids, n, 5.0)) {
         for (int i = 0; i < n; i++)
             if (proc_alive(pids[i])) {
-                printf("web: chrome %d would not go; ending its group\n",
+                printf("web: chrome %d did not exit; killed its process group\n",
                        (int)pids[i]);
                 if (kill(-pids[i], SIGKILL) < 0) kill(pids[i], SIGKILL);
             }
@@ -774,14 +865,13 @@ static int kill_everything(void) {
         snprintf(path, sizeof path, "%s/web-keep", profile);
         unlink(path);
     } else if (!s) {
-        printf("web: nothing of its own was running\n");
+        printf("web: nothing running on this profile\n");
     }
 
     fflush(stdout);
     for (int i = 0; i < s; i++)
-        fprintf(stderr, "web: window %d is running but is not this profile's "
-                        "to end; kill %d if it is yours\n",
-                (int)stray[i], (int)stray[i]);
+        fprintf(stderr, "web: window %d belongs to %s; left running\n",
+                (int)stray[i].pid, stray[i].profile);
     return 0;
 }
 
@@ -2025,9 +2115,15 @@ static const char KEY_CLAIMER[] =
     "if(ed(t)||pl(t))return;"
     "e.preventDefault();},true);})()";
 
+// a driver marks the window on every step it takes; the mark goes stale so an
+// idle one does not hold the window awake for as long as it happens to live
+#define DRIVE_FRESH 30.0
+
 static bool driver_attached(App *a) {
     char path[700];
     drive_file(a, path, sizeof path);
+    struct stat st;
+    if (stat(path, &st) != 0) return false;
     FILE *f = fopen(path, "r");
     if (!f) return false;
     int pid = 0;
@@ -2037,7 +2133,7 @@ static bool driver_attached(App *a) {
         unlink(path);
         return false;
     }
-    return true;
+    return now_sec() - (double)st.st_mtime < DRIVE_FRESH;
 }
 
 static bool being_driven(App *a) {
@@ -2061,8 +2157,15 @@ static bool picture_up(App *a) {
     return false;
 }
 
+static bool hiding(App *a) {
+    bool v;
+    if (a->no_pause_arg) return false;
+    if (hide_rule(a->url, &v)) return v;
+    return a->hide_on_blur;
+}
+
 static void hide_window(App *a) {
-    if (!a->hide_on_blur || a->hidden || !a->has_tty) return;
+    if (!hiding(a) || a->hidden || !a->has_tty) return;
     a->hidden = true;
     for (int i = GRID_MAX; i >= 0; i--) {
         if (!kitty_tile_live(&a->kitty, i)) continue;
@@ -2110,7 +2213,7 @@ static bool pausing(App *a) {
     bool v;
     if (a->no_pause_arg) return false;
     if (pause_rule(a->url, &v)) return v;
-    return a->pause_on_blur || a->hide_on_blur;
+    return a->pause_on_blur || hiding(a);
 }
 
 static bool media_pausing(App *a) {
@@ -3210,6 +3313,8 @@ static void usage(void) {
         "              while the terminal is not focused\n"
         "  --extension D  load the unpacked extension in folder D. Whatever\n"
         "              sits in ~/.config/web/extensions is loaded anyway\n"
+        "  --no-graphics-check start even when the terminal does not answer\n"
+        "              the kitty graphics question\n"
         "  --raw-keys  let a key the page did not want reach the window\n"
         "              system. On macOS that routes it through the menu bar,\n"
         "              which on some pages costs seconds of the thread every\n"
@@ -3217,6 +3322,7 @@ static void usage(void) {
 }
 
 void session_init(App *a) {
+    if (a->chrome.profile[0]) driving_sweep(a->chrome.profile);
     app_cdp(a, "Page.enable", "");
     app_cdp(a, "Runtime.enable", "");
 
@@ -3238,26 +3344,23 @@ void session_init(App *a) {
         app_cdp(a, "Runtime.addBinding",
                  "\"name\":\"__webrec\",\"executionContextName\":\"%s\"",
                  WEB_WORLD);
-        bool fresh = tab_session_new(a);
-        hint_install(a, fresh);
-        if (fresh)
-            app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
-                     "\"source\":\"%s\",\"worldName\":\"%s\","
-                     "\"runImmediately\":true", esc, WEB_WORLD);
-        if (fresh) {
+        hint_install(a);
+        app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
+                 "\"source\":\"%s\",\"worldName\":\"%s\","
+                 "\"runImmediately\":true", esc, WEB_WORLD);
+        {
             char src[3072], hesc[6144];
             snprintf(src, sizeof src, WEB_HELPERS, (int)(a->script.timeout * 1000));
             json_escape(hesc, sizeof hesc, src);
             app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
                      "\"source\":\"%s\",\"runImmediately\":true", hesc);
         }
-        record_install(a, fresh);
-        if (a->claim_keys && fresh) {
+        record_install(a);
+        if (a->claim_keys) {
             json_escape(esc, sizeof esc, KEY_CLAIMER);
             app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
                      "\"source\":\"%s\",\"worldName\":\"%s\","
                      "\"runImmediately\":true", esc, WEB_WORLD);
-            json_escape(esc, sizeof esc, FOCUS_WATCHER);   // as the next call expects
         }
         json_escape(esc, sizeof esc, FOCUS_READ);
         app_req_note(a, app_cdp(a, "Runtime.evaluate",
@@ -3501,6 +3604,8 @@ int main(int argc, char **argv) {
             a.grid_auto = true;
         } else if (!strcmp(argv[i], "--tmux-zoom")) {
             a.tmux_zoom = true;
+        } else if (!strcmp(argv[i], "--no-graphics-check")) {
+            a.no_gfx_check = true;
         } else if (!strcmp(argv[i], "--search") && i + 1 < argc) {
             snprintf(a.search, sizeof a.search, "%s", argv[++i]);
         } else if (!strcmp(argv[i], "--record") && i + 1 < argc) {
@@ -3587,6 +3692,20 @@ int main(int argc, char **argv) {
 
     term_probe(&a.term);
     a.has_tty = isatty(a.term.fd);
+    if (a.has_tty && !a.no_gfx_check && !login &&
+        !term_graphics_ok(&a.term, getenv("TMUX") != NULL)) {
+        if (a.shot_path) {
+            a.has_tty = false;      // the picture still goes to the file
+        } else {
+            fprintf(stderr, "web: this terminal does not draw kitty graphics; "
+                            "run it in ghostty or kitty\n");
+            if (getenv("TMUX"))
+                fprintf(stderr, "web: in tmux it also needs "
+                                "`set -g allow-passthrough all`\n");
+            fprintf(stderr, "web: --no-graphics-check starts anyway\n");
+            return 1;
+        }
+    }
     a.stdout_tty = isatty(STDOUT_FILENO);
     a.shot_stdout = a.shot_path && !strcmp(a.shot_path, "-");
     if (a.shot_stdout && a.stdout_tty) {
