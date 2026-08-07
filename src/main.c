@@ -3746,7 +3746,9 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    bool early_url = a.ua[0] != 0;
+    // an extension is only there once the browser is up, and a page chrome
+    // opened for itself at launch loads before any of them
+    bool early_url = a.ua[0] != 0 && !ext_count();
     if (chrome_launch(&a.chrome, early_url ? first : "about:blank",
                       fw, fh, show, a.mute, a.ua, true, port) < 0)
         return 1;
