@@ -459,7 +459,9 @@ web: 1 stranded browser holding the profile; web --kill ends it
 
 ```
 $ web --kill
-web: window 15902 is running but is not this profile's to end; kill 15902 if it is yours
+web: stopping 1 window
+web: stopping chrome 50596
+web: window 15902 belongs to profile work; left running
 ```
 
 ## Screenshots

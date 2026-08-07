@@ -84,12 +84,16 @@ int chrome_probe(int port) {
 static char profile_name[64];
 static bool profile_temp;
 
-void chrome_profile_path(char *out, size_t cap) {
+void web_cache_path(char *out, size_t cap) {
     const char *home = getenv("HOME");
     const char *cache = getenv("XDG_CACHE_HOME");
+    if (cache && *cache) snprintf(out, cap, "%s/web", cache);
+    else snprintf(out, cap, "%s/.cache/web", home ? home : "/tmp");
+}
+
+void chrome_profile_path(char *out, size_t cap) {
     char base[400];
-    if (cache && *cache) snprintf(base, sizeof base, "%s/web", cache);
-    else snprintf(base, sizeof base, "%s/.cache/web", home ? home : "/tmp");
+    web_cache_path(base, sizeof base);
     if (profile_name[0]) snprintf(out, cap, "%s/profiles/%s", base, profile_name);
     else snprintf(out, cap, "%s/profile", base);
 }

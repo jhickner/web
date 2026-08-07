@@ -80,6 +80,7 @@ int  chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
                    bool mute, const char *user_agent, bool debug, int port);
 int  chrome_attach(Chrome *c);
 void chrome_profile_path(char *out, size_t cap);
+void web_cache_path(char *out, size_t cap);         // the dir every profile sits under
 
 // call before anything asks where the profile is. a name is letters, digits,
 // dot, underscore and dash; "-" is a throwaway one. -1 when the name is not one.

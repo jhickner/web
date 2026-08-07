@@ -691,7 +691,37 @@ static bool has_arg(const char *line, const char *flag) {
 static const char *NOT_WINDOW[] = {"--mcp", "--open", "--endpoint", "--list",
                                    "--kill", "--help", "-h"};
 
-static int stuck_windows(pid_t *out, int cap, const pid_t *known, int nknown) {
+typedef struct { pid_t pid; char profile[80]; } Stray;
+
+// which profile's sessions dir holds this pid. false when no profile claims it,
+// which is the answer for a web process that is not a window at all: a fork on
+// its way out or to an exec still carries its parent's command line.
+static bool window_profile(pid_t pid, char *out, size_t cap) {
+    char base[400], path[1024];
+    web_cache_path(base, sizeof base);
+
+    snprintf(path, sizeof path, "%s/profile/sessions/%d.json", base, (int)pid);
+    if (access(path, F_OK) == 0) { snprintf(out, cap, "the shared profile"); return true; }
+
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/profiles", base);
+    DIR *d = opendir(dir);
+    if (!d) return false;
+    bool found = false;
+    struct dirent *e;
+    while (!found && (e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        snprintf(path, sizeof path, "%s/%s/sessions/%d.json", dir, e->d_name,
+                 (int)pid);
+        if (access(path, F_OK) != 0) continue;
+        snprintf(out, cap, "profile %s", e->d_name);
+        found = true;
+    }
+    closedir(d);
+    return found;
+}
+
+static int stuck_windows(Stray *out, int cap, const pid_t *known, int nknown) {
     FILE *p = popen("ps -axww -o pid=,command= 2>/dev/null", "r");
     if (!p) return 0;
     int n = 0;
@@ -710,7 +740,10 @@ static int stuck_windows(pid_t *out, int cap, const pid_t *known, int nknown) {
         if (mode) continue;
         bool seen = false;
         for (int i = 0; i < nknown; i++) if (known[i] == (pid_t)pid) seen = true;
-        if (!seen) out[n++] = (pid_t)pid;
+        if (seen) continue;
+        if (!window_profile((pid_t)pid, out[n].profile, sizeof out[n].profile))
+            continue;
+        out[n++].pid = (pid_t)pid;
     }
     pclose(p);
     return n;
@@ -792,18 +825,18 @@ static int kill_everything(void) {
     int w = running_windows(profile, windows, PROC_MAX);
     for (int i = 0; i < w; i++) kill(windows[i], SIGTERM);
     if (w) {
-        printf("web: asked %d window%s to quit\n", w, w == 1 ? "" : "s");
+        printf("web: stopping %d window%s\n", w, w == 1 ? "" : "s");
         if (!wait_windows(profile, windows, w, 3.0)) {
             for (int i = 0; i < w; i++)
                 if (!window_gone(profile, windows[i])) {
-                    printf("web: window %d would not quit; ending it\n",
+                    printf("web: window %d did not exit; killed\n",
                            (int)windows[i]);
                     kill(windows[i], SIGKILL);
                 }
         }
     }
 
-    pid_t stray[PROC_MAX];
+    Stray stray[PROC_MAX];
     int s = stuck_windows(stray, PROC_MAX, windows, w);
 
     ChromeProc procs[PROC_MAX];
@@ -812,12 +845,12 @@ static int kill_everything(void) {
     for (int i = 0; i < n; i++) {
         pids[i] = procs[i].pid;
         kill(pids[i], SIGTERM);
-        printf("web: ending chrome %d\n", (int)pids[i]);
+        printf("web: stopping chrome %d\n", (int)pids[i]);
     }
     if (n && !wait_gone(pids, n, 5.0)) {
         for (int i = 0; i < n; i++)
             if (proc_alive(pids[i])) {
-                printf("web: chrome %d would not go; ending its group\n",
+                printf("web: chrome %d did not exit; killed its process group\n",
                        (int)pids[i]);
                 if (kill(-pids[i], SIGKILL) < 0) kill(pids[i], SIGKILL);
             }
@@ -832,14 +865,13 @@ static int kill_everything(void) {
         snprintf(path, sizeof path, "%s/web-keep", profile);
         unlink(path);
     } else if (!s) {
-        printf("web: nothing of its own was running\n");
+        printf("web: nothing running on this profile\n");
     }
 
     fflush(stdout);
     for (int i = 0; i < s; i++)
-        fprintf(stderr, "web: window %d is running but is not this profile's "
-                        "to end; kill %d if it is yours\n",
-                (int)stray[i], (int)stray[i]);
+        fprintf(stderr, "web: window %d belongs to %s; left running\n",
+                (int)stray[i].pid, stray[i].profile);
     return 0;
 }
 
