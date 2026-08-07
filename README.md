@@ -2,18 +2,24 @@
 
 <img src="images/web.png" width="800" alt="A terminal split into panes, with web pages, a YouTube video, source code, and a shell all drawn side by side">
 
-Chrome in your terminal, with tabs, drawn inline as a window in the pane.
+Chrome in your terminal!
 
-`web` runs headless Chrome, streams the page over the DevTools protocol, and
-draws each frame with the kitty graphics protocol. Keyboard and mouse go back
-the other way, so pages are live: links click, forms type, wheels scroll. Tabs,
-history, bookmarks and logins are Chrome's own. Works in tmux.
+- runs headless chrome, and streams it into kitty graphics windows in
+your terminal (including tmux).
+- `--login` opens a real window with `web`'s profile, so you can use your
+logins
+- includes a tabs implementation that works in the terminal (with grid view,
+and a keybind to merge all tabs from all instances into the current window)
+- supports text entry, mouseovers, etc.
+- can be driven by JS, playwright, or MCP
+- history and bookmark support, with fuzzy search
 
-If you like running things in your terminal, check out these other projects:
+Some of my other projects that run in the terminal:
 - [rom](https://github.com/jhickner/rom) - a terminal game emulator (gba, snes, etc.)
 - [pix](https://github.com/jhickner/pix) - a terminal image viewer with grid layout
-- [vid](https://github.com/jhickner/vid) - a terminal video player with subtitle
-support
+- [vid](https://github.com/jhickner/vid) - a terminal video player with subtitle support
+- [piano](https://github.com/jhickner/piano) - a tiny piano, with playback and
+  pratice mode
 
 ## Quick start
 
