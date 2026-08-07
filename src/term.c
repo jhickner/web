@@ -72,6 +72,77 @@ int term_probe(Term *t) {
     return 0;
 }
 
+// a=q asks whether the graphics protocol is there at all; the tmux form doubles
+// the payload's ESCs inside a passthrough wrapper, as every other one does
+#define GFX_Q      "\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\"
+#define GFX_Q_TMUX "\x1bPtmux;\x1b\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\x1b\\\x1b\\"
+
+static bool reply_ok(const char *b, size_t n) {
+    for (size_t i = 0; i + 3 < n; i++) {
+        if (b[i] != 0x1b || b[i + 1] != '_' || b[i + 2] != 'G') continue;
+        for (size_t j = i + 3; j < n; j++) {
+            if (b[j] == 0x1b) break;
+            if (b[j] != ';') continue;
+            return j + 2 < n && b[j + 1] == 'O' && b[j + 2] == 'K';
+        }
+    }
+    return false;
+}
+
+// CSI ? ... c
+static bool reply_da(const char *b, size_t n) {
+    for (size_t i = 0; i + 3 < n; i++) {
+        if (b[i] != 0x1b || b[i + 1] != '[' || b[i + 2] != '?') continue;
+        for (size_t j = i + 3; j < n; j++) {
+            if (b[j] == 'c') return true;
+            if (!((b[j] >= '0' && b[j] <= '9') || b[j] == ';')) break;
+        }
+    }
+    return false;
+}
+
+// A terminal that draws kitty graphics answers the query with OK. One that does
+// not answers only the device attributes question behind it, which is what tells
+// us the answer is in. Under tmux the reply travels back through the passthrough
+// while tmux answers the attributes itself, so there the whole window is waited
+// out. Nothing back at all is a link too slow to judge on, not a no.
+bool term_graphics_ok(Term *t, bool tmux) {
+    if (t->fd < 0) return true;
+
+    struct termios saved;
+    bool restore = tcgetattr(t->fd, &saved) == 0;
+    if (restore) {
+        struct termios raw = saved;
+        raw.c_lflag &= (tcflag_t)~(ECHO | ICANON);
+        raw.c_cc[VMIN] = 0;
+        raw.c_cc[VTIME] = 0;
+        tcsetattr(t->fd, TCSAFLUSH, &raw);
+    }
+
+    const char *q = tmux ? GFX_Q_TMUX : GFX_Q;
+    writeall(t->fd, q, strlen(q));
+    writeall(t->fd, "\x1b[c", 3);
+
+    char buf[1024];
+    size_t n = 0;
+    bool ok = false, da = false;
+    double deadline = now_sec() + (tmux ? 0.8 : 0.3);
+    while (!ok && (tmux || !da) && now_sec() < deadline && n < sizeof buf) {
+        struct pollfd p = {t->fd, POLLIN, 0};
+        if (poll(&p, 1, 20) <= 0) continue;
+        ssize_t r = read(t->fd, buf + n, sizeof buf - n);
+        if (r <= 0) continue;
+        n += (size_t)r;
+        ok = reply_ok(buf, n);
+        da = da || reply_da(buf, n);
+    }
+
+    if (restore) tcsetattr(t->fd, TCSAFLUSH, &saved);
+    term_log("graphics query: ok=%d attrs=%d, %zu bytes back", ok, da, n);
+    if (!ok && da) writeall(t->fd, "\r\x1b[2K", 5);   // wipe anything that echoed
+    return ok || !da;
+}
+
 void term_enter(Term *t, bool inline_mode) {
     if (tcgetattr(t->fd, &g_saved) == 0) {
         g_have_saved = true;

@@ -3208,6 +3208,8 @@ static void usage(void) {
         "              is not focused, instead of leaving the last frame up\n"
         "  --no-media-pause let a video or a track in the page go on playing\n"
         "              while the terminal is not focused\n"
+        "  --no-graphics-check start even when the terminal does not answer\n"
+        "              the kitty graphics question\n"
         "  --raw-keys  let a key the page did not want reach the window\n"
         "              system. On macOS that routes it through the menu bar,\n"
         "              which on some pages costs seconds of the thread every\n"
@@ -3498,6 +3500,8 @@ int main(int argc, char **argv) {
             a.grid_auto = true;
         } else if (!strcmp(argv[i], "--tmux-zoom")) {
             a.tmux_zoom = true;
+        } else if (!strcmp(argv[i], "--no-graphics-check")) {
+            a.no_gfx_check = true;
         } else if (!strcmp(argv[i], "--search") && i + 1 < argc) {
             snprintf(a.search, sizeof a.search, "%s", argv[++i]);
         } else if (!strcmp(argv[i], "--record") && i + 1 < argc) {
@@ -3580,6 +3584,20 @@ int main(int argc, char **argv) {
 
     term_probe(&a.term);
     a.has_tty = isatty(a.term.fd);
+    if (a.has_tty && !a.no_gfx_check && !login &&
+        !term_graphics_ok(&a.term, getenv("TMUX") != NULL)) {
+        if (a.shot_path) {
+            a.has_tty = false;      // the picture still goes to the file
+        } else {
+            fprintf(stderr, "web: this terminal does not draw kitty graphics; "
+                            "run it in ghostty or kitty\n");
+            if (getenv("TMUX"))
+                fprintf(stderr, "web: in tmux it also needs "
+                                "`set -g allow-passthrough all`\n");
+            fprintf(stderr, "web: --no-graphics-check starts anyway\n");
+            return 1;
+        }
+    }
     a.stdout_tty = isatty(STDOUT_FILENO);
     a.shot_stdout = a.shot_path && !strcmp(a.shot_path, "-");
     if (a.shot_stdout && a.stdout_tty) {

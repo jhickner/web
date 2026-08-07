@@ -255,6 +255,7 @@ typedef struct {
 } Term;
 
 int  term_probe(Term *t);                 // open the tty and measure it
+bool term_graphics_ok(Term *t, bool tmux); // does it speak kitty graphics
 void term_enter(Term *t, bool inline_mode); // raw mode, alt screen, mouse
 void term_hover(Term *t, bool on);        // report moves with no button down
 void term_reserve_inline(Term *t, int rows);
@@ -544,6 +545,7 @@ typedef struct {
 
     bool    has_tty;           // a real terminal to draw into
     bool    stdout_tty;        // fd 1 is that terminal
+    bool    no_gfx_check;      // start even when the terminal says it cannot draw
 
     int     exec_fd;           // --exec: the child's output, -1 when none
     pid_t   exec_pid;

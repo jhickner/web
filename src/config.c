@@ -496,6 +496,7 @@ static const struct {
     {"freeze",        S_BOOL,     offsetof(App, freeze)},
     {"grid",          S_BOOL,     offsetof(App, grid_auto)},
     {"tmux-zoom",     S_BOOL,     offsetof(App, tmux_zoom)},
+    {"graphics-check", S_BOOL_NOT, offsetof(App, no_gfx_check)},
     {"search",        S_TEXT,     offsetof(App, search)},
 };
 #define NSETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))

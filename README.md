@@ -320,6 +320,7 @@ bookmark to match it, the line is the host or the search it was before.
 | `freeze` | `no` | yes/no | hold the page where a driver failed until `alt+enter` |
 | `grid` | `no` | yes/no | show the grid whenever there is more than one page |
 | `tmux-zoom` | `no` | yes/no | grow the window to fill the pane while tmux has it zoomed, and put its size back when the zoom ends |
+| `graphics-check` | `yes` | yes/no | ask the terminal whether it draws kitty graphics at startup, and exit with a message when it says no |
 | `search` | `https://www.google.com/search?q=%s` | an http url with `%s` | where a phrase goes when no bookmark matches it |
 
 Booleans also take `true`, `on` and `1`. Each setting is the command line
@@ -429,6 +430,8 @@ web [options] <url>...
             the terminal is not focused
 --no-hover  do not tell the page where the pointer is unless a button is
             down
+--no-graphics-check start even when the terminal does not answer the
+            kitty graphics question
 --raw-keys  let a key the page did not want reach the window system
 ```
 
