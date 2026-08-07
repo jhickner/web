@@ -15,34 +15,13 @@ static bool g_have_saved = false;
 
 #define ENTER_UI  "\x1b[?1049h\x1b[?25l\x1b[2J"
 #define LEAVE_UI  "\x1b[?25h\x1b[?1049l"
-// Bracketed paste is what makes the terminal's own paste key usable: without
-// it a paste arrives as bare keystrokes, indistinguishable from typing, and a
-// newline in the middle of it would submit whatever it landed in.
-// 1004 is focus reporting: the terminal says when it gains and loses the
-// keyboard, which is the only way this side can know nobody is looking. Inside
-// tmux it needs `set -g focus-events on`, and a terminal that does not know the
-// mode simply never sends either sequence.
-// 1003 is the one mode that is asked for separately, because it is the one a
-// user may not want: it reports the pointer crossing the window with nothing
-// held down, which is a report per cell rather than a report per click, and
-// 1002 keeps working underneath it either way.
+// 1000/1002 mouse, 1006 sgr coords, 2004 bracketed paste, 1004 focus, 1003 hover
 #define MOUSE_ON  "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h"
 #define MOUSE_OFF "\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
 #define HOVER_ON  "\x1b[?1003h"
 #define HOVER_OFF "\x1b[?1003l"
 
-// Ask for kitty's key reporting, which is the only way a cmd chord can reach us
-// at all: the legacy encoding has no bit for super. A terminal that does not
-// know the sequence ignores it and keeps sending the legacy codes, so both
-// encodings have to stay readable either way.
-//
-// Flag 1 and no more. Asking for 8 as well - every key as an escape code - is
-// the only way the protocol will report a modifier on enter, since at 1 it
-// deliberately exempts enter, tab and backspace so that a crashed program
-// leaves a terminal you can still type `reset` into. It is not worth having:
-// inside tmux the request never reaches the terminal at all, which is where
-// this mostly runs, and outside it the exemption is there for a good reason.
-// Shift and enter are told apart below by the byte they arrive as instead.
+// kitty key reporting, flag 1 (disambiguate) only
 #define KBD_ON  "\x1b[>1u"
 #define KBD_OFF "\x1b[<u"
 
@@ -64,32 +43,18 @@ void term_size(Term *t) {
         t->cell_w = cw;
         t->cell_h = ch;
     }
-    // A terminal that reports no pixel geometry leaves nothing to measure -
-    // and so does one whose cell is too big to believe. The page is scaled into
-    // the cell rect either way, so the guess only needs to keep the aspect.
     bool guessed = t->cell_w <= 0 || t->cell_h <= 0 ||
                    t->cell_w > 64 || t->cell_h > 64;
     if (guessed) {
         t->cell_w = 8;
         t->cell_h = 17;
     }
-    // Worth saying out loud, because nothing downstream can tell the two apart
-    // and every size in the program is derived from this one. The raw report is
-    // logged beside it: a cell that fell back for being too tall is a different
-    // problem from one that was never reported at all.
     term_log("cell %dx%d (%s), winsize %dx%d px over %dx%d cells",
              t->cell_w, t->cell_h, guessed ? "guessed" : "measured",
              ws.ws_xpixel, ws.ws_ypixel, ws.ws_col, ws.ws_row);
 }
 
-// Measure the terminal without changing any of its state, so the viewport can
-// be sized before Chrome is told to open a window: a browser launched at the
-// wrong size lays the page out twice and paints a frame nobody wanted.
 int term_probe(Term *t) {
-    // Open the terminal by its real device path. On macOS poll() reports
-    // POLLNVAL for the /dev/tty clone device, so a descriptor from there can be
-    // written to but never reports readable - the app renders fine and ignores
-    // every keystroke.
     t->fd = -1;
     if (isatty(STDIN_FILENO)) {
         const char *name = ttyname(STDIN_FILENO);
@@ -98,7 +63,6 @@ int term_probe(Term *t) {
     if (t->fd < 0) t->fd = open("/dev/tty", O_RDWR);
     if (t->fd < 0) t->fd = STDIN_FILENO;
 
-    // Whatever we ended up with, it has to be pollable for reading.
     struct pollfd probe = {t->fd, POLLIN, 0};
     if (poll(&probe, 1, 0) >= 0 && (probe.revents & POLLNVAL)) {
         if (t->fd != STDIN_FILENO) close(t->fd);
@@ -125,8 +89,6 @@ void term_enter(Term *t, bool inline_mode) {
     fcntl(t->fd, F_SETFL, fl | O_NONBLOCK);
 
     t->inline_mode = inline_mode;
-    // Inline keeps the shell's screen and scrollback: the page becomes part of
-    // the session's history rather than taking the display over.
     writeall(t->fd, inline_mode ? "\x1b[?25l" : ENTER_UI,
              inline_mode ? 6 : strlen(ENTER_UI));
     writeall(t->fd, MOUSE_ON, strlen(MOUSE_ON));
@@ -140,12 +102,6 @@ void term_hover(Term *t, bool on) {
     writeall(t->fd, s, strlen(s));
 }
 
-// Scroll a block of rows into view and take the bottom of the screen for it.
-// The origin comes from the terminal height rather than a cursor-position
-// query, which tmux answers unreliably and which can swallow keystrokes.
-// Where the cursor is, asked of the terminal rather than assumed. Whatever else
-// arrives while the answer is on its way is kept: those are keystrokes, and the
-// block is being set up at exactly the moment someone is most likely to type.
 static int query_cursor_row(Term *t) {
     writeall(t->fd, "\x1b[6n", 4);
 
@@ -159,7 +115,7 @@ static int query_cursor_row(Term *t) {
         if (r <= 0) continue;
         n += (size_t)r;
 
-        // Look for CSI row ; col R anywhere in what has arrived so far.
+        // CSI row ; col R
         for (size_t i = 0; i + 2 < n; i++) {
             if (buf[i] != 0x1b || buf[i + 1] != '[') continue;
             size_t e = i + 2;
@@ -173,7 +129,7 @@ static int query_cursor_row(Term *t) {
             return row;
         }
     }
-    buf_add(&t->in, buf, n);       // no answer: none of it was for us to eat
+    buf_add(&t->in, buf, n);       // no answer
     return 0;
 }
 
@@ -185,11 +141,6 @@ void term_reserve_inline(Term *t, int rows) {
     writeall(t->fd, b.p, b.len);
     buf_free(&b);
 
-    // Climb back to the block's first row and ask where that turned out to be.
-    // Those newlines only scroll the screen if the cursor was already near the
-    // bottom of it; anywhere else they just walk down, and the block belongs
-    // where the cursor started - under the command that was just run - rather
-    // than pinned to the bottom edge.
     char up[32];
     int n = snprintf(up, sizeof up, "\x1b[%dA", rows);
     writeall(t->fd, up, (size_t)n);
@@ -200,28 +151,16 @@ void term_reserve_inline(Term *t, int rows) {
     t->inline_rows = rows;
 }
 
-// Blank every row the block owns. The placeholder cells are ordinary text, so
-// a window that narrows leaves its old right-hand edge behind until something
-// writes over it - and nothing else will.
 void term_clear_inline(Term *t) {
     if (!t->inline_mode || t->inline_rows < 1) return;
     char buf[32];
     for (int i = 0; i < t->inline_rows; i++) {
-        // A pane that just shrank leaves the block hanging off the bottom, and
-        // a cursor move past the last row lands on the last row: kept going, it
-        // would blank that one over and over and leave the rest behind.
         if (t->inline_origin + i > t->rows) break;
         int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[2K", t->inline_origin + i);
         writeall(t->fd, buf, (size_t)n);
     }
 }
 
-// Erase from the foot of the block to the end of the screen. Inline, the block
-// is the last thing on it, so whatever is under it is either nothing or
-// something we drew before it moved - an old status line, most often, left by a
-// pane that shrank far enough to push it past the bottom and then grew again to
-// bring it back. Those rows cannot be cleared as they go: by the time the
-// resize is known they are already in the terminal's history.
 void term_clear_below(Term *t) {
     if (!t->inline_mode || t->inline_rows < 1) return;
     int row = t->inline_origin + t->inline_rows;
@@ -231,9 +170,7 @@ void term_clear_below(Term *t) {
     writeall(t->fd, buf, (size_t)n);
 }
 
-// Regrow or shrink the reserved block in place. The caller drops the image
-// first: the rows it lives on are about to mean something else, and a picture
-// left addressed to them survives as a smear the terminal will not clean up.
+// caller must drop the image first
 void term_resize_inline(Term *t, int rows) {
     if (rows < 2) rows = 2;
     if (rows > t->rows) rows = t->rows;
@@ -243,8 +180,6 @@ void term_resize_inline(Term *t, int rows) {
     term_clear_inline(t);
     char buf[32];
 
-    // Shrinking keeps the origin and simply owns fewer rows. Scrolling the
-    // difference away instead would drag the shell's history up with it.
     if (rows < t->inline_rows) {
         t->inline_rows = rows;
         return;
@@ -256,20 +191,13 @@ void term_resize_inline(Term *t, int rows) {
     int extra = rows - t->inline_rows;
     for (int i = 0; i < extra; i++) writeall(t->fd, "\r\n", 2);
 
-    // Where the block ended up, worked out from how far past the last row we
-    // asked the terminal to go. Asking it directly means a cursor report, and
-    // that read would race the keystrokes still arriving.
     int overflow = bottom + extra - t->rows;
     if (overflow > 0) t->inline_origin -= overflow;
     if (t->inline_origin < 1) t->inline_origin = 1;
     t->inline_rows = rows;
 }
 
-// The two modes that outlive the process if nothing takes them back, written
-// with the one call that is safe to make from a signal handler. A window that
-// dies without this leaves the shell it lands back in reporting every mouse
-// move as a burst of escape codes, which looks like a broken terminal and is
-// one the user has to know to reset.
+// signal-handler safe
 void term_panic(int fd) {
     if (fd < 0) return;
     (void)!write(fd, KBD_OFF, sizeof KBD_OFF - 1);
@@ -281,9 +209,6 @@ void term_restore(Term *t, bool clear_inline) {
     writeall(t->fd, KBD_OFF, strlen(KBD_OFF));
     writeall(t->fd, MOUSE_OFF, strlen(MOUSE_OFF));
     if (t->inline_mode && clear_inline) {
-        // Wipe the block and hand its first row back: that is the row the
-        // command was run from, so the prompt returns where it left off and
-        // nothing of the window survives into the scrollback.
         char buf[32];
         for (int i = 0; i < t->inline_rows; i++) {
             int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[2K",
@@ -293,11 +218,6 @@ void term_restore(Term *t, bool clear_inline) {
         int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[?25h", t->inline_origin);
         writeall(t->fd, buf, (size_t)n);
     } else if (t->inline_mode) {
-        // Park the cursor on the row under the block and leave the picture on
-        // screen: that row is where the shell's next prompt lands, and the
-        // window it belongs under is the whole point of inline mode. Only a
-        // block sitting on the last row has nowhere below it to go, and there
-        // the newline scrolls one up to make the room.
         char buf[48];
         int below = t->inline_origin + t->inline_rows;
         int n = below > t->rows
@@ -312,7 +232,6 @@ void term_restore(Term *t, bool clear_inline) {
     buf_free(&t->in);
 }
 
-// Set WEB_DEBUG to record exactly what arrives from the terminal.
 #define TRACE_PATH "/tmp/web_input.log"
 
 static FILE *g_log;
@@ -320,15 +239,10 @@ static int   g_log_env_checked;
 
 bool term_tracing(void) { return g_log != NULL; }
 
-// The same log, turned on part way through a run instead of at the start of
-// one. A page that only misbehaves once something has been clicked is a page
-// whose whole log is the part before the click, so the switch matters as much
-// as the recording: opened for appending, because looking twice at the same
-// thing should add to the account rather than replace it.
 bool term_trace(int on) {
     if (on < 0) on = g_log ? 0 : 1;
     if (on && !g_log) {
-        g_log_env_checked = 1;          // this is the file, whatever the env said
+        g_log_env_checked = 1;
         g_log = fopen(TRACE_PATH, "a");
     } else if (!on && g_log) {
         fclose(g_log);
@@ -405,8 +319,7 @@ static int csi_tilde_key(int n) {
     }
 }
 
-// Decodes one event from the head of the buffer. Returns 1 when an event was
-// produced, 0 when more bytes are needed.
+// returns 1 when an event was produced, 0 when more bytes are needed
 int term_next(Term *t, Event *ev) {
     memset(ev, 0, sizeof *ev);
     const unsigned char *b = (const unsigned char *)t->in.p;
@@ -416,15 +329,7 @@ int term_next(Term *t, Event *ev) {
     if (b[0] != 0x1b) {
         unsigned char c = b[0];
         ev->type = EV_KEY;
-        // Return is 0x0d and shift+return is 0x0a, which is the one place the
-        // legacy encoding says anything about a modifier on enter at all: the
-        // terminals this runs in send the line feed for the shifted one, and
-        // through tmux - where the kitty protocol never arrives - it is the
-        // only way the two can be told apart. Anything else sending 0x0a means
-        // ctrl+j, which nothing here binds.
-        //
-        // A newline inside a paste never reaches this: a bracketed paste is
-        // taken whole, above, and delivered as text rather than as keys.
+        // 0x0d enter, 0x0a shift+enter
         if (c == 0x0d || c == 0x0a) {
             ev->key = KEY_ENTER;
             if (c == 0x0a) ev->mods |= MOD_SHIFT;
@@ -446,12 +351,11 @@ int term_next(Term *t, Event *ev) {
         if (n < clen) return 0;
         memcpy(ev->text, b, clen);
         ev->text[clen] = 0;
-        ev->key = c;              // ASCII keys keep their codepoint for bindings
+        ev->key = c;
         buf_consume(&t->in, clen);
         return 1;
     }
 
-    // ESC with nothing behind it: wait briefly, then call it a real Escape.
     if (n == 1) {
         if (t->esc_at == 0.0) t->esc_at = now_sec();
         if (now_sec() - t->esc_at < 0.05) return 0;
@@ -506,13 +410,10 @@ int term_next(Term *t, Event *ev) {
             ev->my = y;
             ev->motion = (code & 32) != 0;
             if (code & 64) {
-                // Buttons 4 to 7 are the wheel, and the last two of them are
-                // its horizontal pair rather than more of the vertical one.
+                // buttons 4-7 are the wheel, the last two horizontal
                 ev->button = 3 + (code & 3);
             } else if ((code & 3) == 3) {
-                // The fourth button is no button: a move with nothing held
-                // down. Told apart from the wheel above rather than after it,
-                // since the two are the same three bits.
+                // move with nothing held
                 ev->button = BTN_NONE;
             } else {
                 ev->button = code & 3;
@@ -528,10 +429,6 @@ int term_next(Term *t, Event *ev) {
     int p1 = 0, p2 = 0;
     sscanf((const char *)b + 2, "%d;%d", &p1, &p2);
 
-    // A bracketed paste is one event, however much text is inside it. Until the
-    // closing marker arrives the whole thing has to stay in the buffer: cut
-    // short it would be delivered as two pastes, and a paste split down the
-    // middle is worse than a paste that waits.
     if (final == '~' && p1 == 200) {
         static const char END[] = "\x1b[201~";
         const char *hay = t->in.p;
@@ -543,17 +440,14 @@ int term_next(Term *t, Event *ev) {
         size_t body = (size_t)(stop - (hay + seqlen));
         t->paste.len = 0;
         buf_add(&t->paste, hay + seqlen, body);
-        buf_add(&t->paste, "", 1);            // callers read it as a C string
+        buf_add(&t->paste, "", 1);            // NUL-terminate
         t->paste.len--;
         buf_consume(&t->in, seqlen + body + sizeof END - 1);
         ev->type = EV_PASTE;
         return 1;
     }
 
-    // Kitty's CSI u form. Once the disambiguating mode is on, everything
-    // carrying a modifier arrives this way, so this is not just the cmd path:
-    // ^L and alt+f come through here too and have to land on the same key and
-    // modifier pair the legacy branch below would have produced.
+    // kitty CSI u
     if (final == 'u') {
         int m = mods_from_param(p2);
         ev->type = EV_KEY;
@@ -563,22 +457,13 @@ int term_next(Term *t, Event *ev) {
         case 9:   ev->key = KEY_TAB; break;
         case 127: ev->key = KEY_BACKSPACE; break;
         default:
-            // Above the unicode range are the functional keys, which this
-            // build has no bindings for; the legacy forms still carry the ones
-            // it does use.
             if (p1 <= 0 || p1 >= 0x110000) { ev->key = KEY_NONE; break; }
             ev->key = p1;
-            // Kitty puts its functional keys in a private area of unicode
-            // rather than above it, so a terminal that reports them lands here
-            // rather than in the guard above: 57414 is the keypad's own enter
-            // and the rest are keys this build has no bindings for.
+            // kitty functional keys sit in the private use area; 57414 is keypad enter
             if (p1 >= 57344 && p1 <= 63743) {
                 ev->key = p1 == 57414 ? KEY_ENTER : KEY_NONE;
                 if (ev->key == KEY_NONE) break;
             }
-            // The protocol reports the unshifted key and a shift bit, but the
-            // rest of the app reads a shifted letter as its own key: G is a
-            // binding, shift+g is not.
             else if ((m & MOD_SHIFT) && p1 >= 'a' && p1 <= 'z') {
                 ev->key = p1 - 32;
                 m &= ~MOD_SHIFT;
@@ -595,8 +480,7 @@ int term_next(Term *t, Event *ev) {
         return ev->key != KEY_NONE;
     }
 
-    // Focus in and out. Two of the few CSIs with no parameters at all, so they
-    // have to be taken before the key table below reads one that is not there.
+    // focus in (CSI I) and out (CSI O), no parameters
     if (seqlen == 3 && (final == 'I' || final == 'O')) {
         ev->type = EV_FOCUS;
         ev->press = final == 'I';

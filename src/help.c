@@ -2,23 +2,11 @@
 #include <string.h>
 #include "web.h"
 
-// The key list, drawn over the picture rather than in a row of its own. The
-// image is placed through unicode placeholders, so a cell written as ordinary
-// text stops being part of it and shows the text: frames going on arriving
-// underneath repaint the image data and never touch these cells. Putting the
-// list away is redrawing the placeholders, which is what kitty_draw_png does
-// with a dirty grid.
-
 #define GAP 3          // columns between two columns of the list
 #define MAX_COLS 4
-#define MARGIN_Y 2     // rows of the picture left showing above and below the box
+#define MARGIN_Y 2     // rows left showing above and below the box
 
-// A row names the action or two it is about and the key column is looked up,
-// so the list draws whatever the config file has made of them rather than what
-// was true when it was written. `key` is for the few rows that are not a
-// binding at all. A row with none of the three is a heading; an empty one is a
-// blank. Kept as the display list itself so the columns below are a straight
-// slice of it.
+// `what` alone: a heading; all fields empty: a blank
 typedef struct {
     const char *key;
     Act         act, act2;
@@ -93,32 +81,25 @@ static const Bind BINDS[] = {
 };
 #define NBINDS ((int)(sizeof BINDS / sizeof BINDS[0]))
 
-// The rows that have a key to show, which is not all of them: an action left
-// unbound - and with `vim = no` that is most of the vi vocabulary - would draw
-// a row whose key column is a dash, and a screen of dashes says nothing about
-// what this keyboard actually does. A heading whose whole section went that way
-// goes with it, and the blank line before each surviving heading is put back
-// here rather than written down in the table.
+// the rows that have a key to show, with their headings and blanks
 static const Bind *g_list[NBINDS + 1];
 static int         g_nlist;
 
 #define LINES g_nlist
 
-// Where each column of the list begins, ending with the length so a column is
-// the pair of them. Columns are filled in order and then dealt out to pages.
+// start index of each column, ending with LINES
 static int g_colstart[NBINDS + 2];
 
 typedef struct {
     int x, y, w, h;        // the box, in 1-based cells
     int cols, rows;        // columns to a page, and rows in each
-    int ncols, pages;      // columns the list came to, and pages they fill
+    int ncols, pages;      // columns in the whole list, and pages they fill
     int colw, keyw;
 } Shape;
 
 static int g_keyw, g_descw;
 
-// The key column of a row, worked out now rather than written down. NULL for a
-// heading or a blank, which have no column of their own.
+// NULL for a heading or a blank; otherwise e->key or buf
 static const char *entry_key(const Bind *e, char *buf, size_t cap) {
     if (e->key) return e->key;
     if (!e->act) return NULL;
@@ -133,8 +114,6 @@ static const char *entry_key(const Bind *e, char *buf, size_t cap) {
     return buf;
 }
 
-// Whether anything is bound to the row at all. A row naming two actions earns
-// its place if either of them has a key.
 static bool row_live(const Bind *e) {
     char buf[48];
     if (e->key || !e->act) return true;          // a heading, a blank, or a note
@@ -164,20 +143,14 @@ static bool is_blank(int i) {
     return !g_list[i]->key && !g_list[i]->act && !g_list[i]->what;
 }
 
-// Breaks the list into columns `rows` tall, each opening on a heading: a
-// section that will not fit in what is left of a column starts the next one,
-// since a heading parted from the keys under it reads as a stray line rather
-// than as a title. The blank between two sections is already in the list, so a
-// column stays a straight slice of it; one that lands at the foot of a column
-// is drawn over by the clipping below. A section too tall to stand alone is cut
-// across as many columns as it takes.
+// breaks the list into columns `rows` tall, each opening on a heading
 static int layout(int rows) {
     int n = 0, used = 0;
     for (int i = 0; i < LINES; ) {
         int start = i, len = 0;
         while (i < LINES && !is_blank(i)) { i++; len++; }
         while (i < LINES && is_blank(i)) i++;
-        bool tall = len > rows;    // taller than any column, so it is cut anyway
+        bool tall = len > rows;    // taller than any column
         if (!n || (tall ? used + 3 > rows : used + 1 + len > rows)) {
             g_colstart[n++] = start;
             used = len;
@@ -195,8 +168,6 @@ static int layout(int rows) {
     return n;
 }
 
-// The rows of a column that are drawn, which is what lies between its start and
-// the next column's, less any blank left at the foot of it.
 static int col_height(int c, int rows) {
     int h = g_colstart[c + 1] - g_colstart[c];
     if (h > rows) h = rows;
@@ -217,9 +188,6 @@ static void measure(void) {
     }
 }
 
-// Where the box lands and how the list is broken up to fill it. The picture's
-// own rect, not the terminal's: inline the window is narrower than the screen,
-// and a list running past its edge reads as part of the shell.
 static bool shape(App *a, Shape *s) {
     Term *t = &a->term;
     int rx = a->kitty.x > 0 ? a->kitty.x : 1;
@@ -231,18 +199,12 @@ static bool shape(App *a, Shape *s) {
 
     int avail_w = rw - 4, avail_h = rh - 2;
     if (avail_w < 20 || avail_h < 1) return false;
-    // A box the height of the window reads as the window rather than as
-    // something laid over it. The margin is given up as soon as the list has
-    // too little left to stand in.
     if (avail_h - 2 * MARGIN_Y >= 8) avail_h -= 2 * MARGIN_Y;
 
     measure();
     int colw = g_keyw + 2 + g_descw;
     if (colw > avail_w) colw = avail_w;
 
-    // As many columns as fit sideways, and the columns the list breaks into in
-    // the height there is. Anything past one page's worth is paged through, and
-    // the pages are given an even share rather than a full one and a stub.
     int maxn = 1;
     while (maxn < MAX_COLS && (maxn + 1) * colw + maxn * GAP <= avail_w) maxn++;
 
@@ -250,8 +212,6 @@ static bool shape(App *a, Shape *s) {
     int pages = (ncols + maxn - 1) / maxn;
     int n = (ncols + pages - 1) / pages;
 
-    // No taller than the tallest column has something to put in it, which is
-    // the same on every page, so paging does not resize the box.
     int rows = 1;
     for (int c = 0; c < ncols; c++) {
         int h = col_height(c, avail_h);
@@ -315,9 +275,6 @@ static void border(Buf *b, const char *l, const char *r, const char *label, int 
     buf_addf(b, "%s\x1b[0m", r);
 }
 
-// The line under the list, with a dot for each page in the middle of it and the
-// one on show filled in. One page has nothing to say, so it gets a plain line;
-// a box too narrow for a row of dots gets the count in figures instead.
 static void bottom(Buf *b, int w, int page, int pages) {
     char num[24] = "";
     int mid = pages > 1 ? 2 * pages + 1 : 0;    // the dots, a space either side
@@ -374,10 +331,6 @@ void help_paint(App *a) {
     buf_add(&b, "\x1b[?25l", 6);
     a->help_buf = b;
 
-    // The same guard the status line and the console use, plus the count of
-    // grids kitty has laid down: a grid redrawn under an open list has just
-    // covered it over with placeholders, and the bytes to put it back are the
-    // ones already in the buffer.
     if (b.len == a->help_last.len && a->help_grid == a->kitty.grid_draws &&
         (b.len == 0 || memcmp(b.p, a->help_last.p, b.len) == 0))
         return;
@@ -395,8 +348,6 @@ void help_toggle(App *a) {
     a->help_page = 0;
     a->help_last.len = 0;
     if (!a->help_open) {
-        // The list lives in the cells that carry the picture, so taking it away
-        // is putting those cells back and asking for a frame to land in them.
         a->kitty.grid_dirty = true;
         a->last_hash = 0;
         relayout(a);
@@ -405,11 +356,7 @@ void help_toggle(App *a) {
 
 bool help_key(App *a, Event *ev) {
     if (!a->help_open || ev->type != EV_KEY) return false;
-    // The keys that move the page move the list, so whatever they were changed
-    // to turns these pages too. The arrows and the space bar do it whether
-    // anything is bound to them or not, since the dots ask for them by name.
     Act act = keys_lookup(ev->mods, ev->key);
-    // Quit still means quit, from here as much as from anywhere else.
     if (act == ACT_QUIT) return false;
 
     Shape s;
@@ -423,7 +370,6 @@ bool help_key(App *a, Event *ev) {
         case ACT_PAGE_DOWN:    case ACT_HALF_DOWN:  d = 1;  break;
         case ACT_SCROLL_LEFT:  case ACT_SCROLL_UP:   case ACT_LINE_UP:
         case ACT_PAGE_UP:      case ACT_HALF_UP:    d = -1; break;
-        // One press, not two: there is nothing else here for `g` to start.
         case ACT_TOP:    a->help_page = 0;            return true;
         case ACT_BOTTOM: a->help_page = s.pages - 1;  return true;
         default: break;

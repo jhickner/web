@@ -5,12 +5,9 @@
 #include <unistd.h>
 #include "web.h"
 
-// Chrome's `Bookmarks` file in the profile: read whole, edited as text so
-// fields this does not know about survive, written back.
-
 #define CHROME_EPOCH 11644473600.0   // seconds between 1601-01-01 and the unix one
 
-// Chrome's own root GUIDs, for the file it writes when nothing is bookmarked.
+// empty bookmarks file, with chrome's root guids
 static const char EMPTY_FILE[] =
 "{\n"
 "   \"roots\": {\n"
@@ -41,7 +38,7 @@ static const char EMPTY_FILE[] =
 
 static Bookmark g_marks[BOOKMARK_MAX];
 static int      g_n;
-static long     g_maxid;      // the largest node id in the file, for the next one
+static long     g_maxid;      // largest node id in the file
 
 static void bookmarks_path(char *out, size_t cap) {
     char profile[512];
@@ -61,7 +58,7 @@ static char *read_file(const char *path, size_t *len) {
     if (bad) { buf_free(&b); return NULL; }
     if (!b.p) buf_add(&b, "", 0);
     *len = b.len;
-    return b.p;                 // the caller frees it
+    return b.p;                 // caller frees
 }
 
 // ------------------------------------------------------------------- json
@@ -71,8 +68,8 @@ static const char *skip_ws(const char *p) {
     return p;
 }
 
-// Past the value at `p`. `p += (*p == '\\' && p[1]) ? 2 : 1` steps over an
-// escaped quote inside a string, so a brace in a title is not counted as one.
+// past the value at `p`; the `p += (*p == '\\' && p[1]) ? 2 : 1` steps over an
+// escaped quote inside a string
 static const char *val_end(const char *p) {
     p = skip_ws(p);
     if (*p == '"') {
@@ -99,8 +96,7 @@ static const char *val_end(const char *p) {
     return p;
 }
 
-// Whether the text is one whole object with nothing after it. val_end stops at
-// the end of a truncated file without saying so; this refuses that file.
+// true when the text is one whole object with nothing after it
 static bool json_whole(const char *p) {
     int depth = 0;
     p = skip_ws(p);
@@ -121,8 +117,7 @@ static bool json_whole(const char *p) {
     return false;
 }
 
-// Where `key` is written in the object at `obj`, at its opening quote, or NULL.
-// This object's own keys only, not a child's and not one inside a string.
+// this object's own keys only; returns the key's opening quote, or NULL
 static const char *obj_key(const char *obj, const char *key) {
     const char *p = skip_ws(obj);
     if (*p != '{') return NULL;
@@ -143,7 +138,6 @@ static const char *obj_key(const char *obj, const char *key) {
     }
 }
 
-// The value of that key.
 static const char *obj_get(const char *obj, const char *key) {
     const char *at = obj_key(obj, key);
     if (!at) return NULL;
@@ -151,7 +145,7 @@ static const char *obj_get(const char *obj, const char *key) {
     return *p == ':' ? skip_ws(p + 1) : NULL;
 }
 
-// A string value, unescaped into `out`.
+// string value, unescaped into `out`
 static void obj_str(const char *obj, const char *key, char *out, size_t cap) {
     out[0] = 0;
     const char *v = obj_get(obj, key);
@@ -161,7 +155,7 @@ static void obj_str(const char *obj, const char *key, char *out, size_t cap) {
     json_unescape(out, cap, v + 1, (size_t)(e - v - 2));
 }
 
-// Chrome's microseconds from 1601, as a string, out as unix seconds.
+// chrome's microseconds from 1601, as a string, out as unix seconds
 static double obj_time(const char *obj, const char *key) {
     char t[32];
     obj_str(obj, key, t, sizeof t);
@@ -208,7 +202,7 @@ static void walk_node(const char *node) {
     if (b->url[0]) g_n++;
 }
 
-// Newest first, which is not the order the bar is arranged in.
+// newest first
 static int by_added(const void *x, const void *y) {
     const Bookmark *a = x, *b = y;
     if (a->added > b->added) return -1;
@@ -216,7 +210,7 @@ static int by_added(const void *x, const void *y) {
     return 0;
 }
 
-static bool g_roots;      // the file parsed, so it is one to write back to
+static bool g_roots;      // the file parsed
 
 static char *load(size_t *len) {
     char path[600];
@@ -228,8 +222,6 @@ static char *load(size_t *len) {
     g_roots = false;
     if (!text) { if (len) *len = 0; return NULL; }
     if (!json_whole(text)) { if (len) *len = n; return text; }
-    // Every root the file has, not the three by name: `managed` and `trash`
-    // turn up in some profiles.
     const char *roots = obj_get(text, "roots");
     const char *p = roots ? skip_ws(roots) : NULL;
     if (p && *p == '{') {
@@ -259,8 +251,6 @@ const Bookmark *bookmarks_all(int *n) {
     return g_marks;
 }
 
-// Held between draws: the status line asks on every one, and the answer is a
-// file read. Recomputed when the address changes and when a toggle clears it.
 static char g_cur[1024];
 static bool g_cur_known, g_cur_marked;
 
@@ -279,7 +269,6 @@ bool bookmark_current(App *a) {
 
 // -------------------------------------------------------------------- writing
 
-// Beside the file and renamed over it, never written in place.
 static bool write_file(const char *body, size_t len) {
     char path[600], tmp[620];
     bookmarks_path(path, sizeof path);
@@ -292,8 +281,6 @@ static bool write_file(const char *body, size_t len) {
     return true;
 }
 
-// Chrome's checksum, dropped so it recomputes: to the browser a missing one and
-// a wrong one mean the same thing.
 static void drop_checksum(Buf *b) {
     const char *k = obj_key(b->p, "checksum");
     if (!k) return;
@@ -306,8 +293,7 @@ static void drop_checksum(Buf *b) {
     b->len -= to - at;
 }
 
-// A version 4 UUID, which is what Chrome names a node with. The two masks set
-// the version and variant bits the format requires.
+// version 4 uuid; the two masks set the version and variant bits
 static void make_guid(char *out, size_t cap) {
     unsigned char r[16];
     int fd = open("/dev/urandom", O_RDONLY);
@@ -325,7 +311,7 @@ static void make_guid(char *out, size_t cap) {
              r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15]);
 }
 
-// A node in the shape Chrome writes them, indented for the end of the bar.
+// a node in the shape chrome writes them, indented for the end of the bar
 static void node_text(Buf *out, const App *a) {
     char guid[40];
     make_guid(guid, sizeof guid);
@@ -342,7 +328,7 @@ static void node_text(Buf *out, const App *a) {
     buf_addf(out, "\"\n         }");
 }
 
-// The `]` of the bookmark bar's children, which is where a new node goes.
+// returns the `]` of the bookmark bar's children
 static const char *bar_end(const char *text, bool *empty) {
     const char *roots = obj_get(text, "roots");
     const char *bar = roots ? obj_get(roots, "bookmark_bar") : NULL;
@@ -355,8 +341,7 @@ static const char *bar_end(const char *text, bool *empty) {
     return e - 1;                               // the `]` itself
 }
 
-// The node with this address, in any folder. Walked rather than searched for in
-// the text: a brace in a title would put the wrong bytes up for cutting.
+// the node with this url, in any folder
 static const char *find_node(const char *node, const char *url, const char **end) {
     char type[16];
     obj_str(node, "type", type, sizeof type);
@@ -383,7 +368,6 @@ static const char *find_node(const char *node, const char *url, const char **end
     return node;
 }
 
-// The same, over every root the file has.
 static const char *find_in_roots(const char *text, const char *url, const char **end) {
     const char *roots = obj_get(text, "roots");
     const char *p = roots ? skip_ws(roots) : NULL;
@@ -423,15 +407,14 @@ void bookmark_toggle(App *a) {
         buf_add(&b, text, len);
     } else {
         buf_add(&b, EMPTY_FILE, sizeof EMPTY_FILE - 1);
-        g_maxid = 3;            // the ids its three roots use
+        g_maxid = 3;            // the three root ids
     }
     free(text);
 
     const char *end = NULL;
     const char *node = find_in_roots(b.p, a->url, &end);
     if (node) {
-        // The node and the comma on one side of it: the one before it, or the
-        // one after when it was first in the array.
+        // cut the node and the comma on one side of it
         size_t at = (size_t)(node - b.p), to = (size_t)(end - b.p);
         while (at > 0 && (b.p[at - 1] == ' ' || b.p[at - 1] == '\n')) at--;
         if (at > 0 && b.p[at - 1] == ',') at--;

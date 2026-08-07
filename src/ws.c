@@ -11,9 +11,6 @@
 #include <unistd.h>
 #include "web.h"
 
-// A websocket client just large enough for CDP over loopback: no TLS, no
-// permessage-deflate, no accept-key validation.
-
 int ws_connect(const char *host, int port, const char *path) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -40,8 +37,6 @@ int ws_connect(const char *host, int port, const char *path) {
         path, host, port);
     if (n < 0 || writeall(fd, req, (size_t)n) < 0) { close(fd); return -1; }
 
-    // Read just the handshake response; the server sends nothing else until we
-    // speak, so stopping at the blank line cannot eat frame bytes.
     char resp[2048];
     size_t got = 0;
     while (got < sizeof resp - 1) {
@@ -82,8 +77,6 @@ static int ws_send_frame(WS *ws, int opcode, const char *p, size_t n) {
     if (!masked) return -1;
     for (size_t i = 0; i < n; i++) masked[i] = (char)(p[i] ^ key[i & 3]);
 
-    // The socket is non-blocking for reads; a short write here would corrupt
-    // the frame, so drain it with a blocking retry loop.
     int rc = 0;
     size_t off = 0;
     const char *parts[2] = {(const char *)hdr, masked};

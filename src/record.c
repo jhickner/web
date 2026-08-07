@@ -3,41 +3,19 @@
 #include <time.h>
 #include "web.h"
 
-// Driving the page by hand and getting a Playwright spec out of it.
-//
-// `playwright codegen` opens a desktop window with an inspector beside it,
-// which is no use down an ssh connection - and the window is the part that is
-// hard to come by, not the recording. Here the window is already a terminal:
-// the page is driven with the keyboard, the link labels reach anything
-// clickable without a mouse, and what comes out is a file.
-//
-// What is recorded is real interaction, whatever caused it: a click dispatched
-// at coordinates, a link label typed, a form filled in insert mode. The page's
-// own listeners are what see them, so nothing here has to know how the window
-// sent them - and the locator for what was hit is worked out in the page,
-// where the DOM is, rather than guessed at from this side.
-
 #define REC_MAX  400
 #define LINE_MAX 400
 
 static char g_lines[REC_MAX][LINE_MAX];
 static int  g_n;
 
-// The recorder, in the page. In an isolated world - it shares the DOM and sees
-// every event, and defines nothing the page can trip over.
-//
-// The locator is the whole point. A CSS path is what a page happens to be built
-// like today, and the run that reads it back is asking for the same button
-// tomorrow: `getByRole('button', { name: 'Save' })` still finds it after the
-// markup has been rewritten around it, and says what it is looking for. So the
-// semantic ones are tried in the order Playwright itself recommends and a path
-// is what is left when none of them is unique.
+// recorder script, injected into the page in an isolated world
 static const char REC_WATCHER[] =
     "(function(){if(window.__webrecOn)return;window.__webrecOn=1;"
     "function q(s){return String(s).replace(/\\\\/g,'\\\\\\\\').replace(/'/g,\"\\\\'\")}"
     "function vis(e){return e&&e.nodeType===1}"
     ROLE_NAME_FN
-    // Whether one role-and-name picks out exactly one thing on the page.
+    // true when role+name matches exactly one element
     "function only(r,n){var c=0,l=document.querySelectorAll("
     "'a,button,input,select,textarea,img,h1,h2,h3,h4,h5,h6,[role]');"
     "for(var i=0;i<l.length;i++)if(rl(l[i])===r&&nm(l[i])===n)c++;return c===1}"
@@ -58,21 +36,12 @@ static const char REC_WATCHER[] =
     "if(n&&n.length<60&&onlyText(n))return \"getByText('\"+q(n)+\"')\";"
     "return \"locator('\"+q(ws(e))+\"')\"}"
     "function say(o){try{__webrec(JSON.stringify(o))}catch(_){}}"
-    // Capture phase, so a page that swallows its own events is recorded anyway.
-    // A tick box and a dropdown say what happened to them on change, and that
-    // is the line worth having: .check() and .selectOption() ask for the state,
-    // where a click on the same thing asks for whatever it toggles to.
     "function chg(e){var y=(e.type||'').toLowerCase();"
     "return e.tagName==='SELECT'||e.tagName==='OPTION'||"
     "(e.tagName==='INPUT'&&(y==='checkbox'||y==='radio'))}"
     "document.addEventListener('click',function(ev){"
     "if(chg(ev.target))return;"
     "var l=loc(ev.target);if(l)say({kind:'click',loc:l})},true);"
-    // A field says what is in it only when it is done with, and for a keyboard
-    // that is the enter key - which fires the change after the keydown it came
-    // from. Taken at the keydown instead, so the value is written down before
-    // the enter rather than after it; the change that follows says nothing new
-    // and is dropped, which is what `seen` is for.
     "var seen=new WeakMap();"
     "function typed(e){var y=(e.type||'').toLowerCase();"
     "return e.tagName==='TEXTAREA'||(e.tagName==='INPUT'&&"
@@ -104,8 +73,6 @@ static void rec_write(App *a) {
     fclose(f);
 }
 
-// Kept whole rather than appended to, so the file on disk is a spec that runs
-// at every moment of the recording rather than only at the end of it.
 static void rec_add(App *a, const char *line) {
     if (g_n >= REC_MAX) return;
     snprintf(g_lines[g_n], LINE_MAX, "%s", line);
@@ -113,9 +80,6 @@ static void rec_add(App *a, const char *line) {
     rec_write(a);
 }
 
-// Typing is one line, not one per keystroke: the page reports the field's value
-// when it is done with, and a second report for the same field is the same
-// field being finished with again.
 static void rec_add_fill(App *a, const char *line, const char *loc) {
     char head[LINE_MAX];
     snprintf(head, sizeof head, "await page.%s.fill(", loc);
@@ -129,7 +93,6 @@ static void rec_add_fill(App *a, const char *line, const char *loc) {
 
 // ------------------------------------------------------------------ events
 
-// One interaction, as the page saw it.
 void record_event(App *a, const char *json) {
     if (!a->rec_on) return;
     size_t kn = 0, ln = 0, vn = 0;
@@ -142,8 +105,6 @@ void record_event(App *a, const char *json) {
     json_unescape(kind, sizeof kind, k, kn);
     json_unescape(loc, sizeof loc, l, ln);
     json_unescape(val, sizeof val, v ? v : "", v ? vn : 0);
-    // The page escaped these for javascript before it sent them; they came
-    // through JSON on the way here and are quoted for javascript again below.
     for (char *p = val; *p; p++) if (*p == '\'' || *p == '\\') *p = ' ';
 
     if (!strcmp(kind, "click"))
@@ -164,17 +125,11 @@ void record_event(App *a, const char *json) {
     rec_add(a, line);
 }
 
-// Back and forward as the page's own history rather than as the address they
-// land on: a spec that says goBack still does the right thing when the page it
-// was recorded against changes what came before it.
 void record_history(App *a, int delta) {
     if (!a->rec_on) return;
     rec_add(a, delta < 0 ? "await page.goBack();" : "await page.goForward();");
 }
 
-// An address the window was told to go to. A click that navigates is already
-// recorded as the click, and the page arriving after it needs no line of its
-// own - so this is only ever what somebody typed, or was handed in.
 void record_goto(App *a, const char *url) {
     if (!a->rec_on || !url || !*url) return;
     char line[LINE_MAX], safe[LINE_MAX];
@@ -186,18 +141,11 @@ void record_goto(App *a, const char *url) {
 
 // ------------------------------------------------------------------ on/off
 
-// The watcher goes in when recording starts and stays for the pages after it:
-// a recording that stopped at the first navigation would record the first click
-// of every flow and nothing else.
 void record_install(App *a, bool fresh) {
     if (!a->rec_on) return;
     (void)fresh;
     char esc[16384];
     json_escape(esc, sizeof esc, REC_WATCHER);
-    // runImmediately is what covers the document already on screen; the
-    // registration alone would wait for the next one. Registered again when
-    // recording starts mid-session, which the watcher's own guard makes
-    // harmless - it defines itself once per document however often it is run.
     app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
              "\"source\":\"%s\",\"worldName\":\"%s\",\"runImmediately\":true",
              esc, WEB_WORLD);
@@ -207,8 +155,6 @@ void record_start(App *a, const char *path) {
     if (a->rec_on) return;
     if (path && *path) snprintf(a->rec_path, sizeof a->rec_path, "%s", path);
     if (!a->rec_path[0]) {
-        // Named for when it was made, in the directory the window was started
-        // from: a recording with nowhere to go is one nobody will find again.
         time_t t = time(NULL);
         struct tm tm;
         localtime_r(&t, &tm);
@@ -219,8 +165,6 @@ void record_start(App *a, const char *path) {
     g_n = 0;
     a->rec_on = true;
     record_install(a, false);
-    // Where it was when recording began, so the file opens on a page rather
-    // than wherever the first click happened to be.
     record_goto(a, a->url);
     char m[600];
     snprintf(m, sizeof m, "recording to %.500s", a->rec_path);

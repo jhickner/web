@@ -6,11 +6,6 @@
 #define REPL_IMPLEMENTATION
 #include "../vendor/repl.h"
 
-// The console: repl.h's editor drawn under the page, with what it emits
-// turned into the same kind of single buffered write draw_status does. The
-// editor owns no terminal state of its own, which is why it fits here at all -
-// it hands back cells and this decides what a cell is.
-
 #define CONSOLE_ROWS 12         // the height it opens at
 #define CONSOLE_MIN 3
 #define LOG_MAX 200
@@ -30,15 +25,13 @@ static RCell *g_grid;
 static int    g_gw, g_gh;
 static int    g_clip_y0, g_clip_y1;
 
-static bool   g_dragging;           // the top border is being carried
-static int    g_drag_y;             // the row the pointer was on last
+static bool   g_dragging;           // the top border is being dragged
+static int    g_drag_y;             // last pointer row
 
 // ------------------------------------------------------------------- setup
 
 void console_init(App *a) {
     if (g_ready) return;
-    // Nothing to complete: what is typed here is javascript, and the page's own
-    // names are not ours to know without asking it about every keystroke.
     repl_init(&g_repl, NULL, 0);
     g_ready = true;
 }
@@ -68,18 +61,12 @@ static int fit_rows(App *a, int rows) {
     return rows;
 }
 
-// Whatever the border was last dragged to, and nothing else: a height that
-// moved with output or completions would restart the screencast on almost every
-// keystroke.
 int console_rows(App *a) {
     if (!a->console_open) return 0;
     console_init(a);
     return fit_rows(a, a->console_want > 0 ? a->console_want : CONSOLE_ROWS);
 }
 
-// Open and focused, or gone: the key that opens the console is the key that puts
-// it away, whether or not it currently holds the keyboard. `esc` is the
-// narrower move, handing the keyboard back with the transcript still up.
 void console_toggle(App *a) {
     console_init(a);
     if (a->console_open) {
@@ -93,9 +80,6 @@ void console_toggle(App *a) {
 
 // ---------------------------------------------------------------- transcript
 
-// A line the console did not run, but that belongs in what it can recall: a
-// recorded command is one you often want back to edit or run again, and it has
-// to be there whether or not the console was ever opened while it was written.
 void console_history_add(App *a, const char *line) {
     if (!line || !*line) return;
     console_init(a);
@@ -118,13 +102,10 @@ void console_log(App *a, const char *line) {
         if (!nl) break;
         p = nl + 1;
     } while (1);
-    g_log_scroll = 0;                // new output follows the tail, like a shell
+    g_log_scroll = 0;
 }
 
-// The whole transcript, joined, into the clipboard. A page drawn in cells is
-// out of the terminal's own selection's reach, and the transcript is the part
-// of the window most often wanted somewhere else - a value to paste into a
-// script, an error to send on. Answers how many lines went, for the notice.
+// returns the number of lines copied
 int console_copy(App *a) {
     console_init(a);
     if (!g_log_n) return 0;
@@ -249,8 +230,6 @@ void console_paint(App *a) {
         for (int c = 0; c < g_gw; c++) {
             RCell *k = &g_grid[r * g_gw + c];
             if (k->style != cur) {
-                // The cursor cell is a reverse of whatever it sits on, so the
-                // reset has to come first or the previous run leaks into it.
                 buf_add(&b, "\x1b[0m", 4);
                 const char *sgr = sgr_for(k->style);
                 buf_add(&b, sgr, strlen(sgr));
@@ -258,8 +237,7 @@ void console_paint(App *a) {
             }
             char u[4];
             buf_add(&b, u, utf8_put(k->cp, u));
-            // repl.h's contract, and the transcript follows it: a double-width
-            // glyph is emitted once and the cell it covers is left alone.
+            // a double-width glyph is emitted once, the cell it covers skipped
             int w = glyph_cols(k->cp);
             if (w > 1) c += w - 1;
         }
@@ -267,8 +245,6 @@ void console_paint(App *a) {
     }
     a->console_buf = b;
 
-    // The same guard draw_status uses: an unchanged console writes nothing, so a
-    // repaint never lands in the middle of a frame going out.
     if (b.len == a->console_last.len &&
         (b.len == 0 || memcmp(b.p, a->console_last.p, b.len) == 0))
         return;
@@ -279,8 +255,6 @@ void console_paint(App *a) {
 
 // ------------------------------------------------------------------- input
 
-// term_next reports a control byte as its letter plus MOD_CTRL; repl.h wants
-// the raw codepoint, because that is where its emacs bindings live.
 bool console_key(App *a, Event *ev) {
     if (!a->console_focus) return false;
     console_init(a);
@@ -314,7 +288,6 @@ bool console_key(App *a, Event *ev) {
     case KEY_RIGHT:
         re.key = (ev->mods & MOD_ALT) ? REPL_KEY_WORD_RIGHT : REPL_KEY_RIGHT;
         break;
-    // Right is what accepts a completion, so tab means the same thing here.
     case KEY_TAB:  re.key = REPL_KEY_RIGHT; break;
     case KEY_HOME: re.key = REPL_KEY_CHAR; re.codepoint = 1; break;   // ^A
     case KEY_END:  re.key = REPL_KEY_CHAR; re.codepoint = 5; break;   // ^E
@@ -324,9 +297,9 @@ bool console_key(App *a, Event *ev) {
             re.codepoint = (uint32_t)(ev->key - 'a' + 1);
         } else if (ev->text[0] && !(ev->mods & (MOD_CTRL | MOD_ALT))) {
             re.key = REPL_KEY_TEXT;
-            re.text = ev->text;          // one shot, so UTF-8 stays whole
+            re.text = ev->text;
         } else {
-            return true;                 // swallowed rather than sent to the page
+            return true;                 // swallowed, not sent to the page
         }
     }
 
@@ -340,11 +313,8 @@ bool console_key(App *a, Event *ev) {
             char shown[LOG_COLS];
             snprintf(shown, sizeof shown, "> %s", line);
             console_log(a, shown);
-            // Javascript, whatever it is. There is nothing else it could be.
             char command[4096];
             snprintf(command, sizeof command, "%s", line);
-            // Shift+Enter is an editing newline. The command language treats
-            // it as whitespace when the whole input is finally submitted.
             for (char *p = command; *p; p++)
                 if (*p == '\r' || *p == '\n') *p = ' ';
             script_push(a, command);
@@ -362,8 +332,6 @@ bool console_mouse(App *a, Event *ev) {
         else if (ev->motion) {
             int have = a->console_want > 0 ? a->console_want : a->console_rows;
             int delta = fit_rows(a, have + (g_drag_y - ev->my)) - have;
-            // Inline, the block is anchored at its top, so the rows have to be
-            // traded with the picture to hold the last row still.
             if (a->inline_mode) {
                 if (a->box_rows - delta < BOX_MIN_ROWS)
                     delta = a->box_rows - BOX_MIN_ROWS;

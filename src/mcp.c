@@ -10,26 +10,6 @@
 #include <unistd.h>
 #include "web.h"
 
-// The window on screen, handed to an agent.
-//
-// `web --mcp` is not a window: it is a driver that speaks MCP on its standard
-// input and output, and drives the window somebody already has up. That is the
-// whole point of it. An agent with a browser of its own works in the dark, and
-// the first anyone knows of what it did is the summary it writes afterwards.
-// Here the page it is working is the page in the pane next door - the same
-// tabs, the same logins, the same scroll position - and every step it takes is
-// on screen as it happens. Take the keyboard back at any moment; it is your
-// browser.
-//
-// Nothing is installed for this. The protocol is JSON-RPC by line on stdio,
-// devtools is a websocket that takes JSON, and both of those are already here.
-//
-// The tools are the ones an agent cannot get any other way round: `snapshot`
-// so it can act by name rather than by pixel, `eval` for everything a page can
-// be asked in one line, and `screenshot` for when it has to see. What it does
-// through them goes through the page's own listeners, so `--record` writes an
-// agent's session down as a spec exactly as it writes down yours.
-
 #define MCP_PROTOCOL "2025-06-18"
 #define REF_MAX      200
 #define CALL_SECS    15.0
@@ -40,11 +20,11 @@ typedef struct {
     pid_t pid;
     int   port;
     char  target[128];
-    char  drive[768];      // where to say it is being driven, so it keeps drawing
+    char  drive[768];      // drive file path
     char  profile[512];
     WS    ws;
     int   next_id;
-    char  marked[768];     // the drive file standing now, which window it is for
+    char  marked[768];     // drive file currently held
 } Win;
 
 static Win W = {.ws = {.fd = -1}};
@@ -52,7 +32,6 @@ static Win W = {.ws = {.fd = -1}};
 static bool cdp_do(const char *method, const char *params, Buf *reply,
                    char *err, size_t errcap);
 
-// A copy, so a value read out of a session line survives the next read.
 static void field(const char *line, const char *key, char *out, size_t cap) {
     size_t n = 0;
     const char *v = json_str(line, key, &n);
@@ -60,10 +39,6 @@ static void field(const char *line, const char *key, char *out, size_t cap) {
     else if (cap) out[0] = 0;
 }
 
-// Which window: the one most recently used, or the one WEB_WINDOW names when
-// several are up, by pid or by the name --name gave it. The same rule the
-// javascript helpers follow, so an agent and a script started side by side land
-// on the same page.
 static bool win_read(void) {
     char dir[600];
     chrome_profile_path(W.profile, sizeof W.profile);
@@ -73,7 +48,7 @@ static bool win_read(void) {
 
     const char *pick = getenv("WEB_WINDOW");
     if (pick && !*pick) pick = NULL;
-    // strspn past the digits: nothing after them is a pid, anything else a name.
+    // strspn past the digits: all digits is a pid, anything else a name
     bool by_pid = pick && pick[strspn(pick, "0123456789")] == 0;
     long want = by_pid ? atol(pick) : 0;
     char best[4096] = "";
@@ -84,8 +59,6 @@ static bool win_read(void) {
         if (pid <= 0 || (want && pid != want)) continue;
         char path[800];
         snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
-        // A window that has gone leaves its file behind; this is the only pass
-        // over the directory that would ever notice.
         if (kill((pid_t)pid, 0) != 0 && errno == ESRCH) { unlink(path); continue; }
         struct stat st;
         if (stat(path, &st) != 0) continue;
@@ -113,12 +86,6 @@ static bool win_read(void) {
     return W.port > 0 && W.target[0];
 }
 
-// Say the window is being worked, and take it back when this process ends.
-//
-// A window stops drawing when its pane loses the focus, and an agent working it
-// from a client somewhere else is exactly the case that looks unwatched and is
-// not. Chrome tells nobody who else is attached, so the driver is the only one
-// who can say.
 static void drive_release(void) {
     if (!W.marked[0]) return;
     unlink(W.marked);
@@ -126,20 +93,15 @@ static void drive_release(void) {
     if (W.pid > 0) kill(W.pid, SIGUSR1);
 }
 
-// Held against the window it is for, not once and for all: a client outlives
-// the windows it works, and one quit and opened again is a different window
-// with a different file to say so in. Marking the one that has gone leaves the
-// new one dark.
 static void drive_hold(void) {
     if (!W.drive[0] || W.pid <= 0) return;
     if (W.marked[0] && !strcmp(W.marked, W.drive)) return;
     drive_release();
     FILE *f = fopen(W.drive, "w");
-    if (!f) return;                        // an older window, with nowhere to say it
+    if (!f) return;
     fprintf(f, "%d\n", (int)getpid());
     fclose(f);
     snprintf(W.marked, sizeof W.marked, "%s", W.drive);
-    // The window is asleep in a poll: the signal is what makes it look now.
     kill(W.pid, SIGUSR1);
 }
 
@@ -153,10 +115,6 @@ static void win_drop(void) {
     W.ws.fd = -1;
 }
 
-// Connected to the page the window is showing right now. Checked before every
-// call rather than once at the start: the window is a browser somebody is
-// using, and the tab in front of it is theirs to change. Following it is what
-// makes "the page on screen" mean the same thing to both of us.
 static bool win_ready(char *err, size_t cap) {
     char was_target[128];
     snprintf(was_target, sizeof was_target, "%s", W.target);
@@ -182,9 +140,6 @@ static bool win_ready(char *err, size_t cap) {
             return false;
         }
         W.ws = (WS){.fd = fd};
-        // Nothing here subscribes to the page, but a navigation announcing
-        // itself is what tells a click it is not finished - and Page has to be
-        // enabled before it says anything at all.
         char why[200];
         Buf reply = {0};
         cdp_do("Page.enable", "", &reply, why, sizeof why);
@@ -196,15 +151,10 @@ static bool win_ready(char *err, size_t cap) {
 
 // ---------------------------------------------------------------- devtools
 
-// The page saying it is about to go somewhere - a link, a form, a script - seen
-// while waiting for something else. A click sets the navigation off inside the
-// call that made it, so this news usually arrives before the answer to the
-// click does, and dropping it would lose the only warning there is.
+// the page announced a navigation
 static bool g_going;
 
-// One devtools call, answered before we return. Events arriving meanwhile are
-// dropped, apart from the one above: this process asks questions and subscribes
-// to nothing.
+// one devtools call, blocking; events arriving meanwhile are dropped
 static bool cdp_do(const char *method, const char *params, Buf *reply,
                    char *err, size_t errcap) {
     int id = ++W.next_id;
@@ -245,9 +195,6 @@ static bool cdp_do(const char *method, const char *params, Buf *reply,
     return false;
 }
 
-// What the page said while nobody was listening. Between calls this process
-// sits in getline and the socket fills up, so an action that wants to hear the
-// answer to itself starts by throwing away the answers to everything before.
 static void events_drop(void) {
     g_going = false;
     if (W.ws.fd < 0) return;
@@ -275,12 +222,7 @@ static bool event_wait(const char *method, double secs) {
     return false;
 }
 
-// Javascript in the page, answered as text.
-//
-// Wrapped rather than sent as the expression itself, for the two reasons the
-// console needs as well: eval gives the completion value, so a line that is a
-// statement still says what it worked out, and a promise is waited for rather
-// than stringified into "[object Promise]".
+// javascript in the page, answered as text
 static bool page_eval(const char *src, Buf *out, char *err, size_t errcap) {
     Buf expr = {0};
     buf_addf(&expr, "Promise.resolve(eval(\"");
@@ -304,9 +246,6 @@ static bool page_eval(const char *src, Buf *out, char *err, size_t errcap) {
     size_t n = 0;
     const char *v = json_eval_str(reply.p, &n);
     if (!v) {
-        // The page threw. Its own words are worth more than "it failed": the
-        // description carries the message and the stack, and the first line of
-        // it is the message.
         size_t dn = 0;
         const char *d = json_str(reply.p, "description", &dn);
         char raw[600] = "the page threw";
@@ -327,10 +266,7 @@ static bool page_eval(const char *src, Buf *out, char *err, size_t errcap) {
 
 // ------------------------------------------------------------------- refs
 
-// What the last snapshot found, so an agent can say `#4` instead of carrying a
-// css path around. Kept here rather than in the page: a variable left on
-// window is one more thing a page could trip over, and a css path is a plain
-// string that survives being handed back to us.
+// css selectors from the last snapshot, indexed by ref
 static char g_ref[REF_MAX][512];
 static int  g_refs;
 
@@ -342,7 +278,6 @@ static const char *ref_sel(const char *ref) {
     return g_ref[i - 1];
 }
 
-// A selector from the arguments, whichever way it was named.
 static bool want_target(const char *args, char *out, size_t cap,
                         char *err, size_t errcap) {
     char raw[512] = "";
@@ -364,9 +299,7 @@ static bool want_target(const char *args, char *out, size_t cap,
     return false;
 }
 
-// Where the page settles, not where it was sent. An address is only the
-// request; what the agent needs back is what arrived, which after a redirect
-// is somewhere else entirely.
+// waits for readyState complete, answers with title and url
 static bool settle(Buf *out, char *err, size_t errcap) {
     double deadline = now_sec() + 10.0;
     for (;;) {
@@ -384,16 +317,11 @@ static bool settle(Buf *out, char *err, size_t errcap) {
         out, err, errcap);
 }
 
-// A click is not finished when the click returns. Whatever it set off commits
-// after it, and an agent told "clicked" acts on the next line against the page
-// it has just left - which is how a link is followed and then gone back from
-// before the page it went to ever existed. So if the page said it was going
-// somewhere, this waits until it has got there and says where that was.
 static void nav_after(Buf *out, char *err, size_t errcap) {
     if (!g_going && !event_wait("Page.frameRequestedNavigation", 0.5)) return;
     g_going = false;
     if (!event_wait("Page.frameNavigated", 15.0)) return;
-    g_refs = 0;                          // another page: the old refs are lies
+    g_refs = 0;
     Buf where = {0};
     if (settle(&where, err, errcap) && where.len)
         buf_addf(out, ", now on %s", where.p);
@@ -402,10 +330,7 @@ static void nav_after(Buf *out, char *err, size_t errcap) {
 
 // ------------------------------------------------------------------ tools
 
-// Everything on the page worth acting on, one to a line: what it is, what a
-// user would call it, and the css path that finds it again. Read here rather
-// than shown as a picture because it is a hundredth of the size and says what
-// the things are, which pixels never do.
+// snapshot script: one line per element, role/name/selector/value
 static const char SNAP_JS[] =
     "(function(){"
     ROLE_NAME_FN
@@ -469,13 +394,6 @@ static bool tool_snapshot(const char *args, Buf *out, char *err, size_t errcap) 
     return true;
 }
 
-// Clicked through the element rather than by dispatching a mouse event at its
-// coordinates. The coordinate way is the better gesture - it carries hover and
-// focus with it, and it is what the window itself does for a real click - but
-// it is hit tested against the compositor's idea of where the page is scrolled
-// to, which catches up only when a frame has gone out. Nothing guarantees a
-// frame while an agent is working, and a click that silently lands on the wrong
-// element is worse than a plain one that lands on the right one.
 static bool tool_click(const char *args, Buf *out, char *err, size_t errcap) {
     char sel[512];
     if (!want_target(args, sel, sizeof sel, err, errcap)) return false;
@@ -483,7 +401,7 @@ static bool tool_click(const char *args, Buf *out, char *err, size_t errcap) {
     Buf js = {0}, got = {0};
     buf_addf(&js, "(function(){var e=document.querySelector(");
     buf_addf(&js, "'");
-    json_escape_buf(&js, sel);          // it is about to be a javascript string
+    json_escape_buf(&js, sel);
     buf_addf(&js, "');if(!e)return 'gone';"
                   "e.scrollIntoView({block:'center'});"
                   "if(e.focus)e.focus();e.click();return 'ok'})()");
@@ -503,9 +421,7 @@ static bool tool_click(const char *args, Buf *out, char *err, size_t errcap) {
     return ok;
 }
 
-// A key, as the page hears one. The table is the keys worth pressing without a
-// keyboard in front of you; anything else is a character, and typing is what
-// `type` is for.
+// key name, virtual key code, text
 static const struct { const char *name; int code; const char *text; } KEYS[] = {
     {"Enter", 13, "\\r"}, {"Tab", 9, "\\t"}, {"Escape", 27, ""},
     {"Backspace", 8, ""}, {"Delete", 46, ""},
@@ -540,10 +456,6 @@ static bool send_key(const char *key, char *err, size_t errcap) {
     return true;
 }
 
-// Typed rather than assigned. Setting value is invisible to a page that
-// listens for input, which is most of them now, so the field is focused, what
-// is in it is selected, and the text is inserted over the top - the same
-// events a keyboard would have produced.
 static bool tool_type(const char *args, Buf *out, char *err, size_t errcap) {
     char sel[512], text[4096] = "";
     if (!want_target(args, sel, sizeof sel, err, errcap)) return false;
@@ -600,8 +512,6 @@ static bool tool_navigate(const char *args, Buf *out, char *err, size_t errcap) 
     char raw[2048] = "", url[2200];
     field(args, "url", raw, sizeof raw);
     if (!raw[0]) { snprintf(err, errcap, "say where to go"); return false; }
-    // The same reading the address bar gives a line, so an agent and a person
-    // typing the same thing land in the same place.
     bar_url(raw, url, sizeof url);
 
     Buf params = {0}, reply = {0}, esc = {0};
@@ -612,13 +522,10 @@ static bool tool_navigate(const char *args, Buf *out, char *err, size_t errcap) 
     buf_free(&reply);
     buf_free(&esc);
     if (!ok) return false;
-    g_refs = 0;                          // another page: the old refs are lies
+    g_refs = 0;
     return settle(out, err, errcap);
 }
 
-// Through the browser's own list rather than history.back(), for the reason
-// the window's own back key uses it: the list says when there is nowhere to go,
-// and a call into the page returns whether it moved or not.
 static bool step_history(int delta, Buf *out, char *err, size_t errcap) {
     Buf reply = {0};
     if (!cdp_do("Page.getNavigationHistory", "", &reply, err, errcap)) {
@@ -642,7 +549,7 @@ static bool step_history(int delta, Buf *out, char *err, size_t errcap) {
     buf_free(&params);
     buf_free(&sent);
     if (!ok) return false;
-    g_refs = 0;                          // another page: the old refs are lies
+    g_refs = 0;
     return settle(out, err, errcap);
 }
 
@@ -668,9 +575,6 @@ static bool tool_eval(const char *args, Buf *out, char *err, size_t errcap) {
     return page_eval(js, out, err, errcap);
 }
 
-// Polled rather than slept through. A fixed wait is a guess about somebody
-// else's server: too short and the agent reports the page it was on a moment
-// ago, long enough to be safe and it is time nobody gets back.
 static bool tool_wait(const char *args, Buf *out, char *err, size_t errcap) {
     char js[4096] = "";
     field(args, "js", js, sizeof js);
@@ -701,9 +605,6 @@ static bool tool_wait(const char *args, Buf *out, char *err, size_t errcap) {
     }
 }
 
-// A tab of the window's own making, rather than one opened behind its back.
-// The window is asked for it the way `web --open` asks, so the page arrives in
-// its tab bar and on its screen instead of being a target nothing is drawing.
 static bool tool_new_tab(const char *args, Buf *out, char *err, size_t errcap) {
     char raw[2048] = "", url[2200];
     field(args, "url", raw, sizeof raw);
@@ -719,16 +620,12 @@ static bool tool_new_tab(const char *args, Buf *out, char *err, size_t errcap) {
     if (!f) { snprintf(err, errcap, "cannot write %s", tmp); return false; }
     fprintf(f, "%s\n", url);
     fclose(f);
-    // Renamed into place, which is what makes a file the window finds a whole
-    // one; the signal is only the nudge.
     if (rename(tmp, path) != 0 || kill(W.pid, SIGUSR1) != 0) {
         unlink(tmp);
         unlink(path);
         snprintf(err, errcap, "the window did not take the address");
         return false;
     }
-    // The window makes the tab, tells devtools about it and switches to it, and
-    // the next call reads where that left it out of the session file.
     struct timespec ts = {1, 0};
     nanosleep(&ts, NULL);
     win_drop();
@@ -739,9 +636,7 @@ static bool tool_new_tab(const char *args, Buf *out, char *err, size_t errcap) {
 
 // ------------------------------------------------------------------- stdio
 
-// The id, copied out whole rather than read as a number: JSON-RPC lets it be a
-// string, and an answer carrying a different id than the question is an answer
-// the client will not match up.
+// id copied out verbatim: JSON-RPC allows a string or a number
 static void call_id(const char *msg, char *out, size_t cap) {
     snprintf(out, cap, "null");
     const char *p = strstr(msg, "\"id\"");
@@ -785,9 +680,6 @@ static void reply_error(const char *id, int code, const char *message) {
     buf_free(&b);
 }
 
-// What a tool answered. A tool that failed answers in the result rather than as
-// a protocol error, because the model is meant to read it and try something
-// else - a page that has moved on is news, not a broken connection.
 static void reply_tool(const char *id, const char *text, bool failed) {
     Buf b = {0};
     buf_addf(&b, "{\"content\":[{\"type\":\"text\",\"text\":\"");
@@ -866,8 +758,6 @@ static const char INSTRUCTIONS[] =
     "their screen while you do it. Take a snapshot before acting, act by ref, "
     "and prefer snapshot and read over screenshot.";
 
-// A screenshot goes back as a picture rather than as text, so it does not have
-// to pass through the text answer above.
 static void do_screenshot(const char *id) {
     char err[512] = "";
     Buf reply = {0};
@@ -886,7 +776,7 @@ static void do_screenshot(const char *id) {
     }
     Buf b = {0};
     buf_addf(&b, "{\"content\":[{\"type\":\"image\",\"data\":\"");
-    buf_add(&b, data, n);              // base64 already, and nothing in it to escape
+    buf_add(&b, data, n);              // base64, nothing to escape
     buf_addf(&b, "\",\"mimeType\":\"image/png\"}]}");
     reply_result(id, b.p);
     buf_free(&b);
@@ -896,8 +786,6 @@ static void do_screenshot(const char *id) {
 static void do_call(const char *id, const char *msg) {
     char name[64] = "";
     field(msg, "name", name, sizeof name);
-    // The arguments object, left as the text it arrived as: every field wanted
-    // out of it is a string or a number, and json_str finds those in place.
     const char *args = strstr(msg, "\"arguments\"");
     if (!args) args = "{}";
 
@@ -931,8 +819,6 @@ static void do_call(const char *id, const char *msg) {
 }
 
 int mcp_serve(void) {
-    // Nothing but protocol may go to stdout, and a client that hangs up must
-    // not take this process out mid-write with the window still marked.
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, bye);
     signal(SIGTERM, bye);
@@ -951,9 +837,6 @@ int mcp_serve(void) {
         bool notice = !strstr(line, "\"id\"");
 
         if (!strcmp(method, "initialize")) {
-            // The client's version is echoed when it named one: everything here
-            // is the unchanging part of the protocol, and arguing about a date
-            // gains nothing.
             char ver[32] = "";
             field(line, "protocolVersion", ver, sizeof ver);
             Buf r = {0};
@@ -977,7 +860,6 @@ int mcp_serve(void) {
         } else if (!notice) {
             reply_error(id, -32601, method);
         }
-        // Notifications - initialized, cancelled - are told, not asked.
     }
     free(line);
     drive_release();

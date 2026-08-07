@@ -40,8 +40,6 @@ static const char *find_chrome(void) {
     return NULL;
 }
 
-// Chrome writes the chosen port here once the debug endpoint is listening, so
-// we can pass --remote-debugging-port=0 and avoid racing for a free port.
 static int read_devtools_port(const char *profile, double timeout) {
     char path[600];
     snprintf(path, sizeof path, "%s/DevToolsActivePort", profile);
@@ -56,17 +54,12 @@ static int read_devtools_port(const char *profile, double timeout) {
             }
             fclose(f);
         }
-        // Chrome takes roughly a quarter second to get here, and every
-        // millisecond of poll granularity is a millisecond of startup.
         struct timespec ts = {0, 4 * 1000000};
         nanosleep(&ts, NULL);
     }
     return -1;
 }
 
-// Anything at all listening there. A pinned port that belongs to some other
-// process leaves Chrome with no debug endpoint, and the only sign of it would
-// be the fifteen second wait for a port file that never arrives.
 static bool port_taken(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return false;
@@ -88,16 +81,9 @@ int chrome_probe(int port) {
     return ok ? 0 : -1;
 }
 
-// A named profile, or the unnamed one every run shares. Set once, before
-// anything asks where the profile is: the browser's data, the session files,
-// the handoff directory, the note of the port and the history all live under
-// whichever directory this picks, so a named one is a whole separate world.
 static char profile_name[64];
-static bool profile_temp;         // made for this run, and removed with it
+static bool profile_temp;
 
-// The browser profile is bulk cache, not configuration, so it stays out of
-// ~/.config (which is often a synced dotfiles directory). Worked out without a
-// browser, so that anything wanting to look in there can find it too.
 void chrome_profile_path(char *out, size_t cap) {
     const char *home = getenv("HOME");
     const char *cache = getenv("XDG_CACHE_HOME");
@@ -113,8 +99,6 @@ static bool pid_alive(pid_t p) {
     return kill(p, 0) == 0 || errno != ESRCH;
 }
 
-// Only ever aimed at a throwaway profile, whose name says this program made it
-// and whose owner is already gone.
 static void rm_tree(const char *path) {
     DIR *d = opendir(path);
     if (!d) { unlink(path); return; }
@@ -132,9 +116,6 @@ static void rm_tree(const char *path) {
     rmdir(path);
 }
 
-// A run that died without tidying up leaves its throwaway profile behind, and
-// the name says which process it was waiting on. Swept when a new one is made,
-// which is the only time anybody is looking in there.
 static void sweep_temp_profiles(void) {
     char here[512], dir[520];
     chrome_profile_path(here, sizeof here);
@@ -157,8 +138,7 @@ static void sweep_temp_profiles(void) {
     closedir(d);
 }
 
-// "-" is a profile for this run alone: a fresh directory, named for the process
-// so two of them never meet, and taken away again when the browser goes.
+// "-" is a per-run temp profile, removed when the browser goes
 int chrome_profile_set(const char *name) {
     if (!name || !*name) return -1;
     if (!strcmp(name, "-")) {
@@ -168,8 +148,6 @@ int chrome_profile_set(const char *name) {
         return 0;
     }
     if (strlen(name) >= sizeof profile_name) return -1;
-    // A name is a single directory under profiles/, so nothing that could be a
-    // path, and nothing hidden: ".." would be the profile above it.
     for (const char *p = name; *p; p++) {
         bool ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
                   (*p >= '0' && *p <= '9') || *p == '.' || *p == '_' || *p == '-';
@@ -185,8 +163,6 @@ bool chrome_profile_named(char *out, size_t cap) {
     return profile_name[0] != 0;
 }
 
-// The data directory goes when the browser it belonged to has gone, and only
-// then: one still running is still using it.
 static void discard_temp_profile(Chrome *c) {
     if (!profile_temp || c->foreign) return;
     if (c->pid > 0 && pid_alive(c->pid)) return;
@@ -195,8 +171,7 @@ static void discard_temp_profile(Chrome *c) {
     rm_tree(path);
 }
 
-// Chrome records "<hostname>-<pid>" in the lock symlink, which is the only
-// place the pid of a browser we did not spawn is written down.
+// the lock symlink reads "<hostname>-<pid>"
 static pid_t singleton_pid(const char *profile) {
     char path[600];
     snprintf(path, sizeof path, "%s/SingletonLock", profile);
@@ -208,11 +183,6 @@ static pid_t singleton_pid(const char *profile) {
     return dash ? (pid_t)atoi(dash + 1) : 0;
 }
 
-// Chrome writes down the port it picked, but only when it picked it: handed one
-// with --port it writes nothing at all, and that browser is then invisible to
-// every later run. So we keep our own note of where the browser we started went
-// - and of which process it is, since a port on its own could belong to
-// anything by the time somebody reads it back.
 static void note_browser(Chrome *c) {
     char path[600];
     snprintf(path, sizeof path, "%s/web-port", c->profile);
@@ -222,7 +192,7 @@ static void note_browser(Chrome *c) {
     fclose(f);
 }
 
-// The noted port, or -1 if there is no note or the browser it named is gone.
+// noted port, or -1 if there is no note or that browser is gone
 static int noted_browser(const char *profile, pid_t *pid) {
     char path[600];
     snprintf(path, sizeof path, "%s/web-port", profile);
@@ -237,10 +207,6 @@ static int noted_browser(const char *profile, pid_t *pid) {
     return port;
 }
 
-// --keep belongs to the browser rather than to the run that asked for it: one
-// window wanting it kept is every window wanting it kept, and the mark outlives
-// the window that made it. The pid is what ties it to this browser - kill this
-// one and the next starts unmarked, whatever is still lying in the profile.
 void chrome_mark_kept(Chrome *c) {
     char path[600];
     snprintf(path, sizeof path, "%s/web-keep", c->profile);
@@ -259,9 +225,6 @@ bool chrome_is_kept(Chrome *c) {
     int got = fscanf(f, "%d", &marked);
     fclose(f);
     if (got != 1) return false;
-    // With a pid missing on either side the mark stands on the strength of the
-    // file alone: this is the browser holding the profile, and something asked
-    // for it to stay.
     return marked <= 0 || c->pid <= 0 || marked == (int)c->pid;
 }
 
@@ -271,8 +234,6 @@ static void forget_browser(Chrome *c) {
     unlink(path);
     snprintf(path, sizeof path, "%s/web-port", c->profile);
     unlink(path);
-    // A browser on its way out must not be adopted by the next run, which
-    // would then have this one's killer come for it a few seconds later.
     snprintf(path, sizeof path, "%s/DevToolsActivePort", c->profile);
     unlink(path);
 }
@@ -292,10 +253,6 @@ int chrome_adoptable(const char *profile, pid_t *pid) {
     return port;
 }
 
-// Every browser process on the profile. The helpers all carry --type=; the
-// browser itself is the one without, which is what picks it out of a family of
-// a dozen. Asked of ps rather than of the system directly: the answer is a
-// command line, and there is no portable way to read another process's.
 int chrome_running(const char *profile, ChromeProc *out, int cap) {
     char match[700];
     int mlen = snprintf(match, sizeof match, "--user-data-dir=%s", profile);
@@ -308,8 +265,6 @@ int chrome_running(const char *profile, ChromeProc *out, int cap) {
     char line[8192];
     while (n < cap && fgets(line, sizeof line, p)) {
         const char *hit = strstr(line, match);
-        // The whole directory, not a prefix of it: a sibling profile whose name
-        // starts the same way is a different browser.
         if (!hit) continue;
         char after = hit[mlen];
         if (after && after != ' ' && after != '\n') continue;
@@ -326,9 +281,6 @@ int chrome_running(const char *profile, ChromeProc *out, int cap) {
     return n;
 }
 
-// A previous run that died without cleaning up leaves a live Chrome holding
-// the profile lock, which would make every later launch abort. If that browser
-// still answers on its recorded port, take it over instead.
 static int adopt_running(Chrome *c) {
     pid_t pid = 0;
     int port = chrome_adoptable(c->profile, &pid);
@@ -352,28 +304,15 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     chrome_profile_path(c->profile, sizeof c->profile);
     mkdirs(c->profile);
 
-    // Only worth adopting a browser we could actually drive. A login window is
-    // wanted for itself, and a headless browser already holding the profile
-    // would swallow the request and show nothing.
-    // A named port is a place, and a browser already answering there is the one
-    // that was asked for - the same thing the attach command does, and what
-    // makes --keep --port work: nothing writes that browser's port down
-    // anywhere, so the profile check below cannot find it.
     if (debug && port > 0 && port_taken(port)) {
         if (chrome_probe(port) == 0) {
             c->port = port;
-            // Ours by our own note of it, even though we did not start it: an
-            // earlier run left it here, so this one takes a tab of its own and
-            // is as entitled to shut it down as any other run would be. A
-            // browser that is somebody else's - Playwright's, say - is being
-            // looked at rather than moved into: it keeps the page it is on,
-            // and it outlives us.
             pid_t holder = 0;
             if (noted_browser(c->profile, &holder) == port) {
                 c->adopted = true;
                 c->pid = holder;
             } else {
-                c->foreign = true;    // not ours to shut down, nor to open in
+                c->foreign = true;
             }
             TRACE("took over the %s browser on port %d",
                   c->foreign ? "foreign" : "earlier run's", port);
@@ -384,18 +323,10 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
         return -1;
     }
 
-    // Two runs started together race for the profile: the first one's Chrome
-    // holds the lock from the moment it starts but writes its port a moment
-    // later, and a second browser started on the same directory in that gap
-    // takes the profile out from under it. A lock with something alive behind
-    // it is worth waiting on rather than breaking.
     if (debug) {
         double deadline = now_sec() + (pid_alive(singleton_pid(c->profile)) ? 3.0 : 0.0);
         for (;;) {
             if (adopt_running(c) == 0) {
-                // A pinned port is a promise to whatever is going to connect to
-                // it, and the browser already holding this profile is listening
-                // somewhere else.
                 if (port > 0 && c->port != port) {
                     fprintf(stderr, "web: chrome from an earlier run is on port %d, not %d.\n"
                                     "     quit it, or start with --port %d\n",
@@ -410,8 +341,6 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
         }
     }
 
-    // A stale port file would be read as this run's port, and a lock left by a
-    // killed run makes Chrome abort before it ever opens the port.
     char scratch[600];
     snprintf(scratch, sizeof scratch, "%s/DevToolsActivePort", c->profile);
     unlink(scratch);
@@ -442,8 +371,6 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     argv[a++] = "--noerrdialogs";
     argv[a++] = "--disable-features=Translate,MediaRouter";
 
-    // Subsystems that only cost startup time here: none of them can be seen
-    // through a terminal, and the keychain one can block on a system prompt.
     argv[a++] = "--use-mock-keychain";
     argv[a++] = "--password-store=basic";
     argv[a++] = "--disable-extensions";
@@ -455,17 +382,10 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     argv[a++] = "--no-pings";
     argv[a++] = "--disable-hang-monitor";
 
-    // A window nobody is looking at gets its timers throttled and its renderer
-    // put to sleep, which shows up as a page that stops animating and a
-    // screencast that goes quiet.
     argv[a++] = "--disable-background-timer-throttling";
     argv[a++] = "--disable-renderer-backgrounding";
     argv[a++] = "--disable-backgrounding-occluded-windows";
 
-    // Set here rather than through Emulation.setUserAgentOverride, which
-    // silences navigator.userAgentData entirely: a browser claiming to be
-    // Chrome while reporting no brands at all is a stranger sight than the
-    // headless marker this is removing. The flag leaves the hints intact.
     char uaarg[600];
     if (user_agent && *user_agent) {
         snprintf(uaarg, sizeof uaarg, "--user-agent=%s", user_agent);
@@ -479,8 +399,6 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        // Detach from the terminal entirely: a browser holding our tty open
-        // keeps it alive after we exit and lets its noise reach the screen.
         setsid();
         int devnull = open("/dev/null", O_RDWR);
         if (devnull >= 0) {
@@ -495,12 +413,10 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     c->pid = pid;
     setpgid(pid, pid);
 
-    if (!debug) return 0;      // nothing to attach to, and no port to wait for
+    if (!debug) return 0;
 
     TRACE("spawned chrome pid %d, waiting for port", (int)pid);
     if (port > 0) {
-        // Handed a port, Chrome does not write the port file at all, so the
-        // endpoint answering is both the wait and the confirmation.
         c->port = -1;
         double deadline = now_sec() + 15.0;
         while (now_sec() < deadline) {
@@ -520,9 +436,6 @@ int chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
     return 0;
 }
 
-// One blocking HTTP GET against the debug endpoint. The DevTools server holds
-// the connection open regardless of what we ask for, so the body has to be
-// measured by Content-Length rather than by waiting for EOF.
 static int http_req(int port, const char *method, const char *path, Buf *out) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -570,14 +483,6 @@ static int http_get(int port, const char *path, Buf *out) {
     return http_req(port, "GET", path, out);
 }
 
-// Chrome's own user agent, with the one word that gives it away taken out.
-// Nothing here is headless in any sense a site should care about - it lays out,
-// paints and composites the same as any window - but the string says
-// "HeadlessChrome", and Google refuses to sign anyone in from it.
-//
-// Read from the browser rather than written out here: a hardcoded version goes
-// stale on the next Chrome update, and a user agent claiming a version the
-// browser does not have is a worse tell than the one it replaces.
 int chrome_user_agent(Chrome *c, char *out, size_t cap) {
     Buf resp = {0};
     if (http_get(c->port, "/json/version", &resp) != 0 || !resp.len) {
@@ -606,7 +511,7 @@ int chrome_user_agent(Chrome *c, char *out, size_t cap) {
     return patched;      // 1 = this browser is still announcing itself headless
 }
 
-// The path part of the first ws:// debugger URL at or after p.
+// path part of the first ws:// url at or after p
 static bool ws_path_at(const char *p, char *out, size_t cap) {
     const char *ws = p ? strstr(p, "ws://") : NULL;
     if (!ws) return false;
@@ -620,9 +525,6 @@ static bool ws_path_at(const char *p, char *out, size_t cap) {
     return true;
 }
 
-// One request on the browser-wide endpoint, answered before we return. Only
-// worth it for the calls that have to happen before there is a page session to
-// make them on.
 static int browser_call(Chrome *c, const char *method, const char *params,
                         Buf *reply) {
     Buf resp = {0};
@@ -655,7 +557,7 @@ static int browser_call(Chrome *c, const char *method, const char *params,
         if (json_num(msg, "id", 0) != 1) { ws.msg.len = 0; continue; }
         buf_add(reply, msg, len);
         buf_add(reply, "", 1);
-        reply->len--;                       // callers read it as a C string
+        reply->len--;                       // nul-terminated
         ws_close(&ws);
         return 0;
     }
@@ -663,16 +565,6 @@ static int browser_call(Chrome *c, const char *method, const char *params,
     return -1;
 }
 
-// A tab of our own, in a window of its own. Two runs share one browser - the
-// second adopts the one the first left listening - and a shared tab means one
-// window's address bar driving the other's screen, and the first quit taking
-// the page out from under both. The separate window is what makes it drawable:
-// Chrome only paints the tab in front, so a second tab in the same window
-// screencasts nothing at all - a title, and no picture under it.
-//
-// It opens where it is told to rather than blank and navigating after: a tab
-// nothing has switched to has no session to navigate through, and the browser
-// is the only thing that can put an address into a page nobody is attached to.
 int chrome_open_tab(Chrome *c, const char *url, char *out, size_t cap) {
     if (!url || !*url) url = "about:blank";
     char esc[2200], args[2400];
@@ -690,9 +582,7 @@ int chrome_open_tab(Chrome *c, const char *url, char *out, size_t cap) {
     buf_free(&reply);
     if (id) return 0;
 
-    // No window of our own, then, but still a tab of our own: sharing one is
-    // the worse of the two. Everything after the ? is the address, and since
-    // Chrome 111 /json/new answers nothing but PUT.
+    // everything after the ? is the address; /json/new takes PUT only
     Buf resp = {0};
     char path[256], req[1200];
     snprintf(req, sizeof req, "/json/new?%s", url);
@@ -710,16 +600,11 @@ int chrome_switch_target(Chrome *c, const char *target) {
     if (c->port <= 0 || !target || !*target) return -1;
     char path[160];
     snprintf(path, sizeof path, "/devtools/page/%s", target);
-    // Connected before the old one is dropped: a page that has gone away since
-    // the tab bar last drew it leaves the window on the page it was already on
-    // rather than on nothing at all.
     int fd = ws_connect("127.0.0.1", c->port, path);
     if (fd < 0) return -1;
     ws_close(&c->ws);
     c->ws = (WS){0};
     c->ws.fd = fd;
-    // The new session numbers its replies from one, so everything outstanding
-    // on the old one is the caller's to forget.
     c->next_id = 1;
     snprintf(c->target, sizeof c->target, "%s", target);
     return 0;
@@ -750,8 +635,7 @@ int chrome_attach(Chrome *c) {
     double deadline = now_sec() + 10.0;
     while (now_sec() < deadline && !ws_path[0]) {
         if (http_get(c->port, "/json/list", &resp) == 0 && resp.len) {
-            // Chrome lists each target's keys alphabetically, so the debugger
-            // URL of a "page" entry is the next ws:// after its type field.
+            // target keys are alphabetical: the ws:// after the type field is that page's
             const char *p = strstr(resp.p, "\"type\": \"page\"");
             if (!p) p = strstr(resp.p, "\"type\":\"page\"");
             ws_path_at(p, ws_path, sizeof ws_path);
@@ -781,15 +665,6 @@ int chrome_attach(Chrome *c) {
     return 0;
 }
 
-// The browser's own socket, kept open beside the page one. Discovery is all it
-// is for: with it on, the browser says when a page appears and when one goes,
-// which is the only way to hear about a page nothing here asked for. A link
-// asking for a window makes one, and without this it loads, plays its audio and
-// is never seen.
-//
-// Nothing is sent afterwards and no reply is waited for, so this socket needs
-// none of the request bookkeeping the page one has - just an id the browser will
-// not complain about.
 int chrome_watch(Chrome *c) {
     if (c->port <= 0) return -1;
     Buf resp = {0};
@@ -819,16 +694,11 @@ void chrome_unwatch(Chrome *c) {
     c->watch.fd = -1;
 }
 
-// A tab left behind by --keep, holding the browser open for the next run. The
-// address is the marker: a live run is never sitting on it, so a later run can
-// tell a parked browser from one somebody is using.
+// parked-tab marker address
 #define PARKED_URL   "about:blank#web-parked"
 #define PARKED_QUERY "/json/new?about:blank%23web-parked"
 
-// Page targets that are not ours: another run sharing this browser, or a window
-// the user opened in it. A parked tab belongs to nobody and does not count.
-// Neither does a browser that will not answer, which is the reply that lets the
-// caller go on to shut it down.
+// page targets that are not ours or parked; 0 if the browser will not answer
 int chrome_other_pages(Chrome *c) {
     if (c->port <= 0) return 0;
     Buf resp = {0};
@@ -840,7 +710,7 @@ int chrome_other_pages(Chrome *c) {
         while (*q == ' ' || *q == ':') q++;
         if (!strncmp(q, "\"page\"", 6)) n++;   // and not background_page
     }
-    if (c->target[0] && strstr(resp.p, c->target)) n--;   // ours is in there too
+    if (c->target[0] && strstr(resp.p, c->target)) n--;
     for (const char *p = resp.p; (p = strstr(p, PARKED_URL)) != NULL; p++) n--;
     buf_free(&resp);
     return n > 0 ? n : 0;
@@ -852,7 +722,7 @@ void chrome_park(Chrome *c) {
     bool have = http_get(c->port, "/json/list", &list) == 0 &&
                 strstr(list.p, PARKED_URL) != NULL;
     buf_free(&list);
-    if (have) return;                         // one is already holding it open
+    if (have) return;
 
     Buf resp = {0};
     http_req(c->port, "PUT", PARKED_QUERY, &resp);
@@ -865,8 +735,6 @@ void chrome_close_target(Chrome *c) {
     c->target[0] = 0;
 }
 
-// True until the browser is really gone. An adopted browser is not our child,
-// so waitpid has nothing to reap and the signal probe is the only answer.
 static bool chrome_alive(Chrome *c) {
     if (c->pid <= 0) return false;
     if (waitpid(c->pid, NULL, WNOHANG) == c->pid) return false;
@@ -874,36 +742,17 @@ static bool chrome_alive(Chrome *c) {
 }
 
 void chrome_kill(Chrome *c) {
-    // Ask the browser to close before signalling it. Chrome batches its cookie
-    // writes and commits them on a clean shutdown; killed instead, it can lose
-    // the session that was just established, which reads as being signed out
-    // again on the next run.
-    //
-    // Asked whether or not its pid is known. A browser adopted from a run that
-    // left no lock behind has none here, and the socket is then the only handle
-    // on it: without this it was neither asked nor signalled, while the note
-    // saying where it is went anyway. That leaves it running and unfindable,
-    // holding the profile, and every later start launches a second browser
-    // beside it - 0.09s to adopt one becomes 8.6s to start one.
     bool asked = false;
     if (c->ws.fd > 0 && !c->ws.closed) {
-        // Nothing is going to draw these, and a page still being screencast is
-        // work the browser has to finish before it can attend to shutting down.
         cdp_call(c, "Page.stopScreencast", "");
         asked = cdp_call(c, "Browser.close", "") > 0;
     }
 
-    // The note is what makes a browser findable again, so it only goes once the
-    // browser is really going. One we could neither ask nor signal is still
-    // running, and is better left adoptable than stranded.
     if (asked || c->pid > 0)
-        forget_browser(c);      // whatever is left of it, nothing should adopt it
+        forget_browser(c);
 
     if (asked) {
         for (int i = 0; i < 120; i++) {          // up to three seconds
-            // With no pid, the endpoint going quiet is the only sign of death
-            // available - which is the whole of what we know about a browser
-            // reached over the socket alone.
             bool gone = c->pid > 0 ? !chrome_alive(c) : chrome_probe(c->port) != 0;
             if (gone) { c->pid = 0; break; }
             struct timespec ts = {0, 25 * 1000000};
@@ -912,9 +761,6 @@ void chrome_kill(Chrome *c) {
     }
 
     if (c->pid > 0) {
-        // The browser, not its group: the group signal takes the helpers down
-        // first and the orderly shutdown never runs, which is what loses the
-        // cookie store. The group only gets involved as a last resort below.
         kill(c->pid, SIGTERM);
         for (int i = 0; i < 40; i++) {
             if (!chrome_alive(c)) { c->pid = 0; break; }
@@ -931,26 +777,16 @@ void chrome_kill(Chrome *c) {
     discard_temp_profile(c);
 }
 
-// The same shutdown, waited out by a forked child instead of by us. A polite
-// close is seconds of nothing happening on screen, and by this point the
-// terminal already belongs to the shell again - the only thing those seconds
-// cost is the prompt coming back.
 void chrome_kill_bg(Chrome *c) {
-    // Nothing to end and nobody to tell it to: just the socket.
     if (c->pid <= 0 && (c->ws.fd <= 0 || c->ws.closed)) {
         chrome_kill(c);
         return;
     }
-    // Only when we know which process it is. Without a pid the shutdown is a
-    // request over the socket, and the note has to outlive it long enough for
-    // the child below to find the browser still answering.
     if (c->pid > 0) forget_browser(c);
 
     pid_t pid = fork();
     if (pid < 0) { chrome_kill(c); return; }
     if (pid == 0) {
-        // Detached from the terminal and from the shell's pipeline: anything
-        // still held open here is something downstream is waiting on.
         setsid();
         int devnull = open("/dev/null", O_RDWR);
         if (devnull >= 0) {
@@ -963,8 +799,6 @@ void chrome_kill_bg(Chrome *c) {
         _exit(0);
     }
 
-    // Ours is only a copy of the socket; the child is holding the one that
-    // carries the close request.
     if (c->ws.fd > 0) ws_close(&c->ws);
     c->pid = 0;
 }
@@ -991,12 +825,6 @@ int cdp_vcall(Chrome *c, const char *method, const char *params_fmt, va_list ap)
     return rc < 0 ? -1 : id;
 }
 
-// The same call, sent on the browser's own socket instead of the page's, and
-// aimed at whichever page a flattened session names. That is how a page other
-// than the one this window drives is spoken to at all: a socket of its own
-// would be another descriptor to poll and another session to keep alive, where
-// a session id is a field in a message on a socket already here. The reply
-// comes back on the same socket carrying the same id.
 int cdp_session_call(Chrome *c, const char *session, const char *method,
                      const char *params_fmt, ...) {
     if (c->watch.fd <= 0 || c->watch.closed) return -1;

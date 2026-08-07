@@ -8,47 +8,23 @@
 #include "web.h"
 #include "start_html.h"
 
-// ~/.config/web/web.conf: the settings, and what every key does. The defaults
-// are compiled in and the file is read over the top of them, so a line the
-// file does not carry is the one it has always been, and the file is never
-// written back - what it says is what the user said, and nothing here has an
-// opinion it would want to save. Which is also why what a key changes while
-// the window is up - the zoom, the size of the window - is only ever read out
-// of here: it says where a new window opens, and the dozen that may be running
-// each go their own way from there without any of it coming back.
-//
-// Nothing else in the program knows a key: main.c asks this what an event
-// means and acts on the answer, and help.c asks it which key an action wears
-// so the list it draws is the real one.
-
-// A binding is one key or two: `key2` is 0 for the ones that are one, and the
-// pair `g g` is a first key that does nothing on its own and a second that
-// decides what the two of them were.
+// key2 is 0 for a one-key binding
 typedef struct { int mods, key, mods2, key2; Act act; } KeyBind;
 
-// The tables below, where a pair costs two more numbers on the line and a
-// single key should not have to carry them.
 typedef struct { int mods, key; Act act; } KeyDef;
 typedef struct { int mods, key, mods2, key2; Act act; } KeyPair;
 
-// One entry per key, so a file line naming a key already bound replaces it
-// rather than adding a second meaning. Two keys may share an action.
 #define BINDS_MAX 192
 
 static KeyBind g_binds[BINDS_MAX];
 static int     g_nbinds;
 
-// What the vim layer bound, so a file line landing on one of them can be
-// counted: the file is read last and wins, and a vim map that quietly did
-// nothing because web.conf already named `L` is worth a word on the status
-// line rather than a puzzle.
 static KeyBind g_vim[48];
 static int     g_nvim;
 
 // ------------------------------------------------------------------ names
 
-// The order is the order the help list and the generated file walk, so it is
-// also the order a reader meets the actions in.
+// order the help list and the generated file walk
 static const struct { const char *name; Act act; const char *section; } ACTS[] = {
     {"scroll-down",    ACT_SCROLL_DOWN, "moving"},
     {"scroll-up",      ACT_SCROLL_UP, NULL},
@@ -131,8 +107,7 @@ static const struct { const char *name; Act act; const char *section; } ACTS[] =
 };
 #define NACTS ((int)(sizeof ACTS / sizeof ACTS[0]))
 
-// The first spelling of each is the one written back out and drawn in the help
-// list; the rest are there so a file may say what its writer would have said.
+// first spelling of a key is the one written back out
 static const struct { const char *name; int key; } KEYNAMES[] = {
     {"left", KEY_LEFT}, {"right", KEY_RIGHT}, {"up", KEY_UP}, {"down", KEY_DOWN},
     {"space", ' '}, {"esc", KEY_ESC}, {"escape", KEY_ESC},
@@ -171,10 +146,6 @@ static Act act_by_name(const char *s) {
 
 // ---------------------------------------------------------------- matching
 
-// Shift is spelled by the character itself wherever there is a character to
-// spell it with, so `G` and `shift+g` have to end up the same pair however
-// either end reported them. Control is the other way round: a terminal sends ^Y
-// as `y` with a flag, so the letter is folded down rather than up.
 static void normalize(int *mods, int *key) {
     int m = *mods, k = *key;
     if (k > 0 && k < 128) {
@@ -197,9 +168,6 @@ static int find_bind(int mods, int key, int mods2, int key2) {
     return -1;
 }
 
-// A terminal that reports the unshifted key sends `?` as `/` with shift held,
-// and `:` as `;`. The shifted spelling is tried first, so a binding made on one
-// may still differ from the binding made on the other.
 static int find_either(int mods, int key, int mods2, int key2) {
     int i = find_bind(mods, key, mods2, key2);
     if (i < 0 && (mods & MOD_SHIFT) && key < 0x100)
@@ -207,8 +175,7 @@ static int find_either(int mods, int key, int mods2, int key2) {
     return i;
 }
 
-// Whether anything longer starts here. Only asked of a key that is not a
-// binding on its own, so a key that is both is simply that binding.
+// whether anything longer starts here
 static bool starts_pair(int mods, int key) {
     for (int i = 0; i < g_nbinds; i++) {
         if (!g_binds[i].key2) continue;
@@ -231,9 +198,6 @@ Act keys_lookup_seq(int pmods, int pkey, int mods, int key, bool *prefix) {
         normalize(&pmods, &pkey);
         int i = find_either(pmods, pkey, mods, key);
         if (i >= 0) return g_binds[i].act;
-        // The two of them are not a binding, so the first is dropped and this
-        // key is asked about on its own - which is what it would have meant
-        // had the other never been pressed.
     }
     int i = find_either(mods, key, 0, 0);
     if (i >= 0) return g_binds[i].act;
@@ -263,20 +227,17 @@ static void bind_set(int mods, int key, int mods2, int key2, Act act) {
 
 // ---------------------------------------------------------------- spelling
 
-// The left of a line: one key, or the two of a pair. Two are written with a
-// space between them - `^X f` - or, where both are a bare character, run
-// together the way they are pressed and said: `gg`, `yf`.
+// one key, or two: `^X f`, or bare characters run together as `gg`
 static bool parse_seq(char *s, int *m1, int *k1, int *m2, int *k2);
 
 static bool parse_spec(const char *s, int *mods, int *key) {
     *mods = 0;
     *key = 0;
-    if (s[0] == '^' && s[1]) {          // ^Y, the way the docs write it
+    if (s[0] == '^' && s[1]) {          // ^Y
         *mods |= MOD_CTRL;
         s++;
     }
-    // A modifier is only a modifier when a separator and something to modify
-    // follow it, which is what leaves `alt+-` and `alt++` meaning a key.
+    // a modifier needs a separator and a key after it, leaving `alt+-` and `alt++`
     for (bool again = true; again;) {
         again = false;
         for (int i = 0; i < NMODS && !again; i++) {
@@ -291,8 +252,7 @@ static bool parse_spec(const char *s, int *mods, int *key) {
     if (!*s) return false;
     for (int i = 0; i < NKEYNAMES; i++)
         if (!strcasecmp(s, KEYNAMES[i].name)) { *key = KEYNAMES[i].key; return true; }
-    // Anything left has to be the one character it stands for. Multibyte is
-    // decoded far enough to be the codepoint the terminal will report.
+    // utf-8 decode to a codepoint
     unsigned char c = (unsigned char)s[0];
     if (c < 0x80) {
         if (s[1]) return false;
@@ -332,8 +292,6 @@ static bool parse_seq(char *s, int *m1, int *k1, int *m2, int *k2) {
 
 void key_text(int mods, int key, char *out, size_t cap) {
     normalize(&mods, &key);
-    // ^Y rather than ctrl+y, since that is what a terminal's own documentation
-    // calls it and what this program's did before the keys could be moved.
     if (mods == MOD_CTRL && key < 128 && isalpha(key)) {
         snprintf(out, cap, "^%c", toupper(key));
         return;
@@ -345,7 +303,7 @@ void key_text(int mods, int key, char *out, size_t cap) {
     if (!name[0]) {
         if (key < 0x80) {
             snprintf(name, sizeof name, "%c", key);
-        } else {                        // back to utf-8, for the list to draw
+        } else {                        // back to utf-8
             int n = key < 0x800 ? 2 : key < 0x10000 ? 3 : 4;
             static const unsigned char lead[5] = {0, 0, 0xC0, 0xE0, 0xF0};
             for (int i = n - 1; i > 0; i--) { name[i] = (char)(0x80 | (key & 0x3F)); key >>= 6; }
@@ -358,9 +316,7 @@ void key_text(int mods, int key, char *out, size_t cap) {
              mods & MOD_ALT ? "alt+" : "", mods & MOD_SHIFT ? "shift+" : "", name);
 }
 
-// A whole binding, one key or two. A pair of bare characters is written the way
-// it is pressed and said - `gg`, `yf` - and anything with a modifier or a named
-// key in it takes the space it needs to be read back: `^X f`.
+// `gg` for two bare characters, `^X f` otherwise
 static void bind_text(const KeyBind *b, char *out, size_t cap) {
     char one[48];
     key_text(b->mods, b->key, one, sizeof one);
@@ -374,9 +330,7 @@ static void bind_text(const KeyBind *b, char *out, size_t cap) {
     else                                      snprintf(out, cap, "%s %s", one, two);
 }
 
-// The shortest of the keys that do it, which is both the one worth learning
-// and the one that keeps the help list narrow enough to hold two columns: `?`
-// rather than `shift+/`, `D` rather than `shift+down`.
+// the shortest of the keys bound to the action
 bool keys_text(Act act, char *out, size_t cap) {
     char best[48] = "";
     for (int i = 0; i < g_nbinds; i++) {
@@ -408,8 +362,6 @@ static const KeyDef DEFAULTS[] = {
     {MOD_CTRL, 'n', ACT_TAB_NEXT},
     {MOD_CTRL, 'b', ACT_TAB_PREV},
     {MOD_SUPER, 'c', ACT_COPY},
-    // alt rather than ctrl: the console's own editor uses most of the control
-    // keys, and this one has to work from inside it.
     {MOD_ALT, 'y', ACT_COPY_CONSOLE},
     {MOD_ALT, KEY_ENTER, ACT_RESUME},
     {MOD_ALT, 'g', ACT_GRID},
@@ -417,9 +369,6 @@ static const KeyDef DEFAULTS[] = {
     {MOD_ALT, 'd', ACT_BOOKMARK},
     {MOD_ALT, 'b', ACT_SEARCH_BOOKMARKS},
     {MOD_ALT, 'm', ACT_MERGE},
-    // The space bar is the page's own key on a site with a player, and this is
-    // the same key for a page that never gets it: nothing has to be focused
-    // first, and it works from inside the console and a text field alike.
     {MOD_ALT, ' ', ACT_PLAY_PAUSE},
 
     {MOD_ALT | MOD_SHIFT, KEY_RIGHT, ACT_TAB_NEXT},
@@ -453,8 +402,6 @@ static const KeyDef DEFAULTS[] = {
     {0, KEY_PGDN, ACT_PAGE_DOWN},
     {0, KEY_PGUP, ACT_PAGE_UP},
     {0, ' ', ACT_PAGE_DOWN},
-    // What every browser puts them on, and the way to walk a search without
-    // the vi keys that used to be the only one.
     {0, KEY_F3, ACT_FIND_NEXT},
     {MOD_SHIFT, KEY_F3, ACT_FIND_PREV},
     {0, 'f', ACT_HINT},
@@ -478,23 +425,6 @@ static const KeyDef DEFAULTS[] = {
 #define NDEFAULTS ((int)(sizeof DEFAULTS / sizeof DEFAULTS[0]))
 
 // ------------------------------------------------------------------- vim
-//
-// `vim = yes`, and the whole of the vi vocabulary is here rather than in the
-// map above: with this off, `j` types a j into the page and the window is
-// driven by the arrows, the chords and the handful of keys that are this
-// program's own rather than vi's. With it on, a reader who knows vim already
-// knows this - j k h l d u b gg G / n N for moving and searching, and the
-// browser extensions' additions on top: H and L for the history, o for the
-// address, f for the links, ZZ to leave.
-//
-// It sits under web.conf rather than over it, so a key the file names keeps
-// what the file gave it. Six of these land on keys the plain map uses for
-// something else, and those change meaning while vim is on:
-//
-//   L R    were the window's width; shift+left and shift+right still are
-//   :      was the console, which keeps ^X
-//   ^F     was find, which vi spells /
-//   ^D ^B  were the trace and the previous tab; the tab is on alt+shift+left
 static const KeyDef VIM[] = {
     {0, 'j', ACT_SCROLL_DOWN},
     {0, 'k', ACT_SCROLL_UP},
@@ -523,8 +453,6 @@ static const KeyDef VIM[] = {
 };
 #define NVIM ((int)(sizeof VIM / sizeof VIM[0]))
 
-// `g` and `y` do nothing on their own here: each waits for the key that says
-// what it was.
 static const KeyPair VIM_PAIRS[] = {
     {0, 'g', 0, 'g', ACT_TOP},
     {0, 'g', 0, 'i', ACT_FOCUS_INPUT},
@@ -539,22 +467,13 @@ static const KeyPair VIM_PAIRS[] = {
 
 // --------------------------------------------------------------- settings
 
-// The command line options worth having an opinion about for longer than one
-// run. Each is a field of App and the flag that sets it stays what it always
-// was: the file is read before the arguments are, so a flag still wins for the
-// run it is given on.
-//
-// `zoom`, `rows` and `cols` are where a new window starts and nothing more. A
-// key moves them afterwards and the file never hears about it, so the several
-// windows usually up at once each keep their own - what is written here is an
-// opening position, not a record of one.
 typedef enum { S_BOOL, S_BOOL_NOT, S_SCALE, S_ZOOM, S_RATIO, S_COUNT,
                S_MS, S_SETTLE, S_TEXT } SetKind;
 
 static const struct {
     const char *name;
     SetKind     kind;
-    size_t      off;        // the field in App it is
+    size_t      off;        // field in App
 } SETTINGS[] = {
     {"vim",           S_BOOL,     offsetof(App, vim)},
     {"pause-on-blur", S_BOOL,     offsetof(App, pause_on_blur)},
@@ -596,9 +515,7 @@ static bool parse_bool(const char *v, bool *out) {
 
 static bool setting_set(App *a, int i, const char *v) {
     char *end;
-    // A url with the words' place marked in it. Refused without the mark: a
-    // template that cannot say where the query goes is a line that would send
-    // every search to the same page, and saying so is better than doing it.
+    // url with %s in it
     if (SETTINGS[i].kind == S_TEXT) {
         if (strncmp(v, "http://", 7) && strncmp(v, "https://", 8)) return false;
         if (!strstr(v, "%s")) return false;
@@ -614,17 +531,13 @@ static bool setting_set(App *a, int i, const char *v) {
         a->want_scale = d;
         return true;
     }
-    // The same range --zoom takes, refused rather than clamped: a file is
-    // written once and read every run, so a number outside it is worth saying.
     if (SETTINGS[i].kind == S_ZOOM) {
         double d = strtod(v, &end);
         if (end == v || *end || d < 0.5 || d > 3.0) return false;
         *double_at(a, SETTINGS[i].off) = d;
         return true;
     }
-    // How far the picture drops while the page is moving, as a fraction of the
-    // width. 1 is no drop at all, which is the way to turn the trade off
-    // without giving up the rest of what `scale auto` does.
+    // fraction of the width; 1 is no drop
     if (SETTINGS[i].kind == S_RATIO) {
         double d = strtod(v, &end);
         if (end == v || *end || d < 0.1 || d > 1.0) return false;
@@ -638,18 +551,14 @@ static bool setting_set(App *a, int i, const char *v) {
         *int_at(a, SETTINGS[i].off) = (int)n;
         return true;
     }
-    // Milliseconds again, with a floor under it: a scroll called over between
-    // one of its own frames and the next is a scroll that goes back to full
-    // size in the middle of itself, and then straight back down. 50 is below
-    // anything a trackpad leaves between frames.
+    // milliseconds, floor of 50
     if (SETTINGS[i].kind == S_SETTLE) {
         long n = strtol(v, &end, 10);
         if (end == v || *end || n < 50 || n > 5000) return false;
         *int_at(a, SETTINGS[i].off) = (int)n;
         return true;
     }
-    // Milliseconds, where none is a number rather than a word: 0 is what a run
-    // going as fast as it can already is.
+    // milliseconds
     if (SETTINGS[i].kind == S_MS) {
         long n = strtol(v, &end, 10);
         if (end == v || *end || n < 0 || n > 60000) return false;
@@ -692,28 +601,14 @@ static void setting_text(const App *a, int i, char *out, size_t cap) {
 
 // ------------------------------------------------------------ site rules
 
-// Which elements the labels land on, per site. `f` labels everything a click
-// could be aimed at, which is the only honest answer on a page nothing is known
-// about and the wrong one on a page that is a list: Hacker News is two hundred
-// links of which thirty are the ones anyone came for, and the other hundred and
-// seventy are what makes the thirty unreadable. `hint-only` says what the whole
-// set is for a host and `hint-skip` takes a part of it away, both as ordinary
-// CSS selectors, which is the same answer Vimium C arrived at.
-//
-//   hint-only news.ycombinator.com = .titleline > a
-//   hint-skip github.com           = .Header, footer
-//
-// Neither is a way to lose a link for good: `hint-all` labels everything on any
-// page, whatever the file said about it.
+// hint-only / hint-skip css selectors, per host
 typedef struct { char host[96]; char sel[192]; bool skip; } HintRule;
 #define HINTS_MAX 32
 
 static HintRule g_hints[HINTS_MAX];
 static int      g_nhints;
 
-// One field of a line, trimmed at both ends into a fixed array. False when
-// there was nothing there or more than there is room for, since a selector
-// silently cut in half is a selector that quietly means something else.
+// trims [s, end) into out; false when empty or it does not fit cap
 static bool copy_field(char *out, size_t cap, const char *s, const char *end) {
     while (s < end && isspace((unsigned char)*s)) s++;
     while (end > s && isspace((unsigned char)end[-1])) end--;
@@ -724,10 +619,9 @@ static bool copy_field(char *out, size_t cap, const char *s, const char *end) {
     return true;
 }
 
-// The `host = selector` half of a rule line.
+// the `host = selector` half of a rule line
 static bool hint_add(const char *s, bool skip) {
-    // The first `=`, unlike every other line in the file: a selector may hold
-    // one, as `a[href^=http]` does, and the host it belongs to may not.
+    // the first `=`; a selector may hold one, as `a[href^=http]` does
     const char *eq = strchr(s, '=');
     if (!eq || g_nhints >= HINTS_MAX) return false;
     HintRule r = {{0}, {0}, skip};
@@ -738,8 +632,7 @@ static bool hint_add(const char *s, bool skip) {
     return true;
 }
 
-// The `hint-only` or `hint-skip` a line opens with, and what follows it. NULL
-// for every other line, which is most of them.
+// what follows a leading `hint-only` or `hint-skip`, NULL for any other line
 static const char *hint_keyword(const char *s, bool *skip) {
     while (isspace((unsigned char)*s)) s++;
     if (!strncasecmp(s, "hint-only", 9))      *skip = false;
@@ -751,8 +644,7 @@ static const char *hint_keyword(const char *s, bool *skip) {
     return s;
 }
 
-// The host of a URL, lowercased, without the scheme, the port, the login or
-// anything after it.
+// host of a url, lowercased, without scheme, port, login or path
 static void url_host(const char *url, char *out, size_t cap) {
     const char *p = strstr(url, "://");
     p = p ? p + 3 : url;
@@ -768,9 +660,7 @@ static void url_host(const char *url, char *out, size_t cap) {
     out[n] = 0;
 }
 
-// A rule's host against the page's: the end of it, on a dot, so
-// `ycombinator.com` is `news.ycombinator.com` as well and `combinator.com` is
-// neither of them.
+// suffix match on a dot boundary
 static bool host_match(const char *host, const char *pat) {
     size_t h = strlen(host), n = strlen(pat);
     if (!n || n > h) return false;
@@ -778,20 +668,14 @@ static bool host_match(const char *host, const char *pat) {
     return h == n || host[h - n - 1] == '.';
 }
 
-// The same shape one line further on: a setting with a host in front of its
-// `=` is that setting for that host alone. pause-on-blur and
-// media-pause-on-blur, which are the ones whose right answer changes site by
-// site - a page that is only worth drawing while it is looked at, against a
-// video that is worth drawing whether or not the terminal has the focus.
+// pause-on-blur / media-pause-on-blur, per host
 typedef struct { char host[96]; bool on; bool media; } PauseRule;
 #define PAUSE_MAX 32
 
 static PauseRule g_pause[PAUSE_MAX];
 static int       g_npause;
 
-// The `host = yes/no` half of the line. A value that is not a boolean is
-// refused rather than read as `no`: a misspelling that quietly turns the
-// pausing off is a window that stops drawing for a reason nothing explains.
+// the `host = yes/no` half of the line
 static bool pause_add(const char *s, bool media) {
     const char *eq = strchr(s, '=');
     if (!eq || g_npause >= PAUSE_MAX) return false;
@@ -805,9 +689,7 @@ static bool pause_add(const char *s, bool media) {
     return true;
 }
 
-// What follows either keyword when a host follows it, and which of the two it
-// was. NULL when the next thing is the `=`, which is the file-wide setting and
-// belongs to the reader below rather than here.
+// what follows either keyword, NULL when the next thing is the `=`
 static const char *pause_keyword(const char *s, bool *media) {
     while (isspace((unsigned char)*s)) s++;
     size_t n;
@@ -825,7 +707,6 @@ static bool blur_rule(const char *url, bool media, bool *out) {
     char host[256];
     url_host(url, host, sizeof host);
     if (!host[0]) return false;
-    // The first of its own kind that matches, the way the hint rules are read.
     for (int i = 0; i < g_npause; i++)
         if (g_pause[i].media == media && host_match(host, g_pause[i].host)) {
             *out = g_pause[i].on;
@@ -842,9 +723,6 @@ const char *hint_selector(const char *url, bool skip) {
     char host[256];
     url_host(url, host, sizeof host);
     if (!host[0]) return NULL;
-    // The first that matches rather than the longest: the file is short and in
-    // an order its writer chose, and a second rule for a host already named is
-    // a line that reads as if it were the one in force.
     for (int i = 0; i < g_nhints; i++)
         if (g_hints[i].skip == skip && host_match(host, g_hints[i].host))
             return g_hints[i].sel;
@@ -853,10 +731,6 @@ const char *hint_selector(const char *url, bool skip) {
 
 // ------------------------------------------------------------------ file
 
-// Written once, when there is nothing there, out of the values the program is
-// about to run with - so the file always opens saying exactly what the
-// defaults are rather than what they were when this was written. The lines
-// and nothing else: what they mean is the readme's job.
 static void write_config(const char *path, const App *a) {
     FILE *f = fopen(path, "w");
     if (!f) return;
@@ -868,14 +742,8 @@ static void write_config(const char *path, const App *a) {
     fputs("\n# Which elements the link labels land on, for one site.\n"
           "#hint-only news.ycombinator.com = .titleline > a\n"
           "#hint-skip github.com = .Header, footer\n", f);
-    // The keys are written with a `#` in front of them: each line says what the
-    // key already does, and taking the `#` off is how it is changed. Live, they
-    // would be the whole default map stated a second time - and anything laid
-    // under this file, the vim map above all, would have nothing left to say.
     fputs("\n# Every key, as it stands. Take the `#` off a line to change it,\n"
           "# and press `?` in the window for the list as it really is.\n", f);
-    // Walked in action order rather than binding order, so the file reads as a
-    // list of what can be done rather than of what the keyboard happens to hold.
     for (int i = 0; i < NACTS; i++) {
         if (ACTS[i].section) fputc('\n', f);
         for (int j = 0; j < NDEFAULTS; j++) {
@@ -894,10 +762,7 @@ static void trim(char *s) {
     while (n && isspace((unsigned char)s[n - 1])) s[--n] = 0;
 }
 
-// Whether the vim layer had asked for this key, so a file line landing on it
-// can be counted. A single key counts against every pair it would start: the
-// file saying `y = copy-url` is the file taking `yy` and `yf` away, whether or
-// not it meant to.
+// whether the vim layer bound this; a single key counts against every pair it starts
 static bool vim_had(int m1, int k1, int m2, int k2) {
     normalize(&m1, &k1);
     if (k2) normalize(&m2, &k2);
@@ -909,10 +774,7 @@ static bool vim_had(int m1, int k1, int m2, int k2) {
     return false;
 }
 
-// The file is read twice: once for the settings, and once for the keys, after
-// whatever the settings asked for has been laid down underneath them. Each
-// line belongs to exactly one of the two passes, so a mistake in it is
-// reported once rather than on every trip through.
+// read twice: settings pass, then keys pass
 static int read_config(const char *path, App *a, bool keys) {
     FILE *f = fopen(path, "r");
     if (!f) return 0;
@@ -920,10 +782,7 @@ static int read_config(const char *path, App *a, bool keys) {
     int lineno = 0, bad = 0;
     while (fgets(line, sizeof line, f)) {
         lineno++;
-        // A site rule, taken whole and before any of the reading below touches
-        // it: a CSS selector may hold a `#` and it may hold an `=`, and neither
-        // means there what it means on every other line of the file. Which
-        // leaves such a line only able to be commented out from its very start.
+        // site rules are taken whole, before any `#` or `=` handling below
         bool skip;
         trim(line);
         const char *rule = hint_keyword(line, &skip);
@@ -937,16 +796,12 @@ static int read_config(const char *path, App *a, bool keys) {
             }
             continue;
         }
-        // A `#` opening the line, or with a space in front of it, starts a
-        // comment; one written up against the key is the key. Which leaves the
-        // bare `#` key unreachable and every other spelling of it working.
+        // a `#` at the line start or after a space begins a comment
         for (char *p = line; *p; p++) {
             if (*p != '#') continue;
             if (p == line || isspace((unsigned char)p[-1])) { *p = 0; break; }
         }
-        // A host in front of the `=` makes the line that setting for that host,
-        // and the reading below - which knows only settings and keys - would
-        // find neither in it.
+        // a host in front of the `=` makes the line that setting for that host
         bool per_media = false;
         const char *per = pause_keyword(line, &per_media);
         if (per) {
@@ -959,11 +814,9 @@ static int read_config(const char *path, App *a, bool keys) {
             }
             continue;
         }
-        // The last `=`, not the first: the key may be one, as alt+= is.
+        // the last `=`, not the first, since the key may be one, as alt+= is
         char *eq = strrchr(line, '=');
-        // Unless what stands in front of the first one names a setting, in
-        // which case everything after it is the value and the `=` inside a url
-        // - `?q=%s` - belongs to the value rather than to this.
+        // unless the left of the first names a setting: then the value keeps its own `=`
         char *first = strchr(line, '=');
         if (first && first != eq) {
             char head[64];
@@ -992,9 +845,6 @@ static int read_config(const char *path, App *a, bool keys) {
         while (isspace((unsigned char)*name)) name++;
         trim(spec);
         trim(name);
-        // A setting first, and a key only if the left of it is not the name of
-        // one. No setting is named anything a key could be called, so the two
-        // kinds of line cannot be confused for one another.
         int s = -1;
         for (int i = 0; i < NSETTINGS; i++)
             if (!strcasecmp(SETTINGS[i].name, spec)) { s = i; break; }
@@ -1036,8 +886,6 @@ static int read_config(const char *path, App *a, bool keys) {
     return bad;
 }
 
-// Where it lives. One browser, one terminal, one file - none of it is keyed to
-// anything, because none of it says anything about a particular window.
 void config_dir(char *out, size_t cap) {
     const char *cfg = getenv("XDG_CONFIG_HOME");
     const char *home = getenv("HOME");
@@ -1045,12 +893,6 @@ void config_dir(char *out, size_t cap) {
     else             snprintf(out, cap, "%s/.config/web", home ? home : "/tmp");
 }
 
-// A key bound on its own happens the moment it is pressed, which leaves every
-// pair starting with it unreachable. That is a fair thing to ask for and a
-// terrible thing to arrive at by accident - and the commonest way in is a
-// web.conf written by a version where `gg` was one binding pressed twice, whose
-// `g = top` line now means a single press. Said once per key, and never for the
-// defaults, which do not shadow anything.
 static void warn_shadowed(const char *path) {
     for (int i = 0; i < g_nbinds; i++) {
         if (g_binds[i].key2) continue;
@@ -1068,8 +910,6 @@ static void warn_shadowed(const char *path) {
     }
 }
 
-// The vim layer, remembered as it goes on so the file can be seen taking any
-// of it back again.
 static void load_vim(void) {
     g_nvim = 0;
     for (int i = 0; i < NVIM && g_nvim < (int)(sizeof g_vim / sizeof g_vim[0]); i++) {
@@ -1085,11 +925,7 @@ static void load_vim(void) {
     }
 }
 
-// The page a first run opens on, put beside the config so it can be read
-// without a network and edited or emptied like the rest of what is there. Never
-// written over: the copy in the binary is only ever a starting point, and a
-// file somebody has changed is theirs. True when this run is the one that put
-// it there, which is the run that opens on it.
+// writes start.html when absent; true when this run wrote it
 static bool write_start(const char *dir) {
     char path[600];
     snprintf(path, sizeof path, "%s/start.html", dir);
@@ -1098,11 +934,10 @@ static bool write_start(const char *dir) {
     if (!f) return false;
     bool ok = fwrite(START_HTML, 1, sizeof START_HTML, f) == sizeof START_HTML;
     fclose(f);
-    if (!ok) unlink(path);      // half a page is worse than none
+    if (!ok) unlink(path);
     return ok;
 }
 
-// Where that page is, for the run that is about to open on it.
 bool start_page_path(char *out, size_t cap) {
     char dir[512];
     config_dir(dir, sizeof dir);
@@ -1125,12 +960,9 @@ int config_load(App *a) {
         mkdirs(dir);
         write_config(path, a);
         a->show_start = write_start(dir);
-        return 0;               // just written, so it says what is already loaded
+        return 0;
     }
     a->show_start = write_start(dir);
-    // Settings first, because one of them decides what the keys are laid on
-    // top of; then the layer; then the file's own keys, which win, since a key
-    // named in a file is a key someone meant.
     int bad = read_config(path, a, false);
     if (a->vim) load_vim();
     bad += read_config(path, a, true);

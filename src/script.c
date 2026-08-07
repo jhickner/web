@@ -6,24 +6,8 @@
 #include <unistd.h>
 #include "web.h"
 
-// A queue of javascript, run against the page one line at a time. The console
-// and --eval are the same runner: a line is handed to the page's own eval and
-// the completion value comes back, which is the reading devtools has - `let x =
-// 2; x * 2` answers 4 rather than being a syntax error.
-//
-// There is no command language here, and there is not going to be one: what a
-// line is, is javascript. What the page cannot say in one line is waiting, so
-// the page is given the verbs for it - see WEB_HELPERS in main.c - and a line
-// that answers a promise is not finished until the promise is. Real input, a
-// selector engine and assertions belong to something that has them already:
-// js/cdp.mjs over --exec, or Playwright through the same endpoint.
-
 // ------------------------------------------------------------------ output
 
-// Data goes to fd 1 - but only when fd 1 is not the terminal the page is drawn
-// on. Writing there would scroll the picture out from under its placeholder
-// cells, which nothing puts back. Nor when a screenshot has been promised
-// there: a line of text in front of a PNG is a PNG nothing will open.
 static void out_line(App *a, const char *payload) {
     Script *s = &a->script;
     Buf b = {0};
@@ -53,9 +37,6 @@ static void fail(App *a, const char *why) {
     s->failures++;
     s->state = SC_IDLE;
     s->next_at = now_sec() + s->delay;
-    // A file that has lost its place cannot be trusted to carry on against a
-    // page that is not where it thinks it is. What somebody types is their own
-    // business, and there is never more than a line of it waiting anyway.
     if (s->from_file) {
         s->queue.len = 0;
         if (s->queue.p) s->queue.p[0] = 0;
@@ -123,18 +104,8 @@ static void done(App *a) {
     if (s->step) s->stepping = true;
 }
 
-// Handed to the page's own eval rather than sent as the expression itself,
-// because a line is not always an expression: eval answers with the completion
-// value, so a statement says what it worked out. The inner quoting makes the
-// line a string to eval; app_cdp quotes the whole thing again for the wire.
 static void run(App *a) {
     Script *s = &a->script;
-    // Wrapped in a promise rather than in String() alone, so a line that
-    // answers with one is finished when the promise is - awaitPromise has
-    // something to wait for. String(promise) is "[object Promise]" and the wait
-    // has already been given a string, which is what a line doing anything
-    // asynchronous used to come back as. Written with buf_addf rather than a
-    // counted buf_add: a length counted by hand is a length counted wrong.
     Buf e = {0};
     buf_addf(&e, "Promise.resolve(eval(\"");
     json_escape_buf(&e, s->line);
@@ -161,9 +132,7 @@ void script_reply(App *a, const char *msg) {
     size_t n = 0;
     const char *v = json_eval_str(msg, &n);
     if (!v) {
-        // A console wants the reason, not the fact. An exception reply carries
-        // the message and the stack under description; the first line of it is
-        // the message, and the rest is where in the page it happened.
+        // description holds the message then the stack; first line is the message
         size_t dn = 0;
         const char *d = json_str(msg, "description", &dn);
         char why[400] = "the page threw";
@@ -184,8 +153,6 @@ void script_reply(App *a, const char *msg) {
     out_line(a, out.p);
     buf_free(&out);
 
-    // A line that set the page going is not over until the page has arrived:
-    // the next one would otherwise run against a document on its way out.
     if (a->loading) {
         s->nav_seq = a->load_seq;
         s->deadline = now_sec() + s->timeout;
@@ -221,8 +188,6 @@ void script_step(App *a) {
         return;
 
     case SC_NAV:
-        // Whatever it started has landed, or has taken long enough that waiting
-        // for it is worse than going on.
         if (a->load_seq != s->nav_seq || t > s->deadline) done(a);
         return;
     }
@@ -230,14 +195,12 @@ void script_step(App *a) {
 
 int script_wait_ms(const App *a) {
     const Script *s = &a->script;
-    // Nothing queued and nothing running: the loop keeps blocking forever, the
-    // way it did before any of this existed.
     if (s->state == SC_IDLE && !s->queue.len) return -1;
     if (s->stepping) return -1;
 
     double t = (s->state == SC_IDLE) ? s->next_at : s->deadline;
     double ms = (t - now_sec()) * 1000.0;
-    if (ms < 5) ms = 5;             // never spin
-    if (ms > 100) ms = 100;         // never oversleep a poll cycle
+    if (ms < 5) ms = 5;
+    if (ms > 100) ms = 100;
     return (int)ms;
 }

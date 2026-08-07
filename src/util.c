@@ -63,10 +63,6 @@ double now_sec(void) {
     return (double)tv.tv_sec + tv.tv_usec / 1e6;
 }
 
-// The tty is non-blocking so input never stalls the loop, which means a frame
-// larger than the terminal's buffer comes back as EAGAIN part-way through.
-// Stopping there would leave a half-written escape sequence on screen, so wait
-// for room and finish the write.
 void mkdirs(const char *path) {
     char tmp[512];
     snprintf(tmp, sizeof tmp, "%s", path);
@@ -87,11 +83,6 @@ int writeall(int fd, const char *p, size_t n) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 if (g_input_pump) g_input_pump();
-                // A shutdown must not wedge on a full tty - but the mode resets
-                // are the shutdown, and dropping those hands the shell back a
-                // terminal with the mouse still reporting, the cursor still
-                // hidden and the keyboard still in kitty's encoding. Those wait,
-                // for as long as it takes and no longer.
                 if (g_quit && !g_write_force) return -1;
                 if (g_write_force) {
                     if (deadline == 0) deadline = now_sec() + 2.0;
@@ -118,8 +109,6 @@ size_t base64_decode(const char *src, size_t n, char *dst) {
     int bits = 0;
     size_t o = 0;
     for (size_t i = 0; i < n; i++) {
-        // Padding and anything else outside the alphabet is skipped, so a
-        // wrapped string decodes the same as an unwrapped one.
         const char *p = memchr(A, src[i], 64);
         if (!p) continue;
         acc = (acc << 6) | (unsigned)(p - A);
@@ -170,8 +159,8 @@ bool json_has(const char *js, const char *key) {
     return find_key(js, key) != NULL;
 }
 
-// The escape for one byte, or NULL when it passes through. `tmp` backs the
-// \u form, which is the only one that has to be built rather than named.
+// returns the escape for one byte, or NULL when it passes through; `tmp` backs
+// the \u form
 static const char *escape_of(unsigned char c, char tmp[8]) {
     switch (c) {
     case '"':  return "\\\"";
@@ -207,9 +196,7 @@ size_t json_escape(char *dst, size_t cap, const char *src) {
     return o;
 }
 
-// The same escape appended to a growable buffer. json_escape truncates silently
-// once the caller's array is full, which is fine for a URL and wrong for
-// anything carrying arbitrary page text or a script argument.
+// the same escape appended to a growable buffer, without truncating
 void json_escape_buf(Buf *out, const char *src) {
     for (const unsigned char *s = (const unsigned char *)src; *s; s++) {
         char tmp[8];
@@ -219,21 +206,14 @@ void json_escape_buf(Buf *out, const char *src) {
     }
 }
 
-// The string a Runtime.evaluate returned by value. Anchored past the two nested
-// result objects: the reader below finds a key anywhere in the message, and a
-// page whose own text contains "value": would otherwise answer for the reply.
-// Chrome writes type before value, so the first one past the anchor is ours.
+// the string a Runtime.evaluate returned by value
 const char *json_eval_str(const char *msg, size_t *len) {
     const char *p = strstr(msg, "\"result\":{\"result\":{");
     if (!p || json_has(msg, "exceptionDetails")) return NULL;
     return json_str(p, "value", len);
 }
 
-// Turn a JSON string body back into bytes. Only the escapes CDP actually
-// produces for page text are handled.
-// The four hex digits of a \u escape. The caller has already checked they are
-// there; a digit that is not one reads as whatever the arithmetic makes of it,
-// which is the same answer strtol would give for malformed input.
+// the four hex digits of a \u escape; caller has checked they are there
 static unsigned hex4(const char *s) {
     unsigned cp = 0;
     for (int k = 0; k < 4; k++) {
@@ -258,11 +238,7 @@ size_t json_unescape(char *dst, size_t cap, const char *src, size_t n) {
             if (i + 4 >= n) { i = n; break; }
             unsigned cp = hex4(src + i + 1);
             i += 4;
-            // Anything above the BMP is written as a pair of surrogates, and
-            // half of one means nothing on its own: an emoji in a page title
-            // would otherwise come out as two characters that are not
-            // characters. A half with no partner becomes the replacement
-            // character rather than an invalid sequence of its own.
+            // surrogate pair above the BMP; a half with no partner becomes fffd
             if (cp >= 0xd800 && cp <= 0xdbff) {
                 unsigned lo = (i + 6 < n && src[i + 1] == '\\' &&
                                src[i + 2] == 'u') ? hex4(src + i + 3) : 0;
@@ -273,7 +249,7 @@ size_t json_unescape(char *dst, size_t cap, const char *src, size_t n) {
                     cp = 0xfffd;
                 }
             } else if (cp >= 0xdc00 && cp <= 0xdfff) {
-                cp = 0xfffd;               // a trailing half, on its own
+                cp = 0xfffd;               // a trailing half
             }
             if (cp < 0x80) {
                 dst[o++] = (char)cp;

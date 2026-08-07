@@ -13,7 +13,7 @@ all: $(BIN)
 $(BIN): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDLIBS)
 
-# The start page, carried in the binary so a first run has one to write out.
+# start page as a C array
 $(GEN): start.html
 	printf 'static const char START_HTML[] = {\n' > $@
 	xxd -i < $< >> $@

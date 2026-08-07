@@ -1,11 +1,4 @@
 #!/bin/sh
-# Build Web.app: an http/https handler that hands the link to `web`.
-#
-# macOS will only offer an app bundle as the default browser, and it delivers
-# the url as an Apple Event rather than on a command line, so the bundle is an
-# AppleScript applet with an `open location` handler. All it does is run the
-# shell script in its Resources, which hands the url to a running window and
-# falls back to opening a terminal.
 set -eu
 
 APP_DIR=${APP_DIR:-$HOME/Applications}
@@ -35,7 +28,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# $1 as one shell word, for the values baked into the generated script.
+# $1 as one shell word
 quote() { printf "'"; printf %s "$1" | sed "s/'/'\\\\''/g"; printf "'"; }
 
 WEB=$(command -v web 2>/dev/null || true)
@@ -77,14 +70,6 @@ mkdir -p "$APP_DIR"
 rm -rf "$APP"
 osacompile -o "$APP" "$WORK/handler.applescript"
 
-# The url goes to a window that is already up when there is one; `web --open`
-# fails when there is not, which is the signal to start a terminal instead.
-#
-# A window in the terminal already running, not another copy of the
-# application: `open -n` starts a second instance, with its own icon in the
-# Dock and its own everything, and a link is not a reason for one. Ghostty is
-# scriptable, so it is asked; anything else, and anything that refuses, gets
-# `open -n` after all.
 TMUX_BIN=$(command -v tmux 2>/dev/null || true)
 
 OPEN_URL=$APP/Contents/Resources/open-url
@@ -96,11 +81,9 @@ OPEN_URL=$APP/Contents/Resources/open-url
     echo "TMUX_BIN=$(quote "$TMUX_BIN")"
     cat <<'BODY'
 
-# $1 as one shell word, so an address carrying & or ? or a quote survives
-# being written into a command line.
+# $1 as one shell word
 sq() { printf "'"; printf %s "$1" | sed "s/'/'\\\\''/g"; printf "'"; }
 
-# A pane running one of these is a pane running nothing.
 is_shell() {
     case $1 in
     bash|zsh|fish|sh|dash|ksh|mksh|tcsh|csh|nu|elvish|xonsh) return 0 ;;
@@ -108,9 +91,7 @@ is_shell() {
     esac
 }
 
-# The tmux window on screen, as session:index, or nothing. Taken from the client
-# that was active last: two clients showing different windows cannot both be the
-# one being looked at, and from out here nothing else distinguishes them.
+# the tmux window on screen, as session:index, or nothing
 tmux_window() {
     [ -n "$TMUX_BIN" ] && [ -x "$TMUX_BIN" ] || return 1
     tty=$("$TMUX_BIN" list-clients -F '#{client_activity} #{client_tty}' 2>/dev/null |
@@ -119,8 +100,7 @@ tmux_window() {
     "$TMUX_BIN" display-message -p -t "$tty" '#{session_name}:#{window_index}' 2>/dev/null
 }
 
-# A pane of window $1 with nothing running in it. The active one for preference:
-# it is the one the cursor is already in, so the page arrives where the eye is.
+# a pane of window $1 with nothing running in it, active one first
 idle_pane() {
     "$TMUX_BIN" list-panes -t "$1" -F '#{pane_active} #{pane_id} #{pane_current_command}' \
         2>/dev/null | sort -rn | while read -r act id cmd; do
@@ -128,11 +108,7 @@ idle_pane() {
     done
 }
 
-# The command line $1, run in the terminal already on screen. A free pane of the
-# tmux window being looked at is the best of these: no new anything, and the page
-# lands beside the work it was asked for from. Failing that a split of that same
-# window, which is still the window being looked at - and only if the window has
-# no room left to divide, one of its own.
+# run the command line $1 in the terminal already on screen
 run_on_screen() {
     win=$(tmux_window) || return 1
     [ -n "$win" ] || return 1
@@ -140,8 +116,6 @@ run_on_screen() {
     pane=$(idle_pane "$win")
     if [ -n "$pane" ]; then
         "$TMUX_BIN" select-pane -t "$pane" 2>/dev/null
-        # C-u first: the pane is at a prompt, and a line half typed there would
-        # otherwise have the address appended to it and run as one command.
         "$TMUX_BIN" send-keys -t "$pane" C-u "$1" Enter 2>/dev/null || return 1
     else
         "$TMUX_BIN" split-window -t "$win" "$1" 2>/dev/null ||
@@ -150,7 +124,6 @@ run_on_screen() {
     return 0
 }
 
-# A tab of the window already open, for a terminal that is not showing tmux.
 new_tab() {
     [ "$TERMINAL" = Ghostty ] || return 1
     /usr/bin/osascript - "$1" >/dev/null 2>&1 <<'AS'
@@ -163,9 +136,6 @@ end run
 AS
 }
 
-# The last resort: a window of its own. Ghostty is scriptable and makes it in
-# the instance already running; anything else, and anything that refuses, gets a
-# second instance of the application because that is the only way left to ask.
 new_window() {
     if [ "$TERMINAL" = Ghostty ]; then
         /usr/bin/osascript - "$1" >/dev/null 2>&1 <<'AS' && return 0
@@ -182,8 +152,6 @@ AS
 
 url=$1
 
-# A window already running takes it, and has selected its own tmux pane; what
-# only out here can be done is bringing the application forward.
 if [ -n "$url" ] && "$WEB" --open "$url" 2>/dev/null; then
     [ "$ACTIVATE" = yes ] && /usr/bin/open -a "$TERMINAL"
     exit 0
@@ -192,7 +160,6 @@ fi
 cmd=$(sq "$WEB")
 [ -n "$url" ] && cmd="$cmd $(sq "$url")"
 
-# Outwards from what is already on screen, a step at a time.
 if run_on_screen "$cmd"; then
     /usr/bin/open -a "$TERMINAL"
     exit 0
@@ -211,18 +178,8 @@ set_key CFBundleName "string web"
 set_key CFBundleDisplayName "string web"
 set_key CFBundleIdentifier "string com.jhickner.web.browser"
 set_key CFBundleShortVersionString "string 1.0"
-# No LSUIElement here, deliberately. It keeps the applet out of the Dock, which
-# is what you want of something that exits the moment it has passed the url on -
-# but System Settings leaves an agent out of the default browser list, and being
-# choosable there is the whole point. The list is the only way in: LaunchServices
-# refuses to have the browser changed by anything but the user, so duti and every
-# other third party gets -54 for asking. So the Dock bounce stays.
 $PB -c "Delete :LSUIElement" "$PLIST" >/dev/null 2>&1 || true
 
-# osacompile builds a droplet, because the script has an `open` handler, and a
-# droplet claims every file there is - which puts it in the Open With menu of
-# everything on the disk. The claim is narrowed to the pages it can actually
-# draw.
 $PB -c "Delete :CFBundleDocumentTypes" "$PLIST" >/dev/null 2>&1 || true
 $PB -c "Add :CFBundleDocumentTypes array" "$PLIST" >/dev/null
 $PB -c "Add :CFBundleDocumentTypes:0 dict" "$PLIST" >/dev/null
