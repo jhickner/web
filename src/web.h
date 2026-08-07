@@ -80,6 +80,7 @@ int  chrome_launch(Chrome *c, const char *url, int w, int h, bool show_window,
                    bool mute, const char *user_agent, bool debug, int port);
 int  chrome_attach(Chrome *c);
 void chrome_profile_path(char *out, size_t cap);
+void web_cache_path(char *out, size_t cap);         // the dir every profile sits under
 
 // call before anything asks where the profile is. a name is letters, digits,
 // dot, underscore and dash; "-" is a throwaway one. -1 when the name is not one.
@@ -259,6 +260,7 @@ typedef struct {
 } Term;
 
 int  term_probe(Term *t);                 // open the tty and measure it
+bool term_graphics_ok(Term *t, bool tmux); // does it speak kitty graphics
 void term_enter(Term *t, bool inline_mode); // raw mode, alt screen, mouse
 void term_hover(Term *t, bool on);        // report moves with no button down
 void term_reserve_inline(Term *t, int rows);
@@ -399,7 +401,6 @@ typedef struct {
     char title[256];
     bool ours;          // we opened it: ours to close on the way out
     bool claimed;       // a driver opened this one, and will say when it goes
-    bool inited;        // the once-per-page CDP setup has been done
     int  x0, x1;        // cells the bar last drew it on
     Buf  shot;          // the last picture taken of it
     uint64_t shot_hash; // and what it hashed to
@@ -550,6 +551,7 @@ typedef struct {
 
     bool    has_tty;           // a real terminal to draw into
     bool    stdout_tty;        // fd 1 is that terminal
+    bool    no_gfx_check;      // start even when the terminal says it cannot draw
 
     int     exec_fd;           // --exec: the child's output, -1 when none
     pid_t   exec_pid;
@@ -655,6 +657,9 @@ bool pause_rule(const char *url, bool *out);
 
 // the media-pause-on-blur rule for this page's host
 bool media_rule(const char *url, bool *out);
+
+// the hide-on-blur rule for this page's host
+bool hide_rule(const char *url, bool *out);
 
 // -------------------------------------------------------------- extensions
 
@@ -792,8 +797,7 @@ bool bookmark_current(App *a);
 
 // ---------------------------------------------------------------- hints
 
-// `fresh` is tab_session_new()
-void hint_install(App *a, bool fresh);
+void hint_install(App *a);
 
 // `kind` 0 follow, 1 new tab, 2 copy the address. `all` ignores the site rules.
 void hint_show(App *a, int kind, bool all);
@@ -864,7 +868,7 @@ void record_toggle(App *a);
 void record_event(App *a, const char *json);   // one interaction, from the page
 void record_goto(App *a, const char *url);
 void record_history(App *a, int delta);        // back, or forward
-void record_install(App *a, bool fresh);       // the watcher, into a new document
+void record_install(App *a);                   // the watcher, into a new document
 
 // -------------------------------------------------------------------- mcp
 //
@@ -873,8 +877,5 @@ int mcp_serve(void);
 
 // the address moves into a tab of our own and the page it came from is closed
 bool tab_from_popup(App *a, const char *target, const char *url);
-
-// whether the page in front is one this window has not set up before
-bool tab_session_new(App *a);
 
 #endif

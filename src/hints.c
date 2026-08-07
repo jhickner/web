@@ -209,11 +209,9 @@ static void hint_start(App *a, int kind, const char *only, const char *skip) {
     buf_free(&js);
 }
 
-void hint_install(App *a, bool fresh) {
-    // the binding is per session, the script per document
+void hint_install(App *a) {
     app_cdp(a, "Runtime.addBinding",
             "\"name\":\"__webhint\",\"executionContextName\":\"%s\"", WEB_WORLD);
-    if (!fresh) return;
     Buf esc = {0};
     json_escape_buf(&esc, HINT_JS);
     buf_add(&esc, "", 1);

@@ -33,6 +33,7 @@ static const Bind BINDS[] = {
     {.act = ACT_COPY_URL,                         .what = "copy the address"},
     {.act = ACT_COPY_CONSOLE,                     .what = "copy the console transcript"},
     {.act = ACT_RESUME,                           .what = "let a frozen run carry on"},
+    {.act = ACT_PLAY_PAUSE,                       .what = "play or pause the video"},
     {.act = ACT_GRID,                             .what = "every tab at once, in a grid"},
     {.act = ACT_RECORD,                           .what = "write what you do as a spec"},
     {.act = ACT_EXTERNAL,                         .what = "open in the desktop browser"},
