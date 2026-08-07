@@ -3342,26 +3342,23 @@ void session_init(App *a) {
         app_cdp(a, "Runtime.addBinding",
                  "\"name\":\"__webrec\",\"executionContextName\":\"%s\"",
                  WEB_WORLD);
-        bool fresh = tab_session_new(a);
-        hint_install(a, fresh);
-        if (fresh)
-            app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
-                     "\"source\":\"%s\",\"worldName\":\"%s\","
-                     "\"runImmediately\":true", esc, WEB_WORLD);
-        if (fresh) {
+        hint_install(a);
+        app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
+                 "\"source\":\"%s\",\"worldName\":\"%s\","
+                 "\"runImmediately\":true", esc, WEB_WORLD);
+        {
             char src[3072], hesc[6144];
             snprintf(src, sizeof src, WEB_HELPERS, (int)(a->script.timeout * 1000));
             json_escape(hesc, sizeof hesc, src);
             app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
                      "\"source\":\"%s\",\"runImmediately\":true", hesc);
         }
-        record_install(a, fresh);
-        if (a->claim_keys && fresh) {
+        record_install(a);
+        if (a->claim_keys) {
             json_escape(esc, sizeof esc, KEY_CLAIMER);
             app_cdp(a, "Page.addScriptToEvaluateOnNewDocument",
                      "\"source\":\"%s\",\"worldName\":\"%s\","
                      "\"runImmediately\":true", esc, WEB_WORLD);
-            json_escape(esc, sizeof esc, FOCUS_WATCHER);   // as the next call expects
         }
         json_escape(esc, sizeof esc, FOCUS_READ);
         app_req_note(a, app_cdp(a, "Runtime.evaluate",

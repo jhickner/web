@@ -397,7 +397,6 @@ typedef struct {
     char title[256];
     bool ours;          // we opened it: ours to close on the way out
     bool claimed;       // a driver opened this one, and will say when it goes
-    bool inited;        // the once-per-page CDP setup has been done
     int  x0, x1;        // cells the bar last drew it on
     Buf  shot;          // the last picture taken of it
     uint64_t shot_hash; // and what it hashed to
@@ -779,8 +778,7 @@ bool bookmark_current(App *a);
 
 // ---------------------------------------------------------------- hints
 
-// `fresh` is tab_session_new()
-void hint_install(App *a, bool fresh);
+void hint_install(App *a);
 
 // `kind` 0 follow, 1 new tab, 2 copy the address. `all` ignores the site rules.
 void hint_show(App *a, int kind, bool all);
@@ -851,7 +849,7 @@ void record_toggle(App *a);
 void record_event(App *a, const char *json);   // one interaction, from the page
 void record_goto(App *a, const char *url);
 void record_history(App *a, int delta);        // back, or forward
-void record_install(App *a, bool fresh);       // the watcher, into a new document
+void record_install(App *a);                   // the watcher, into a new document
 
 // -------------------------------------------------------------------- mcp
 //
@@ -860,8 +858,5 @@ int mcp_serve(void);
 
 // the address moves into a tab of our own and the page it came from is closed
 bool tab_from_popup(App *a, const char *target, const char *url);
-
-// whether the page in front is one this window has not set up before
-bool tab_session_new(App *a);
 
 #endif
