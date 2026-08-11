@@ -103,7 +103,7 @@ static bool pid_alive(pid_t p) {
     return kill(p, 0) == 0 || errno != ESRCH;
 }
 
-static void rm_tree(const char *path) {
+void rm_tree(const char *path) {
     DIR *d = opendir(path);
     if (!d) { unlink(path); return; }
     struct dirent *e;

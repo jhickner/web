@@ -26,6 +26,7 @@ double now_sec(void);
 uint64_t fnv1a(const char *p, size_t n);
 int    writeall(int fd, const char *p, size_t n);
 void   mkdirs(const char *path);
+void   rm_tree(const char *path);
 
 // Bytes written. dst needs room for three per four of src.
 size_t base64_decode(const char *src, size_t n, char *dst);

@@ -34,6 +34,13 @@ bool ext_add(const char *path) {
         fprintf(stderr, "web: %s holds no manifest.json\n", real);
         return false;
     }
+    // chrome indexes an unpacked extension's rulesets into _metadata inside
+    // the directory, then refuses to load a directory holding one. It rebuilds
+    // it on load, so clearing it keeps the next start from failing. _locales
+    // is the other underscore name, and that one chrome wants.
+    char meta[PATH_MAX + 16];
+    snprintf(meta, sizeof meta, "%s/_metadata", real);
+    rm_tree(meta);
     for (int i = 0; i < g_n; i++)
         if (!strcmp(g_ext[i], real)) return true;
     snprintf(g_ext[g_n++], PATH_MAX, "%s", real);
