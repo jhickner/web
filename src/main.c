@@ -2601,15 +2601,22 @@ static bool do_action(App *a, Event *ev, Act act) {
         still_soon(a);   // losing the focus ring is a repaint too
         return true;
     case ACT_FOCUS_INPUT:
+        // a field on screen wins, but a page whose only one is below the fold
+        // (hacker news keeps its search at the very bottom) used to focus
+        // nothing at all. Fall back to the first field anywhere and bring it
+        // into view, centred, leaving one already in view where it is.
         run_js(a,
             "(function(){var l=document.querySelectorAll("
             "'input:not([type=hidden]):not([type=checkbox]):not([type=radio])"
             ":not([type=submit]):not([type=button]):not([type=file]),"
-            "textarea,[contenteditable]');"
+            "textarea,[contenteditable]');var vis=null,any=null;"
             "for(var i=0;i<l.length;i++){var e=l[i],r=e.getBoundingClientRect();"
             "if(e.disabled||e.readOnly||r.width<2||r.height<2)continue;"
-            "if(r.bottom<0||r.top>innerHeight)continue;"
-            "e.focus();return;}})()");
+            "if(!any)any=e;"
+            "if(r.bottom>=0&&r.top<=innerHeight){vis=e;break;}}"
+            "var t=vis||any;if(!t)return;t.focus();"
+            "if(t.scrollIntoViewIfNeeded)t.scrollIntoViewIfNeeded(true);"
+            "else t.scrollIntoView({block:'center'});})()");
         // a focus ring is a repaint chrome will not screencast on its own, and
         // an action that only runs js asks for no frame, so the change sits
         // there unseen until something else moves. Ask for the still.
