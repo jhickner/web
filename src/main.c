@@ -2064,7 +2064,13 @@ static const char FOCUS_WATCHER[] =
     "(function(){"
     EDITABLE_FN
     PLAYER_FN
-    "function rep(){try{var e=document.activeElement;"
+    // this lands in every frame, and a frame only knows its own document. An
+    // iframe arriving later used to report its idle body and wipe out the
+    // input the main frame had just focused, so a frame without the focus says
+    // nothing, and one whose focus sits in a child defers to that child.
+    "function rep(){try{if(!document.hasFocus())return;"
+    "var e=document.activeElement;"
+    "if(e&&(e.tagName==='IFRAME'||e.tagName==='FRAME'))return;"
     "__webmode(ed(e)?'1':pl(e)?'2':'0');}catch(e){}}"
     "if(!window.__webwatch){window.__webwatch=1;"
     "document.addEventListener('focusin',rep,true);"
@@ -2592,6 +2598,7 @@ static bool do_action(App *a, Event *ev, Act act) {
         if (!a->insert) return false;
         run_js(a, "document.activeElement&&document.activeElement.blur()");
         a->insert = false;
+        still_soon(a);   // losing the focus ring is a repaint too
         return true;
     case ACT_FOCUS_INPUT:
         run_js(a,
@@ -2603,6 +2610,10 @@ static bool do_action(App *a, Event *ev, Act act) {
             "if(e.disabled||e.readOnly||r.width<2||r.height<2)continue;"
             "if(r.bottom<0||r.top>innerHeight)continue;"
             "e.focus();return;}})()");
+        // a focus ring is a repaint chrome will not screencast on its own, and
+        // an action that only runs js asks for no frame, so the change sits
+        // there unseen until something else moves. Ask for the still.
+        still_soon(a);
         return true;
 
     // --------------------------------------------------------------- tabs
@@ -2784,6 +2795,11 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
         a->expect_frame = 0;
         a->unwedge_run = 0;
 
+        // ack before drawing: chrome will not start the next frame until this
+        // lands, and the draw below is a blocking tty write. Sending is
+        // write-only and never refills ws->msg, so data/dlen stay valid.
+        app_cdp(a, "Page.screencastFrameAck", "\"sessionId\":%d", (int)sid);
+
         double t_arrive = now_sec();
 
         if (a->grid_on) dlen = 0;
@@ -2834,8 +2850,6 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
                 a->skipped++;
             }
         }
-
-        app_cdp(a, "Page.screencastFrameAck", "\"sessionId\":%d", (int)sid);
 
         if (a->motion_auto && !a->in_motion && a->motion_run >= MOTION_RUN &&
             now_sec() - a->last_input < MOTION_HOLD) {
@@ -3334,6 +3348,10 @@ void session_init(App *a) {
         app_cdp(a, "Emulation.setUserAgentOverride", "\"userAgent\":\"%s\"", esc);
     }
     app_cdp(a, "Emulation.setScrollbarsHidden", "\"hidden\":true");
+    // headless has no focused window, so a page never counts as active and
+    // paints no focus ring or caret however the focus is set. Pointer activity
+    // is what wakes it, which is why a hover used to be what showed the field.
+    app_cdp(a, "Emulation.setFocusEmulationEnabled", "\"enabled\":true");
     {
         char esc[2048];
         json_escape(esc, sizeof esc, FOCUS_WATCHER);
