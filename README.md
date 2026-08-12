@@ -28,6 +28,13 @@ Google Chrome, and a C compiler. The only library is sqlite3, which macOS ships
 and Linux packages as `libsqlite3-dev`.
 
 ```sh
+brew install jhickner/tap/web
+web news.ycombinator.com
+```
+
+Or from source:
+
+```sh
 make
 ./web news.ycombinator.com
 ```

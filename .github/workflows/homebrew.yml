@@ -1,0 +1,53 @@
+name: homebrew
+
+# A tag is the release, so the tap is pointed at its tarball here rather than
+# by hand. HOMEBREW_TAP_TOKEN is a token with contents write on the tap repo;
+# the workflow's own GITHUB_TOKEN cannot reach another repository.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "tag to point the formula at"
+        required: true
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hash the tarball of the tag
+        id: rel
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${tag}.tar.gz"
+          # github makes the archive on demand, so a fresh tag can 404 briefly
+          for i in 1 2 3 4 5; do
+            curl -fsSL "$url" -o src.tar.gz && break
+            sleep 5
+          done
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "sha=$(sha256sum src.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: jhickner/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Point the formula at it
+        run: |
+          set -euo pipefail
+          f=Formula/web.rb
+          sed -i "s|^  url \".*\"|  url \"${{ steps.rel.outputs.url }}\"|" "$f"
+          sed -i "s|^  sha256 \".*\"|  sha256 \"${{ steps.rel.outputs.sha }}\"|" "$f"
+          if git diff --quiet; then
+            echo "the formula already says ${{ steps.rel.outputs.tag }}"
+            exit 0
+          fi
+          git config user.name jhickner
+          git config user.email jhickner@gmail.com
+          git commit -am "web ${{ steps.rel.outputs.tag }}"
+          git push
