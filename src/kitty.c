@@ -23,6 +23,21 @@ static unsigned image_id_for(unsigned gen, int slot) {
 // a wrapper. A DCS over tmux's input-buffer-size is dropped whole; its floor is 1MB.
 #define WRAP_MAX   262144
 
+// "tmux 3.7b" / "tmux next-3.8" -> 307 / 308. 0 when it cannot be parsed.
+static int tmux_version(void) {
+    FILE *p = popen("tmux -V 2>/dev/null", "r");
+    if (!p) return 0;
+    char buf[64] = "";
+    bool got = fgets(buf, sizeof buf, p) != NULL;
+    pclose(p);
+    if (!got) return 0;
+    const char *s = buf;
+    while (*s && (*s < '0' || *s > '9')) s++;
+    int maj = 0, min = 0;
+    if (sscanf(s, "%d.%d", &maj, &min) < 2) return 0;
+    return maj * 100 + min;
+}
+
 // unicode placeholder cell for an image chunk
 #define PLACEHOLDER_CP 0x10EEEEu
 
@@ -102,6 +117,7 @@ void kitty_init(Kitty *k, int ttyfd, bool tmux) {
     memset(k, 0, sizeof *k);
     k->ttyfd = ttyfd;
     k->tmux = tmux;
+    k->tmux_redraw = tmux && tmux_version() >= 307;
     k->grid_dirty = true;
 }
 
@@ -154,6 +170,16 @@ static void draw_grid(Kitty *k) {
     char enc[8], cell[8];
     size_t celln = utf8_encode(PLACEHOLDER_CP, cell);
 
+    // tmux 3.7 drops a cell's combining diacritics on the way to the terminal
+    // whenever the pane is not at column 0: screen_write_combine() tests
+    // visibility with a pane-relative x against window coordinates, decides the
+    // cell is covered by whatever pane really sits there, and skips the write.
+    // The cells still land in tmux's grid intact, so ending a synchronized
+    // update - which tmux consumes itself, and answers with a full pane redraw
+    // out of that grid - puts them on screen correctly. Unwrapped on purpose:
+    // this one is addressed to tmux, not to the terminal underneath it.
+    if (k->tmux_redraw) buf_add(&k->out, "\x1b[?2026h", 8);
+
     unsigned id = image_id_for(k->gen, k->slot);
     buf_addf(&k->out, "\x1b[38;2;%u;%u;%um", (id >> 16) & 0xff,
              (id >> 8) & 0xff, id & 0xff);
@@ -169,6 +195,7 @@ static void draw_grid(Kitty *k) {
         }
     }
     buf_add(&k->out, "\x1b[39m", 5);
+    if (k->tmux_redraw) buf_add(&k->out, "\x1b[?2026l", 8);
     k->grid_draws++;
 }
 
@@ -250,6 +277,27 @@ void kitty_renew(Kitty *k) {
     kitty_clear(k);
     k->gen++;
     k->grid_dirty = true;
+}
+
+// Bracket a redraw so the terminal presents it whole rather than in the order
+// it arrives. Wrapped for tmux, unlike the unwrapped pair in draw_grid: this
+// one is addressed to the terminal underneath, which is what has to hold the
+// old picture up until the new one is complete.
+//
+// A terminal without synchronized output ignores both and simply redraws as the
+// bytes land, which is what it did before.
+void kitty_sync_begin(Kitty *k) {
+    k->out.len = 0;
+    emit_esc(k, "\x1b[?2026h", 8);
+    writeall(k->ttyfd, k->out.p, k->out.len);
+    k->out.len = 0;
+}
+
+void kitty_sync_end(Kitty *k) {
+    k->out.len = 0;
+    emit_esc(k, "\x1b[?2026l", 8);
+    writeall(k->ttyfd, k->out.p, k->out.len);
+    k->out.len = 0;
 }
 
 void kitty_free(Kitty *k) {

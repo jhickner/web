@@ -152,6 +152,7 @@ typedef struct {
 typedef struct {
     int  ttyfd;
     bool tmux;
+    bool tmux_redraw;        // tmux 3.7+, which needs the placeholder redraw kick
     int  x, y, cols, rows;   // 1-based cell rect the page occupies
     bool grid_dirty;
     unsigned grid_draws;     // grids laid down
@@ -172,6 +173,10 @@ void kitty_clear(Kitty *k);
 
 // take the picture down and come back under a new name
 void kitty_renew(Kitty *k);
+// Hold the terminal's picture still across a redraw that would otherwise be
+// seen half-finished. No-ops on a terminal without synchronized output.
+void kitty_sync_begin(Kitty *k);
+void kitty_sync_end(Kitty *k);
 void kitty_abort(Kitty *k);    // close an escape a dropped frame left open
 void kitty_free(Kitty *k);
 
@@ -457,6 +462,10 @@ typedef struct {
     size_t  edit_len;
 
     uint64_t last_hash;
+    // A resize has changed the geometry but the screen has not been torn down
+    // for it yet. Deferred so the teardown and the first frame of the new size
+    // go out together - see commit_resize.
+    bool     resize_redraw;
     unsigned frames, skipped, stills;
     double  last_draw;
     double  last_metrics_fix;  // when the viewport override was last restored

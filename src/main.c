@@ -1313,6 +1313,26 @@ static void shot_write(App *a, const char *msg) {
     a->shot_state = rc < 0 ? SHOT_FAIL : SHOT_DONE;
 }
 
+// Draw a frame, folding in any resize teardown that is still owed.
+//
+// Clearing the screen at resize time and only then asking Chrome for a
+// screenshot leaves the terminal showing its background for the whole round
+// trip - a flash. Held back to here, the clear, the new placeholder grid and
+// the picture are one synchronized update, so the terminal goes straight from
+// the old image to the new one.
+static void draw_frame(App *a, const char *b64, size_t n) {
+    bool resized = a->resize_redraw;
+    if (resized) {
+        a->resize_redraw = false;
+        kitty_sync_begin(&a->kitty);
+        if (a->inline_mode) term_clear_inline(&a->term);
+        else writeall(a->term.fd, "\x1b[2J", 4);
+        kitty_renew(&a->kitty);
+    }
+    kitty_draw_png(&a->kitty, b64, n);
+    if (resized) kitty_sync_end(&a->kitty);
+}
+
 static void still_draw(App *a, const char *msg) {
     if (a->paused || a->grid_on) return;
     size_t n = 0;
@@ -1320,7 +1340,7 @@ static void still_draw(App *a, const char *msg) {
     if (!b64 || !n) return;
 
     double t0 = now_sec();
-    kitty_draw_png(&a->kitty, b64, n);
+    draw_frame(a, b64, n);
     double t1 = now_sec();
     handoff_drawn();
 
@@ -2817,7 +2837,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
             if (h != a->last_hash) {
                 a->last_hash = h;
                 double t0 = now_sec();
-                kitty_draw_png(&a->kitty, data, dlen);
+                draw_frame(a, data, dlen);
                 double t1 = now_sec();
                 handoff_drawn();
 
@@ -3870,12 +3890,11 @@ int main(int argc, char **argv) {
             if (a.inline_mode) {
                 term_size(&a.term);
                 tmux_zoom_track(&a);
-                term_clear_inline(&a.term);
-                kitty_renew(&a.kitty);
-            } else {
-                writeall(a.term.fd, "\x1b[2J", 4);
-                a.kitty.grid_dirty = true;
             }
+            // The teardown waits for the frame that replaces it; doing it here
+            // would leave the terminal showing its background for the whole
+            // screenshot round trip.
+            a.resize_redraw = true;
             a.status_last.len = 0;
             a.tabs_last.len = 0;
             a.console_last.len = 0;
