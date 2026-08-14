@@ -155,6 +155,7 @@ typedef struct {
     bool tmux_redraw;        // tmux 3.7+, which needs the placeholder redraw kick
     int  x, y, cols, rows;   // 1-based cell rect the page occupies
     bool grid_dirty;
+    int  sync_depth;         // nesting of the terminal-facing synchronized update
     unsigned grid_draws;     // grids laid down
     unsigned gen;            // which name the picture is going up under
     int  slot;               // which tile the fields above are describing

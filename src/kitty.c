@@ -113,6 +113,28 @@ static void emit_esc(Kitty *k, const char *seq, size_t n) {
     esc_close(k);
 }
 
+// Terminal-facing synchronized update, appended to k->out. Nests: only the
+// outermost pair reaches the terminal, so a caller that has already opened one
+// around a wider redraw keeps it open across the frame inside it.
+static void sync_push(Kitty *k) {
+    if (k->sync_depth++ == 0) emit_esc(k, "\x1b[?2026h", 8);
+}
+
+static void sync_pop(Kitty *k) {
+    if (k->sync_depth > 0 && --k->sync_depth == 0) emit_esc(k, "\x1b[?2026l", 8);
+}
+
+// A frame that died mid-write would otherwise leave the terminal holding the
+// update it never got the end of.
+static void sync_drop(Kitty *k) {
+    if (!k->sync_depth) return;
+    k->sync_depth = 1;
+    size_t at = k->out.len;
+    sync_pop(k);
+    writeall(k->ttyfd, k->out.p + at, k->out.len - at);
+    k->out.len = at;
+}
+
 void kitty_init(Kitty *k, int ttyfd, bool tmux) {
     memset(k, 0, sizeof *k);
     k->ttyfd = ttyfd;
@@ -204,6 +226,15 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
 
     buf_reserve(&k->out, len + (len / CHUNK + 2) * 64 + 4096);
 
+    // A frame that lays down a fresh placeholder grid must reach the terminal
+    // whole: cells arriving on their own are a picture with no image behind
+    // them yet, and cells the terminal has only half of read as one image row
+    // repeated down the pane. Held in a synchronized update, none of that is
+    // ever presented. Frames that reuse the grid already swap atomically, on
+    // the last chunk of the transmission.
+    bool grid = k->grid_dirty;
+    if (grid) sync_push(k);
+
     // q=2 suppresses terminal replies
     size_t off = 0;
     bool first = true;
@@ -244,18 +275,21 @@ int kitty_draw_png(Kitty *k, const char *b64, size_t len) {
                       image_id_for(k->gen, k->slot), PLACEMENT, k->cols, k->rows);
     emit_esc(k, place, (size_t)pn);
 
-    if (k->grid_dirty) {
+    if (grid) {
         draw_grid(k);
         k->grid_dirty = false;
+        sync_pop(k);
     }
 
     const size_t SLICE = 32768;
     for (size_t off = 0; off < k->out.len; off += SLICE) {
         size_t n = k->out.len - off;
         if (n > SLICE) n = SLICE;
-        if (writeall(k->ttyfd, k->out.p + off, n) < 0) { esc_abort(k); return -1; }
+        if (writeall(k->ttyfd, k->out.p + off, n) < 0) {
+            esc_abort(k); sync_drop(k); return -1;
+        }
         if (g_input_pump) g_input_pump();
-        if (g_quit) { esc_abort(k); return -1; }
+        if (g_quit) { esc_abort(k); sync_drop(k); return -1; }
     }
     k->tiles[k->slot].live = true;
     return 0;
@@ -288,14 +322,14 @@ void kitty_renew(Kitty *k) {
 // bytes land, which is what it did before.
 void kitty_sync_begin(Kitty *k) {
     k->out.len = 0;
-    emit_esc(k, "\x1b[?2026h", 8);
+    sync_push(k);
     writeall(k->ttyfd, k->out.p, k->out.len);
     k->out.len = 0;
 }
 
 void kitty_sync_end(Kitty *k) {
     k->out.len = 0;
-    emit_esc(k, "\x1b[?2026l", 8);
+    sync_pop(k);
     writeall(k->ttyfd, k->out.p, k->out.len);
     k->out.len = 0;
 }
