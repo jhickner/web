@@ -3801,7 +3801,11 @@ int main(int argc, char **argv) {
              a.chrome.adopted ? "adopted" : "launched");
     if (chrome_attach(&a.chrome) < 0) { chrome_kill(&a.chrome); return 1; }
     term_log("%.3f attached", now_sec());
-    if (ext_count()) ext_load(&a.chrome);
+    // an adopted browser is one an earlier run left up, extensions and all
+    if (ext_count() && !a.chrome.adopted) {
+        ext_load(&a.chrome);
+        term_log("%.3f extensions in", now_sec());
+    }
     tabs_init(&a);
     if (a.has_tty && !a.shot_path && !a.script.drain_exit &&
         chrome_watch(&a.chrome) < 0)

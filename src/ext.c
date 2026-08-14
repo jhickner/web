@@ -12,6 +12,7 @@
 #define EXT_MAX 8
 
 static char g_ext[EXT_MAX][PATH_MAX];
+static char g_err[EXT_MAX][256];
 static int  g_n;
 
 static bool has_manifest(const char *dir) {
@@ -34,13 +35,6 @@ bool ext_add(const char *path) {
         fprintf(stderr, "web: %s holds no manifest.json\n", real);
         return false;
     }
-    // chrome indexes an unpacked extension's rulesets into _metadata inside
-    // the directory, then refuses to load a directory holding one. It rebuilds
-    // it on load, so clearing it keeps the next start from failing. _locales
-    // is the other underscore name, and that one chrome wants.
-    char meta[PATH_MAX + 16];
-    snprintf(meta, sizeof meta, "%s/_metadata", real);
-    rm_tree(meta);
     for (int i = 0; i < g_n; i++)
         if (!strcmp(g_ext[i], real)) return true;
     snprintf(g_ext[g_n++], PATH_MAX, "%s", real);
@@ -89,49 +83,95 @@ static void ext_name(const char *dir, char *out, size_t cap) {
         snprintf(out, cap, "%.*s", (int)len, v);
 }
 
-int ext_load(Chrome *c) {
-    if (!g_n) return 0;
+// loadUnpacked for each of the n extensions named in idx, ok[] filled per
+// position. Returns how many loaded, or -1 if the browser never answered.
+static int ext_try(Chrome *c, const int *idx, int n, bool *ok) {
     WS ws;
-    if (chrome_browser_ws(c, &ws) < 0) {
-        fprintf(stderr, "web: no browser socket; extensions were not loaded\n");
-        return 0;
-    }
-    for (int i = 0; i < g_n; i++) {
+    if (chrome_browser_ws(c, &ws) < 0) return -1;
+    for (int i = 0; i < n; i++) {
         Buf b = {0};
         buf_addf(&b, "{\"id\":%d,\"method\":\"Extensions.loadUnpacked\","
                      "\"params\":{\"path\":\"", i + 1);
-        json_escape_buf(&b, g_ext[i]);
+        json_escape_buf(&b, g_ext[idx[i]]);
         buf_add(&b, "\"}}", 3);
         ws_send_text(&ws, b.p, b.len);
         buf_free(&b);
+        ok[i] = false;
     }
 
-    int seen = 0, ok = 0;
-    double until = now_sec() + 15.0;
-    while (seen < g_n && now_sec() < until && !ws.closed) {
+    int seen = 0, loaded = 0;
+    double until = now_sec() + 30.0;
+    while (seen < n && now_sec() < until && !ws.closed) {
         if (ws_fill(&ws) < 0) break;
         char *msg;
-        size_t n;
-        while (ws_next(&ws, &msg, &n) == 1) {
+        size_t len;
+        while (ws_next(&ws, &msg, &len) == 1) {
             char reply[2048];
-            size_t cap = n < sizeof reply - 1 ? n : sizeof reply - 1;
+            size_t cap = len < sizeof reply - 1 ? len : sizeof reply - 1;
             snprintf(reply, sizeof reply, "%.*s", (int)cap, msg);
-            if (!strstr(reply, "\"id\":")) continue;
+            int id = (int)json_num(reply, "id", 0);
+            if (id < 1 || id > n) continue;
             seen++;
-            size_t len;
-            const char *why = json_str(reply, "message", &len);
-            if (why) fprintf(stderr, "web: extension: %.*s\n", (int)len, why);
-            else     ok++;
+            size_t wlen;
+            const char *why = json_str(reply, "message", &wlen);
+            if (why) {
+                snprintf(g_err[idx[id - 1]], sizeof g_err[0], "%.*s",
+                         (int)wlen, why);
+            } else {
+                ok[id - 1] = true;
+                loaded++;
+            }
         }
         struct timespec ts = {0, 20 * 1000000};
         nanosleep(&ts, NULL);
     }
     ws_close(&ws);
+    return loaded;
+}
 
-    for (int i = 0; ok && i < g_n; i++) {
+int ext_load(Chrome *c) {
+    if (!g_n) return 0;
+
+    int idx[EXT_MAX];
+    bool ok[EXT_MAX];
+    for (int i = 0; i < g_n; i++) idx[i] = i;
+    int loaded = ext_try(c, idx, g_n, ok);
+    if (loaded < 0) {
+        fprintf(stderr, "web: no browser socket; extensions were not loaded\n");
+        return 0;
+    }
+
+    // chrome indexes an unpacked extension's rulesets into _metadata inside
+    // the directory and will not load a directory holding a stale one. It
+    // rebuilds the index, which is slow, so only clear it once a load has
+    // actually failed rather than on every start.
+    int retry[EXT_MAX], nretry = 0;
+    for (int i = 0; i < g_n; i++) {
+        if (ok[i]) continue;
+        char meta[PATH_MAX + 16];
+        snprintf(meta, sizeof meta, "%s/_metadata", g_ext[i]);
+        if (access(meta, F_OK) != 0) continue;
+        rm_tree(meta);
+        retry[nretry++] = i;
+    }
+    if (nretry) {
+        bool again[EXT_MAX];
+        term_log("reindexing %d extension%s", nretry, nretry == 1 ? "" : "s");
+        int more = ext_try(c, retry, nretry, again);
+        for (int i = 0; i < nretry; i++)
+            if (again[i]) ok[retry[i]] = true;
+        if (more > 0) loaded += more;
+    }
+
+    for (int i = 0; i < g_n; i++) {
+        if (!ok[i]) {
+            fprintf(stderr, "web: extension: %s\n",
+                    g_err[i][0] ? g_err[i] : "did not load");
+            continue;
+        }
         char name[128];
         ext_name(g_ext[i], name, sizeof name);
         term_log("extension %s (%s)", name, g_ext[i]);
     }
-    return ok;
+    return loaded;
 }
