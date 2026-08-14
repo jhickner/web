@@ -122,7 +122,7 @@ static int ext_try(Chrome *c, const int *idx, int n, bool *ok) {
                 loaded++;
             }
         }
-        struct timespec ts = {0, 20 * 1000000};
+        struct timespec ts = {0, 5 * 1000000};
         nanosleep(&ts, NULL);
     }
     ws_close(&ws);

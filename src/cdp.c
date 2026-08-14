@@ -528,6 +528,35 @@ static bool ws_path_at(const char *p, char *out, size_t cap) {
     return true;
 }
 
+// The first page target in /json/list, preferring one still on about:blank:
+// an extension loading alongside us may have opened a page of its own, and
+// the blank one is the tab chrome made for us at launch. Target keys are
+// alphabetical, so within an entry url and webSocketDebuggerUrl both follow
+// type, and the next ws:// after a type field is that page's.
+static bool blank_page_at(const char *js, char *out, size_t cap) {
+    char first[256] = {0};
+    for (const char *p = js; (p = strstr(p, "\"type\"")) != NULL; p += 6) {
+        const char *v = p + 6;
+        while (*v == ' ' || *v == ':') v++;
+        if (strncmp(v, "\"page\"", 6) != 0) continue;
+        char path[256];
+        if (!ws_path_at(v, path, sizeof path)) continue;
+        if (!first[0]) snprintf(first, sizeof first, "%s", path);
+        const char *url = strstr(v, "\"url\"");
+        const char *ws  = strstr(v, "ws://");
+        if (!url || !ws || url > ws) continue;
+        url += 6;
+        while (*url == ' ' || *url == ':') url++;
+        if (strncmp(url, "\"about:blank\"", 13) == 0) {
+            snprintf(out, cap, "%s", path);
+            return true;
+        }
+    }
+    if (!first[0]) return false;
+    snprintf(out, cap, "%s", first);
+    return true;
+}
+
 static int browser_call(Chrome *c, const char *method, const char *params,
                         Buf *reply) {
     Buf resp = {0};
@@ -637,12 +666,8 @@ int chrome_attach(Chrome *c) {
 
     double deadline = now_sec() + 10.0;
     while (now_sec() < deadline && !ws_path[0]) {
-        if (http_get(c->port, "/json/list", &resp) == 0 && resp.len) {
-            // target keys are alphabetical: the ws:// after the type field is that page's
-            const char *p = strstr(resp.p, "\"type\": \"page\"");
-            if (!p) p = strstr(resp.p, "\"type\":\"page\"");
-            ws_path_at(p, ws_path, sizeof ws_path);
-        }
+        if (http_get(c->port, "/json/list", &resp) == 0 && resp.len)
+            blank_page_at(resp.p, ws_path, sizeof ws_path);
         if (!ws_path[0]) {
             struct timespec ts = {0, 5 * 1000000};
             nanosleep(&ts, NULL);
