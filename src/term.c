@@ -20,6 +20,9 @@ static bool g_have_saved = false;
 #define MOUSE_OFF "\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
 #define HOVER_ON  "\x1b[?1003h"
 #define HOVER_OFF "\x1b[?1003l"
+// the reporting alone, leaving paste and focus where they are
+#define TRACK_ON  "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
+#define TRACK_OFF "\x1b[?1003l\x1b[?1002l\x1b[?1000l"
 
 // kitty key reporting, flag 1 (disambiguate) only
 #define KBD_ON  "\x1b[>1u"
@@ -170,6 +173,12 @@ void term_enter(Term *t, bool inline_mode) {
 void term_hover(Term *t, bool on) {
     if (t->fd < 0) return;
     const char *s = on ? HOVER_ON : HOVER_OFF;
+    writeall(t->fd, s, strlen(s));
+}
+
+void term_mouse(Term *t, bool on) {
+    if (t->fd < 0) return;
+    const char *s = on ? TRACK_ON : TRACK_OFF;
     writeall(t->fd, s, strlen(s));
 }
 

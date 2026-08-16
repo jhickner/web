@@ -221,7 +221,8 @@ typedef enum {
     ACT_ZOOM_IN, ACT_ZOOM_OUT, ACT_ZOOM_RESET, ACT_SMALLER, ACT_LARGER,
     ACT_FIT, ACT_PAGE_WIDER, ACT_PAGE_NARROWER, ACT_SCALE,
     ACT_BOX_TALLER, ACT_BOX_SHORTER, ACT_BOX_WIDER, ACT_BOX_NARROWER,
-    ACT_CONSOLE, ACT_HELP, ACT_STATUS, ACT_TRACE, ACT_QUIT,
+    ACT_CONSOLE, ACT_HELP, ACT_STATUS, ACT_TRACE, ACT_BLUR_PAUSE,
+    ACT_MOUSE_FREE, ACT_QUIT,
     ACT_INVALID,          // a name the file gave that is not one of these
 } Act;
 
@@ -270,6 +271,7 @@ int  term_probe(Term *t);                 // open the tty and measure it
 bool term_graphics_ok(Term *t, bool tmux); // does it speak kitty graphics
 void term_enter(Term *t, bool inline_mode); // raw mode, alt screen, mouse
 void term_hover(Term *t, bool on);        // report moves with no button down
+void term_mouse(Term *t, bool on);        // report mouse events at all
 void term_reserve_inline(Term *t, int rows);
 void term_resize_inline(Term *t, int rows);   // caller drops the image first
 void term_clear_inline(Term *t);              // blank the rows the block owns
@@ -490,6 +492,8 @@ typedef struct {
     bool    hide_on_blur;      // and take the window off the screen with it
     bool    media_pause_on_blur;  // and stop whatever is playing in the page
     bool    media_held;        // something was stopped that way, and owes a play
+    bool    blur_was_pause;    // what the two above held when the keybind
+    bool    blur_was_hide;     // last turned them off, to put back
     bool    no_pause_arg;      // --no-pause: no site rule turns it on
     bool    no_media_arg;      // --no-media-pause, the same for the playing
     bool    paused;            // and whether that has happened
@@ -505,6 +509,7 @@ typedef struct {
     bool    mouse_down;        // a button went down on the page and is still held
     bool    hover;             // pass moves with no button down to the page
     bool    hovering;          // the page believes the pointer is over it
+    bool    mouse_free;        // mouse reporting off, so the terminal has it
     bool    click_newtab;      // and it was the one that opens a link in a tab
     bool    show_start;        // this run wrote the start page
     bool    vim;               // the vim layer, under the keys web.conf names

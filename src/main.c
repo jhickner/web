@@ -617,7 +617,16 @@ static void driving_sweep(const char *profile) {
     closedir(d);
 }
 
-// one json object per line
+static void copy_endpoint(const char *line) {
+    size_t n = 0;
+    const char *v = json_str(line, "cdp", &n);
+    if (!v || !n) return;
+    char url[300];
+    json_unescape(url, sizeof url, v, n);
+    clipboard_put(url);
+}
+
+// one json object per line, the first window's endpoint on the clipboard
 static int print_sessions(void) {
     char profile[512], dir[600];
     chrome_profile_path(profile, sizeof profile);
@@ -640,14 +649,76 @@ static int print_sessions(void) {
             char line[4096];
             if (fgets(line, sizeof line, f)) {
                 fputs(line, stdout);
-                found++;
+                if (!found++) copy_endpoint(line);
             }
             fclose(f);
         }
         closedir(d);
     }
-    if (!found) fprintf(stderr, "web: no window is running\n");
-    return found ? 0 : 1;
+    return found;
+}
+
+// the window we forked writes its session file once chrome answers
+static int endpoint_await(pid_t pid) {
+    char profile[512], path[700];
+    chrome_profile_path(profile, sizeof profile);
+    snprintf(path, sizeof path, "%s/sessions/%d.json", profile, (int)pid);
+    double deadline = now_sec() + 30.0;
+    for (;;) {
+        FILE *f = fopen(path, "r");
+        if (f) {
+            char line[4096];
+            bool got = fgets(line, sizeof line, f) != NULL;
+            fclose(f);
+            if (got) {
+                fputs(line, stdout);
+                fflush(stdout);
+                copy_endpoint(line);
+                return 0;
+            }
+        }
+        if (kill(pid, 0) != 0 && errno == ESRCH) break;
+        if (now_sec() >= deadline) break;
+        struct timespec ts = {0, 25 * 1000000};
+        nanosleep(&ts, NULL);
+    }
+    fprintf(stderr, "web: the window did not come up\n");
+    return 1;
+}
+
+// this window's own line, before it takes the screen
+static void endpoint_announce(App *a) {
+    char path[700], line[4096];
+    session_write(a);
+    session_file(a, path, sizeof path);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    if (fgets(line, sizeof line, f)) {
+        fputs(line, stdout);
+        fflush(stdout);
+        copy_endpoint(line);
+    }
+    fclose(f);
+}
+
+// carry on as a window with no terminal of its own, the caller printing the
+// endpoint as soon as it lands
+static bool endpoint_detach(void) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "web: cannot start a window: %s\n", strerror(errno));
+        exit(1);
+    }
+    if (pid > 0) exit(endpoint_await(pid));
+    setsid();
+    int null = open("/dev/null", O_RDWR);
+    if (null >= 0) {
+        dup2(null, STDIN_FILENO);
+        dup2(null, STDOUT_FILENO);
+        dup2(null, STDERR_FILENO);
+        if (null > STDERR_FILENO) close(null);
+    }
+    return true;
 }
 
 // ------------------------------------------------------------------ browsers
@@ -2707,6 +2778,36 @@ static bool do_action(App *a, Event *ev, Act act) {
     case ACT_HELP:    help_toggle(a);    return true;
     case ACT_STATUS:  a->hide_status = !a->hide_status; return true;
     case ACT_TRACE:   trace_toggle(a);   return true;
+    case ACT_BLUR_PAUSE:
+        if (a->pause_on_blur || a->hide_on_blur) {
+            a->blur_was_pause = a->pause_on_blur;
+            a->blur_was_hide  = a->hide_on_blur;
+            a->pause_on_blur = a->hide_on_blur = false;
+            if (a->paused) resume_drawing(a); else show_window(a);
+            notify(a, "blur pause off");
+        } else {
+            a->pause_on_blur = a->blur_was_pause || !a->blur_was_hide;
+            a->hide_on_blur  = a->blur_was_hide;
+            notify(a, a->hide_on_blur ? "blur pause on, hiding"
+                                      : "blur pause on");
+        }
+        return true;
+    case ACT_MOUSE_FREE:
+        if (!a->has_tty) return true;
+        a->mouse_free = !a->mouse_free;
+        term_mouse(&a->term, !a->mouse_free);
+        if (a->mouse_free) {
+            if (a->hovering) {
+                a->hovering = false;
+                queue_move(a, -1, -1, "none", 0, 0);
+            }
+            a->mouse_down = false;
+            notify(a, "mouse to the terminal");
+        } else {
+            if (a->hover) term_hover(&a->term, true);
+            notify(a, "mouse to the page");
+        }
+        return true;
     }
     return false;
 }
@@ -3318,7 +3419,10 @@ static void usage(void) {
         "  --open URL  open URL in a tab of the window most recently used,\n"
         "              and exit. Nothing running is an error, so a caller can\n"
         "              fall back to starting one\n"
-        "  --endpoint  print every running window as JSON and exit\n"
+        "  --endpoint  print every running window as JSON, its address on the\n"
+        "              clipboard, and exit. With nothing running, start one:\n"
+        "              a window in this terminal when there is one, otherwise\n"
+        "              a window nothing shows, and print that\n"
         "  --mcp       drive the window on screen as an MCP server on stdio,\n"
         "              for an agent to work the page you are watching\n"
         "  --list      list the chrome processes web has running, with pids,\n"
@@ -3699,7 +3803,14 @@ int main(int argc, char **argv) {
                 extra_urls == 1 ? " was" : "es were");
     if (nurls) start = urls[0];
     search_set(a.search);
-    if (endpoint_only) return print_sessions();
+    bool endpoint_bg = false, endpoint_win = false;
+    if (endpoint_only) {
+        if (print_sessions()) return 0;
+        // a terminal to draw in gets a window in it; anything else, a caller
+        // waiting on the address, gets one it cannot see
+        if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) endpoint_win = true;
+        else endpoint_bg = endpoint_detach();
+    }
     if (mcp_only)      return mcp_serve();
     if (list_only)     return print_browsers();
     if (kill_only)     return kill_everything();
@@ -3712,7 +3823,7 @@ int main(int argc, char **argv) {
     if (eval_js) {
         script_push(&a, eval_js);
         a.script.drain_exit = true;
-    } else if (!isatty(STDIN_FILENO)) {
+    } else if (!endpoint_bg && !isatty(STDIN_FILENO)) {
         script_load(&a, "-");
     }
 
@@ -3820,6 +3931,8 @@ int main(int argc, char **argv) {
         }
         a.ua_patch_req = rc == 1;
     }
+
+    if (endpoint_win) endpoint_announce(&a);
 
     if (a.has_tty) term_enter(&a.term, a.inline_mode);
     if (a.has_tty && a.hover) term_hover(&a.term, true);

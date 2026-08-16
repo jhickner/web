@@ -111,9 +111,11 @@ environment as `WEB_PROFILE`, which a window started from there inherits.
 | `alt+r` | start or stop writing what you do as a spec — see [Recording](#recording) |
 | `alt+d` | bookmark this page, or take the bookmark off it |
 | `alt+space` | play or pause the page's video, whatever has focus |
+| `alt+p` | `pause-on-blur` and `hide-on-blur` off, or back to what they were |
 | `alt+b` | find a bookmark — see [Finding a page](#finding-a-page) |
 | `?` | key list over the page, a page at a time; any other key dismisses it |
-| mouse | click, drag to select, wheel to scroll, hover to lift what a pointer lifts |
+| mouse | click, drag to select, wheel to scroll, hover to lift what a pointer lifts. Only over the window: the wheel anywhere else is ignored |
+| `alt+w` | hand the mouse back to the terminal, so the wheel scrolls it again; press again to take it back |
 | `opt`+click | open the link under the pointer in a tab behind this one (middle-click too) |
 | tab bar | click to switch, middle-click to close, wheel to cycle |
 | console border | drag up or down to resize the pane |
@@ -429,7 +431,10 @@ web [options] <url>...
 --keep      leave Chrome running on exit, for this window and every other
 --open URL  open URL in a tab of the window most recently used, and exit.
             Nothing running is an error
---endpoint  print every running window as JSON and exit
+--endpoint  print every running window as JSON, its endpoint on the
+            clipboard, and exit. With nothing running, start one: a window
+            in this terminal when there is one, otherwise a window nothing
+            shows, and print that
 --mcp       drive the window on screen as an MCP server on stdio, for an
             agent to work the page you are watching
 --list      list the Chrome processes web has running, with pids, and say
@@ -602,13 +607,19 @@ selector for what you hit into the console instead of activating it.
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
 ```
 
-`--endpoint` reports every running window as one JSON object per line, without
-starting a browser:
+`--endpoint` reports every running window as one JSON object per line and puts
+the first `cdp` address on the clipboard:
 
 ```console
 $ web --endpoint
 {"pid":4123,"name":"hn","port":9222,"cdp":"http://127.0.0.1:9222","target":"0A32…","url":"https://example.com/","title":"Example Domain","handoff":true,"drive":"…/driving/4123","freeze":""}
 ```
+
+With no window running it starts one and prints that. Run at a terminal, the
+window opens there and stays up, the address printed above it. With the output
+going anywhere else it starts a window with no terminal of its own, prints the
+address and exits, leaving the window up for `web --kill` to end. Options given
+alongside it — `--profile`, `--name`, `--port`, a url — go to that window.
 
 `drive` is the file a driver writes its own pid to at each step it takes. While
 that file is fresh the window draws through a blur and leaves whatever is

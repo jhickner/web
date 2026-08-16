@@ -103,6 +103,8 @@ static const struct { const char *name; Act act; const char *section; } ACTS[] =
     {"help",           ACT_HELP, NULL},
     {"status-line",    ACT_STATUS, NULL},
     {"trace",          ACT_TRACE, NULL},
+    {"blur-pause",     ACT_BLUR_PAUSE, NULL},
+    {"mouse-free",     ACT_MOUSE_FREE, NULL},
     {"quit",           ACT_QUIT, NULL},
 };
 #define NACTS ((int)(sizeof ACTS / sizeof ACTS[0]))
@@ -370,6 +372,8 @@ static const KeyDef DEFAULTS[] = {
     {MOD_ALT, 'b', ACT_SEARCH_BOOKMARKS},
     {MOD_ALT, 'm', ACT_MERGE},
     {MOD_ALT, ' ', ACT_PLAY_PAUSE},
+    {MOD_ALT, 'p', ACT_BLUR_PAUSE},
+    {MOD_ALT, 'w', ACT_MOUSE_FREE},
 
     {MOD_ALT | MOD_SHIFT, KEY_RIGHT, ACT_TAB_NEXT},
     {MOD_ALT | MOD_SHIFT, KEY_LEFT, ACT_TAB_PREV},
