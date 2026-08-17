@@ -1887,27 +1887,8 @@ static void tmux_zoom_track(App *a) {
 }
 
 static void cycle_scale(App *a) {
-    static const double SCALES[] = {1.0, 0.75, 0.5};
-    int n = (int)(sizeof SCALES / sizeof *SCALES);
-
-    if (a->motion_auto) {
-        a->motion_auto = false;
-        a->want_scale = SCALES[0];
-    } else {
-        int idx = 0;
-        double best = 1e9;
-        for (int i = 0; i < n; i++) {
-            double d = a->want_scale - SCALES[i];
-            if (d < 0) d = -d;
-            if (d < best) { best = d; idx = i; }
-        }
-        if (idx == n - 1) {
-            a->motion_auto = true;
-            a->want_scale = 1.0;
-        } else {
-            a->want_scale = SCALES[idx + 1];
-        }
-    }
+    a->motion_auto = !a->motion_auto;
+    a->want_scale = 1.0;
     a->in_motion = false;
     a->motion_run = 0;
     a->scale_locked = true;
