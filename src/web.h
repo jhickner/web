@@ -28,6 +28,11 @@ int    writeall(int fd, const char *p, size_t n);
 void   mkdirs(const char *path);
 void   rm_tree(const char *path);
 
+int cp_width(unsigned cp);
+
+// offset of the longest tail of s that fits in `cols` columns; *used gets its width
+size_t utf8_tail(const char *s, size_t len, int cols, int *used);
+
 // Bytes written. dst needs room for three per four of src.
 size_t base64_decode(const char *src, size_t n, char *dst);
 

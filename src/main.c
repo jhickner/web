@@ -1511,11 +1511,16 @@ static void draw_status(App *a) {
 
     if (a->editing) {
         const char *label = a->prompt == 2 ? "find" : a->prompt == 3 ? "tab" : "go";
-        buf_addf(&b, "\x1b[7m %s \x1b[0m %.*s\x1b[?25h",
-                 label, (int)a->edit_len, a->edit);
         // +3: a space either side of the label, plus one before the text
-        buf_addf(&b, "\x1b[%d;%dH", row,
-                 sx + (int)strlen(label) + 3 + (int)a->edit_len);
+        int lead = (int)strlen(label) + 3;
+        // one column short of the edge, so the cursor after the text has a cell
+        int room = sw - lead - 1;
+        if (room < 1) room = 1;
+        int used = 0;
+        size_t off = utf8_tail(a->edit, a->edit_len, room, &used);
+        buf_addf(&b, "\x1b[7m %s \x1b[0m %.*s\x1b[?25h",
+                 label, (int)(a->edit_len - off), a->edit + off);
+        buf_addf(&b, "\x1b[%d;%dH", row, sx + lead + used);
     } else {
         static const char KEYS[] = "? keys";
 

@@ -100,6 +100,57 @@ int writeall(int fd, const char *p, size_t n) {
     return 0;
 }
 
+// -------------------------------------------------------------------- text
+
+// cells per codepoint: 0 for combining marks, 2 for CJK and emoji, 1 otherwise
+int cp_width(unsigned c) {
+    if (c < 0x300) return 1;
+    if ((c >= 0x300 && c <= 0x36F) || (c >= 0xFE00 && c <= 0xFE0F) ||
+        c == 0x200D || (c >= 0x20D0 && c <= 0x20F0)) return 0;
+    if ((c >= 0x1100 && c <= 0x115F) || (c >= 0x2E80 && c <= 0x303E) ||
+        (c >= 0x3041 && c <= 0x33FF) || (c >= 0x3400 && c <= 0x4DBF) ||
+        (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0xA000 && c <= 0xA4CF) ||
+        (c >= 0xAC00 && c <= 0xD7A3) || (c >= 0xF900 && c <= 0xFAFF) ||
+        (c >= 0xFE30 && c <= 0xFE6F) || (c >= 0xFF00 && c <= 0xFF60) ||
+        (c >= 0xFFE0 && c <= 0xFFE6) || (c >= 0x1F300 && c <= 0x1F9FF) ||
+        (c >= 0x20000 && c <= 0x3FFFD)) return 2;
+    return 1;
+}
+
+// bytes in the utf-8 character at s, at most `left`
+static size_t u8_step(const char *s, size_t left) {
+    unsigned char c = (unsigned char)*s;
+    size_t len = (c & 0xF8) == 0xF0 ? 4 : (c & 0xF0) == 0xE0 ? 3 :
+                 (c & 0xE0) == 0xC0 ? 2 : 1;
+    return len > left ? 1 : len;
+}
+
+static unsigned u8_cp(const char *s, size_t len) {
+    unsigned char c = (unsigned char)*s;
+    if (len == 1) return c;
+    unsigned cp = (unsigned)(c & (0xFF >> (len + 1)));
+    for (size_t i = 1; i < len; i++)
+        cp = (cp << 6) | (unsigned)(s[i] & 0x3F);
+    return cp;
+}
+
+size_t utf8_tail(const char *s, size_t len, int cols, int *used) {
+    size_t start = 0;
+    int w = 0;
+    for (size_t i = 0; i < len;) {
+        size_t k = u8_step(s + i, len - i);
+        w += cp_width(u8_cp(s + i, k));
+        i += k;
+        while (w > cols && start < i) {
+            size_t j = u8_step(s + start, len - start);
+            w -= cp_width(u8_cp(s + start, j));
+            start += j;
+        }
+    }
+    if (used) *used = w;
+    return start;
+}
+
 // ------------------------------------------------------------------- base64
 
 size_t base64_decode(const char *src, size_t n, char *dst) {

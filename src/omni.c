@@ -347,21 +347,6 @@ static void pad(Buf *b, int n) {
     }
 }
 
-// cells per codepoint: 0 for combining marks, 2 for CJK and emoji, 1 otherwise
-static int cp_width(unsigned c) {
-    if (c < 0x300) return 1;
-    if ((c >= 0x300 && c <= 0x36F) || (c >= 0xFE00 && c <= 0xFE0F) ||
-        c == 0x200D || (c >= 0x20D0 && c <= 0x20F0)) return 0;
-    if ((c >= 0x1100 && c <= 0x115F) || (c >= 0x2E80 && c <= 0x303E) ||
-        (c >= 0x3041 && c <= 0x33FF) || (c >= 0x3400 && c <= 0x4DBF) ||
-        (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0xA000 && c <= 0xA4CF) ||
-        (c >= 0xAC00 && c <= 0xD7A3) || (c >= 0xF900 && c <= 0xFAFF) ||
-        (c >= 0xFE30 && c <= 0xFE6F) || (c >= 0xFF00 && c <= 0xFF60) ||
-        (c >= 0xFFE0 && c <= 0xFFE6) || (c >= 0x1F300 && c <= 0x1F9FF) ||
-        (c >= 0x20000 && c <= 0x3FFFD)) return 2;
-    return 1;
-}
-
 // as much of s as fits in `cols` columns, cut on a utf-8 boundary; returns columns used
 static int fit(const char *s, int cols, char *out, size_t cap) {
     int n = 0;
@@ -435,9 +420,9 @@ void omni_paint(App *a) {
         }
         buf_addf(&b, "\x1b[2m\xe2\x94\x82\x1b[0m ");
         if (r == 1) {
-            char q[160];
-            int n = fit(a->omni_q, iw - 2, q, sizeof q);
-            buf_addf(&b, "\x1b[1;36m>\x1b[0m %s", q);
+            int n = 0;
+            size_t off = utf8_tail(a->omni_q, a->omni_qlen, iw - 2, &n);
+            buf_addf(&b, "\x1b[1;36m>\x1b[0m %s", a->omni_q + off);
             pad(&b, iw - 2 - n);
         } else {
             int i = a->omni_scroll + (r - 2);
@@ -460,8 +445,8 @@ void omni_paint(App *a) {
         buf_addf(&b, " \x1b[2m\xe2\x94\x82\x1b[0m");
     }
     {
-        char q[160];
-        int n = fit(a->omni_q, iw - 2, q, sizeof q);
+        int n = 0;
+        utf8_tail(a->omni_q, a->omni_qlen, iw - 2, &n);
         buf_addf(&b, "\x1b[%d;%dH\x1b[?25h", s.y + 1, s.x + 4 + n);
     }
     a->omni_buf = b;
