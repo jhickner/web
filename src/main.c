@@ -2000,7 +2000,8 @@ void run_js(App *a, const char *js) {
 // js: find the scroller under a point, and the document's own
 #define SCROLLER_FN \
     "function hunt(x,y){var e=document.elementFromPoint(x,y);" \
-    "while(e){var o=getComputedStyle(e).overflowY;" \
+    "while(e){if(e===document.body||e===document.documentElement)return null;" \
+    "var o=getComputedStyle(e).overflowY;" \
     "if((o==='auto'||o==='scroll')&&e.scrollHeight>e.clientHeight+1)break;" \
     "e=e.parentElement;}return e;}" \
     "function doc(){return document.scrollingElement||document.documentElement;}" \
