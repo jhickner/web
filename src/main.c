@@ -275,9 +275,9 @@ void relayout(App *a) {
     hint_cancel(a);
 
     if (!a->has_tty && a->shot_path) {
-        a->css_w = SHOT_CSS_W;
-        a->css_h = SHOT_CSS_H;
-        a->scale = a->want_scale;
+        a->css_w = a->shot_w ? a->shot_w : SHOT_CSS_W;
+        a->css_h = a->shot_h ? a->shot_h : SHOT_CSS_H;
+        a->scale = a->shot_scale > 0 ? a->shot_scale : a->want_scale;
         app_cdp(a, "Emulation.setDeviceMetricsOverride",
                  "\"width\":%d,\"height\":%d,\"deviceScaleFactor\":%.6f,"
                  "\"mobile\":false",
@@ -3401,6 +3401,10 @@ static void usage(void) {
         "  --json      script output as one JSON object per value\n"
         "  --screenshot F   write the loaded page to F as a png and exit\n"
         "              (- for stdout; the shot waits for the page to arrive)\n"
+        "  --shot-size WxH[@S]  the viewport --screenshot uses, in css\n"
+        "              pixels (default 1280x800). @S draws it at S device\n"
+        "              pixels per css pixel, so 702x936@2 lays the page out\n"
+        "              for a 702px viewport and writes a 1404x1872 png\n"
         "  --login     open a window to sign in with, on the same profile\n"
         "  --keep      leave chrome running on exit so the next start is instant\n"
         "  --open URL  open URL in a tab of the window most recently used,\n"
@@ -3713,6 +3717,22 @@ int main(int argc, char **argv) {
             a.mute = true;
         } else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) {
             a.shot_path = argv[++i];
+        } else if (!strcmp(argv[i], "--shot-size") && i + 1 < argc) {
+            // WxH, and an optional @S for the device pixel ratio: the page is
+            // laid out as if the viewport were W css px and drawn at W*S.
+            const char *v = argv[++i];
+            int w = 0, hh = 0; double sc = 0; char sep = 0;
+            int n = sscanf(v, "%d%*[xX]%d%c%lf", &w, &hh, &sep, &sc);
+            if (n < 2 || w < 1 || hh < 1 || (n > 2 && sep != '@')) {
+                fprintf(stderr, "web: --shot-size wants WxH or WxH@S, not \"%s\"\n", v);
+                return 2;
+            }
+            if (n > 3) {
+                if (sc < 0.1) sc = 0.1;
+                if (sc > 4.0) sc = 4.0;
+                a.shot_scale = sc;
+            }
+            a.shot_w = w; a.shot_h = hh;
         } else if (!strcmp(argv[i], "--eval") && i + 1 < argc) {
             eval_js = argv[++i];
         } else if (!strcmp(argv[i], "--delay") && i + 1 < argc) {

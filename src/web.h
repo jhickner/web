@@ -590,6 +590,8 @@ typedef struct {
     // --screenshot
     const char *shot_path;     // where the png goes; "-" is stdout
     bool    shot_stdout;       // and when it does, fd 1 is the picture's
+    int     shot_w, shot_h;    // --shot-size, in css px; 0 is SHOT_CSS_W/H
+    double  shot_scale;        // its @S, the device pixel ratio; 0 is --scale
     int     shot_state;        // SHOT_*
     double  shot_deadline;     // give up on the step in flight here
 
