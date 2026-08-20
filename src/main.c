@@ -255,10 +255,14 @@ static void still_request(App *a) {
     if (!a->has_tty || a->paused || a->in_motion || a->cast_w < 1) return;
     if (a->shot_path) return;
     double now = now_sec();
-    if (now - a->last_still < STILL_GAP) {
+    // The throttle is there to keep idle pages cheap. After a resize the
+    // picture on screen is the wrong shape until this lands, so it waits for
+    // nothing: without it the window sits stretched for up to STILL_GAP.
+    if (!a->still_urgent && now - a->last_still < STILL_GAP) {
         a->still_at = a->last_still + STILL_GAP;
         return;
     }
+    a->still_urgent = false;
     a->still_sent = now + STILL_SEND_MAX;
     app_req_note(a, app_cdp(a, "Page.captureScreenshot",
         "\"format\":\"png\",\"fromSurface\":true,\"captureBeyondViewport\":false"),
@@ -291,10 +295,13 @@ void relayout(App *a) {
     int below = status + a->console_rows;
     int rect_cols;
     if (a->inline_mode) {
+        // box_rows is the size that was asked for and stays it: clamping it
+        // into a pane too short to hold it would forget that size, and the
+        // window would never come back when the pane grew again.
         int max_rows = t->rows - below - above;
-        if (a->box_rows > max_rows) a->box_rows = max_rows;
         if (a->box_rows < BOX_MIN_ROWS) a->box_rows = BOX_MIN_ROWS;
-        a->img_rows = a->box_rows;
+        a->img_rows = a->box_rows > max_rows ? max_rows : a->box_rows;
+        if (a->img_rows < BOX_MIN_ROWS) a->img_rows = BOX_MIN_ROWS;
         rect_cols = box_cols_now(a, a->img_rows);
         if (t->inline_origin + above + a->img_rows + below - 1 > t->rows)
             t->inline_origin = t->rows - a->img_rows - below - above + 1;
@@ -1497,7 +1504,7 @@ static void shot_step(App *a) {
 // ------------------------------------------------------------------ status
 
 static int block_rows(App *a) {
-    return (a->tabs_open ? 1 : 0) + a->box_rows +
+    return (a->tabs_open ? 1 : 0) + a->img_rows +
            (a->status_open ? 1 : 0) + a->console_rows;
 }
 
@@ -1827,26 +1834,26 @@ static void resize_box(App *a, int drows, int dcols, bool scale) {
         return;
     }
     Term *t = &a->term;
-    int fixed = block_rows(a) - a->box_rows;   // the bar, the status line, the console
+    int fixed = block_rows(a) - a->img_rows;   // the bar, the status line, the console
 
-    int rows = a->box_rows + drows;
+    int rows = a->img_rows + drows;
     if (rows < 2) rows = 2;
     if (rows > t->rows - fixed) rows = t->rows - fixed;
 
-    int was_cols = box_cols_now(a, a->box_rows);
+    int was_cols = box_cols_now(a, a->img_rows);
     int cols;
     if (dcols) {
         cols = was_cols + dcols;
     } else if (!scale) {
         cols = was_cols;
     } else if (a->box_cols > 0) {
-        cols = (int)((double)was_cols * rows / a->box_rows + 0.5);
+        cols = (int)((double)was_cols * rows / a->img_rows + 0.5);
     } else {
         cols = box_cols_for(a, rows);
     }
     if (cols < BOX_MIN_COLS) cols = BOX_MIN_COLS;
     if (cols > t->cols) cols = t->cols;
-    if (rows == a->box_rows && cols == was_cols) return;
+    if (rows == a->img_rows && cols == was_cols) return;
 
     a->box_rows = rows;
     if (dcols || !scale || a->box_cols > 0) a->box_cols = cols;
@@ -1901,12 +1908,12 @@ static void tmux_zoom_track(App *a) {
     a->unzoom_rows = a->box_rows;
     a->unzoom_cols = a->box_cols;
 
-    int fixed = block_rows(a) - a->box_rows;   // the bar, the status line, the console
+    int fixed = block_rows(a) - a->img_rows;   // the bar, the status line, the console
     int rows = t->rows - fixed - 1;            // and the row the shell prompts on
     if (rows < BOX_MIN_ROWS) rows = BOX_MIN_ROWS;
-    if (rows <= a->box_rows) return;
+    if (rows <= a->img_rows) return;
     if (a->box_cols > 0) {
-        int cols = (int)((double)box_cols_now(a, a->box_rows) * rows / a->box_rows + 0.5);
+        int cols = (int)((double)box_cols_now(a, a->img_rows) * rows / a->img_rows + 0.5);
         if (cols > t->cols) cols = t->cols;
         if (cols < BOX_MIN_COLS) cols = BOX_MIN_COLS;
         a->box_cols = cols;
@@ -3986,7 +3993,9 @@ int main(int argc, char **argv) {
         if (rows > a.term.rows - 1) rows = a.term.rows - 1;
         if (rows < 4) rows = 4;
         term_reserve_inline(&a.term, rows);
-        a.box_rows = rows - status;
+        // the size that was asked for, not the one this pane can hold: relayout
+        // fits it, and gives it back if the pane grows
+        a.box_rows = a.want_rows > 0 ? a.want_rows : rows - status;
         if (a.want_cols > 0) a.box_cols = a.want_cols;
     }
     g_app = &a;
@@ -4057,18 +4066,20 @@ int main(int argc, char **argv) {
             // screenshot round trip. resize_at bounds that wait.
             a.resize_redraw = true;
             a.resize_at = now_sec();
+            a.still_urgent = true;
             panes_forget(&a);
             a.last_hash = 0;
             relayout(&a);
             if (a.inline_mode) {
                 Term *t = &a.term;
-                t->inline_rows = a.img_rows + (a.tabs_open ? 1 : 0) +
-                                 (a.status_open ? 1 : 0) + a.console_rows;
+                int was = t->inline_rows;
+                t->inline_rows = block_rows(&a);
                 if (gap + t->inline_rows > t->rows) gap = t->rows - t->inline_rows;
                 if (gap < 0) gap = 0;
                 t->inline_origin = t->rows - gap - t->inline_rows + 1;
                 if (t->inline_origin < 1) t->inline_origin = 1;
                 relayout(&a);          // the rect hangs off the new origin
+                term_clear_above(t, was - t->inline_rows);
                 term_clear_below(t);
             }
             still_soon(&a);

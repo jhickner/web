@@ -333,9 +333,9 @@ bool console_mouse(App *a, Event *ev) {
             int have = a->console_want > 0 ? a->console_want : a->console_rows;
             int delta = fit_rows(a, have + (g_drag_y - ev->my)) - have;
             if (a->inline_mode) {
-                if (a->box_rows - delta < BOX_MIN_ROWS)
-                    delta = a->box_rows - BOX_MIN_ROWS;
-                a->box_rows -= delta;
+                if (a->img_rows - delta < BOX_MIN_ROWS)
+                    delta = a->img_rows - BOX_MIN_ROWS;
+                a->box_rows = a->img_rows - delta;
             }
             a->console_want = have + delta;
             g_drag_y = ev->my;

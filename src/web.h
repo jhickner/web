@@ -281,6 +281,7 @@ void term_mouse(Term *t, bool on);        // report mouse events at all
 void term_reserve_inline(Term *t, int rows);
 void term_resize_inline(Term *t, int rows);   // caller drops the image first
 void term_clear_inline(Term *t);              // blank the rows the block owns
+void term_clear_above(Term *t, int rows);
 void term_clear_below(Term *t);               // and anything left under them
 void term_restore(Term *t, bool clear_inline);  // erase the block on the way out
 
@@ -476,6 +477,7 @@ typedef struct {
     // go out together - see commit_resize.
     bool     resize_redraw;
     double   resize_at;        // when it became owed; bounds the wait
+    bool     still_urgent;     // the shape changed: do not sit on the throttle
     unsigned frames, skipped, stills;
     double  last_draw;
     double  last_metrics_fix;  // when the viewport override was last restored

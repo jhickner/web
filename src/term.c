@@ -264,6 +264,21 @@ void term_clear_inline(Term *t) {
     }
 }
 
+// Rows the block gave up when it shrank. It stays anchored the same distance
+// up from the bottom of the pane, so whatever it used to cover and no longer
+// does sits directly above the origin - old image bands, old status lines -
+// and nothing else would ever paint over them.
+void term_clear_above(Term *t, int rows) {
+    if (!t->inline_mode || rows < 1) return;
+    char buf[32];
+    for (int i = 1; i <= rows; i++) {
+        int row = t->inline_origin - i;
+        if (row < 1) break;
+        int n = snprintf(buf, sizeof buf, "\x1b[%d;1H\x1b[2K", row);
+        writeall(t->fd, buf, (size_t)n);
+    }
+}
+
 void term_clear_below(Term *t) {
     if (!t->inline_mode || t->inline_rows < 1) return;
     int row = t->inline_origin + t->inline_rows;
