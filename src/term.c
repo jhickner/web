@@ -104,6 +104,24 @@ static bool reply_da(const char *b, size_t n) {
     return false;
 }
 
+// Whether this pane is the focused one of its tmux client; -1 when unknown.
+static int tmux_pane_active(void) {
+    const char *pane = getenv("TMUX_PANE");
+    if (!getenv("TMUX") || !pane || pane[0] != '%') return -1;
+    for (const char *p = pane + 1; *p; p++)
+        if (*p < '0' || *p > '9') return -1;      // not a pane id; not for sh
+    char cmd[128];
+    snprintf(cmd, sizeof cmd,
+             "tmux display-message -p -t %s '#{pane_active}' 2>/dev/null", pane);
+    FILE *f = popen(cmd, "r");
+    if (!f) return -1;
+    char out[16] = {0};
+    char *got = fgets(out, sizeof out, f);
+    pclose(f);
+    if (!got) return -1;
+    return out[0] == '1';
+}
+
 // A terminal that draws kitty graphics answers the query with OK. One that does
 // not answers only the device attributes question behind it, which is what tells
 // us the answer is in. Under tmux the reply travels back through the passthrough
@@ -111,6 +129,11 @@ static bool reply_da(const char *b, size_t n) {
 // out. Nothing back at all is a link too slow to judge on, not a no.
 bool term_graphics_ok(Term *t, bool tmux) {
     if (t->fd < 0) return true;
+
+    // The reply comes back through the passthrough, and tmux hands input to
+    // whichever pane is focused. Asked from a pane that is not the focused one,
+    // the answer is typed into whatever is — so do not ask.
+    if (tmux && tmux_pane_active() == 0) return true;
 
     struct termios saved;
     bool restore = tcgetattr(t->fd, &saved) == 0;
