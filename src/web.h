@@ -179,6 +179,7 @@ void kitty_clear(Kitty *k);
 
 // take the picture down and come back under a new name
 void kitty_renew(Kitty *k);
+int  kitty_replace(Kitty *k);   // re-place the stored image into the new rect
 // Hold the terminal's picture still across a redraw that would otherwise be
 // seen half-finished. No-ops on a terminal without synchronized output.
 void kitty_sync_begin(Kitty *k);
@@ -474,6 +475,7 @@ typedef struct {
     // for it yet. Deferred so the teardown and the first frame of the new size
     // go out together - see commit_resize.
     bool     resize_redraw;
+    double   resize_at;        // when it became owed; bounds the wait
     unsigned frames, skipped, stills;
     double  last_draw;
     double  last_metrics_fix;  // when the viewport override was last restored

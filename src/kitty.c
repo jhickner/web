@@ -307,6 +307,31 @@ void kitty_clear(Kitty *k) {
     k->tiles[k->slot].live = false;
 }
 
+// Put the image the terminal already holds into the current rect: a new
+// placement and a matching placeholder grid, no pixels. A resize can then show
+// the old picture at the new size right away instead of a hole, and the next
+// frame overwrites it. -1 when there is no image to re-place.
+int kitty_replace(Kitty *k) {
+    if (!k->tiles[k->slot].live) return -1;
+    k->out.len = 0;
+    sync_push(k);
+    char place[128];
+    int pn = snprintf(place, sizeof place,
+                      "\x1b_Ga=p,U=1,i=%u,p=%d,c=%d,r=%d,q=2\x1b\\",
+                      image_id_for(k->gen, k->slot), PLACEMENT, k->cols, k->rows);
+    emit_esc(k, place, (size_t)pn);
+    draw_grid(k);
+    k->grid_dirty = false;
+    sync_pop(k);
+    if (writeall(k->ttyfd, k->out.p, k->out.len) < 0) {
+        k->out.len = 0;
+        sync_drop(k);
+        return -1;
+    }
+    k->out.len = 0;
+    return 0;
+}
+
 void kitty_renew(Kitty *k) {
     kitty_clear(k);
     k->gen++;

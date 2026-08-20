@@ -212,6 +212,7 @@ void notify(App *a, const char *s) {
 #define MOTION_HOLD  1.5     // seconds since the last key, wheel or drag
 #define STILL_WAIT   0.15
 #define STILL_GAP    1.0
+#define RESIZE_WAIT  0.25    // how long the teardown waits for a frame to ride out on
 #define STILL_TRIES  3       // asks before giving up
 #define STILL_SEND_MAX 2.0   // how long a reply has to come back
 
@@ -1391,6 +1392,14 @@ static void shot_write(App *a, const char *msg) {
 // trip - a flash. Held back to here, the clear, the new placeholder grid and
 // the picture are one synchronized update, so the terminal goes straight from
 // the old image to the new one.
+// The clear takes the pane rows with it, and the panes only repaint when their
+// text changes - so what they last drew has to stop counting as on screen.
+static void panes_forget(App *a) {
+    a->status_last.len = 0;
+    a->tabs_last.len = 0;
+    a->console_last.len = 0;
+}
+
 static void draw_frame(App *a, const char *b64, size_t n) {
     bool resized = a->resize_redraw;
     if (resized) {
@@ -1399,9 +1408,28 @@ static void draw_frame(App *a, const char *b64, size_t n) {
         if (a->inline_mode) term_clear_inline(&a->term);
         else writeall(a->term.fd, "\x1b[2J", 4);
         kitty_renew(&a->kitty);
+        panes_forget(a);
     }
     kitty_draw_png(&a->kitty, b64, n);
     if (resized) kitty_sync_end(&a->kitty);
+}
+
+// The frame that was meant to carry the teardown never came. Waiting any
+// longer leaves the terminal holding placeholder cells the resize reflowed -
+// image rows landing at the wrong screen rows - so tear down now and re-place
+// the picture we already sent into the new rect. Stretched until the next
+// frame, but whole.
+static void resize_give_up(App *a) {
+    a->resize_redraw = false;
+    kitty_sync_begin(&a->kitty);
+    if (a->inline_mode) term_clear_inline(&a->term);
+    else writeall(a->term.fd, "\x1b[2J", 4);
+    if (a->grid_on || kitty_replace(&a->kitty) < 0) kitty_renew(&a->kitty);
+    kitty_sync_end(&a->kitty);
+    panes_forget(a);
+    a->last_hash = 0;
+    term_log("%.3f resize: no frame in %.2fs, redrawing without one",
+             now_sec(), RESIZE_WAIT);
 }
 
 static void still_draw(App *a, const char *msg) {
@@ -4011,23 +4039,37 @@ int main(int argc, char **argv) {
         }
         if (g_resized) {
             g_resized = 0;
+            // The block sits a fixed distance up from the bottom of the pane,
+            // and a resize scrolls it rather than moving it within the screen.
+            // Its origin is a row number, so it has to be re-derived from that
+            // distance - kept absolute, every later draw lands off by the
+            // change in height.
+            int gap = 0;
             if (a.inline_mode) {
-                term_size(&a.term);
+                Term *t = &a.term;
+                gap = t->rows - (t->inline_origin + t->inline_rows - 1);
+                if (gap < 0) gap = 0;
+                term_size(t);
                 tmux_zoom_track(&a);
             }
             // The teardown waits for the frame that replaces it; doing it here
             // would leave the terminal showing its background for the whole
-            // screenshot round trip.
+            // screenshot round trip. resize_at bounds that wait.
             a.resize_redraw = true;
-            a.status_last.len = 0;
-            a.tabs_last.len = 0;
-            a.console_last.len = 0;
+            a.resize_at = now_sec();
+            panes_forget(&a);
             a.last_hash = 0;
             relayout(&a);
             if (a.inline_mode) {
-                a.term.inline_rows = a.img_rows + (a.tabs_open ? 1 : 0) +
-                                     (a.status_open ? 1 : 0) + a.console_rows;
-                term_clear_below(&a.term);
+                Term *t = &a.term;
+                t->inline_rows = a.img_rows + (a.tabs_open ? 1 : 0) +
+                                 (a.status_open ? 1 : 0) + a.console_rows;
+                if (gap + t->inline_rows > t->rows) gap = t->rows - t->inline_rows;
+                if (gap < 0) gap = 0;
+                t->inline_origin = t->rows - gap - t->inline_rows + 1;
+                if (t->inline_origin < 1) t->inline_origin = 1;
+                relayout(&a);          // the rect hangs off the new origin
+                term_clear_below(t);
             }
             still_soon(&a);
         }
@@ -4050,6 +4092,11 @@ int main(int argc, char **argv) {
         int sw = script_wait_ms(&a);
         if (sw >= 0 && (wait < 0 || sw < wait)) wait = sw;
         if (a.shot_path && (wait < 0 || wait > 100)) wait = 100;
+        if (a.resize_redraw) {
+            double left = a.resize_at + RESIZE_WAIT - now_sec();
+            int ms = left > 0 ? (int)(left * 1000.0) + 1 : 0;
+            if (wait < 0 || ms < wait) wait = ms;
+        }
         if (a.grid_on && (wait < 0 || wait > 50)) wait = 50;
         if (a.in_motion) {
             double f = a.last_draw + a.settle_ms / 1000.0;
@@ -4176,6 +4223,11 @@ int main(int argc, char **argv) {
             a.last_hash = 0;
             relayout(&a);
             still_soon(&a);
+        }
+
+        if (a.resize_redraw && now_sec() - a.resize_at > RESIZE_WAIT) {
+            resize_give_up(&a);
+            draw_panes(&a);
         }
 
         if (a.still_at > 0 && now_sec() > a.still_at) still_request(&a);
