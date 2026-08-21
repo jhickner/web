@@ -105,6 +105,7 @@ static const struct { const char *name; Act act; const char *section; } ACTS[] =
     {"trace",          ACT_TRACE, NULL},
     {"blur-pause",     ACT_BLUR_PAUSE, NULL},
     {"mouse-free",     ACT_MOUSE_FREE, NULL},
+    {"damage",         ACT_DAMAGE, NULL},
     {"quit",           ACT_QUIT, NULL},
 };
 #define NACTS ((int)(sizeof ACTS / sizeof ACTS[0]))
@@ -374,6 +375,7 @@ static const KeyDef DEFAULTS[] = {
     {MOD_ALT, ' ', ACT_PLAY_PAUSE},
     {MOD_ALT, 'p', ACT_BLUR_PAUSE},
     {MOD_ALT, 'w', ACT_MOUSE_FREE},
+    {MOD_ALT, 'c', ACT_DAMAGE},
 
     {MOD_ALT | MOD_SHIFT, KEY_RIGHT, ACT_TAB_NEXT},
     {MOD_ALT | MOD_SHIFT, KEY_LEFT, ACT_TAB_PREV},
@@ -502,6 +504,7 @@ static const struct {
     {"grid",          S_BOOL,     offsetof(App, grid_auto)},
     {"tmux-zoom",     S_BOOL,     offsetof(App, tmux_zoom)},
     {"graphics-check", S_BOOL_NOT, offsetof(App, no_gfx_check)},
+    {"damage",        S_BOOL,     offsetof(App, damage)},
     {"search",        S_TEXT,     offsetof(App, search)},
 };
 #define NSETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))

@@ -35,6 +35,13 @@ size_t utf8_tail(const char *s, size_t len, int cols, int *used);
 
 // Bytes written. dst needs room for three per four of src.
 size_t base64_decode(const char *src, size_t n, char *dst);
+// Bytes written. dst needs room for four per three of src, rounded up.
+size_t base64_encode(const void *src, size_t n, char *dst);
+
+// Decoded RGB, w*h*3 bytes, for png_decode_free; NULL when the bytes are not a
+// picture we can read.
+uint8_t *png_decode_rgb(const void *png, size_t n, int *w, int *h);
+void png_decode_free(uint8_t *rgb);
 
 // ---------------------------------------------------------------- json
 
@@ -154,6 +161,24 @@ typedef struct {
     bool live;               // something has been sent under this name
 } KittyTile;
 
+// Damage drawing: the page is cut into horizontal bands, each its own image,
+// and a frame only retransmits the bands whose pixels moved. Costs a png decode
+// per frame and saves the whole picture's worth of bytes on a small change.
+#define BANDS_MAX 12
+
+typedef struct {
+    bool     on;             // wanted; a frame we cannot decode still falls back
+    bool     live;           // the terminal is holding a banded picture
+    int      nbands;
+    int      w, h;           // pixel size of `prev`
+    int      cols, rows;     // and the cell rect it was drawn into
+    uint8_t *prev;           // last frame transmitted, w*h*3
+    size_t   prevcap;
+    Buf      png, z, b64;    // per-frame scratch
+    unsigned sent, total;    // bands the last frame put out, of how many
+    size_t   bytes;          // and what they cost, base64
+} Damage;
+
 typedef struct {
     int  ttyfd;
     bool tmux;
@@ -165,6 +190,7 @@ typedef struct {
     unsigned gen;            // which name the picture is going up under
     int  slot;               // which tile the fields above are describing
     KittyTile tiles[GRID_MAX + 1];
+    Damage dmg;
     Buf  out;
 } Kitty;
 
@@ -175,6 +201,10 @@ bool kitty_tile_live(const Kitty *k, int slot);
 void kitty_area(const Kitty *k, int *x, int *y, int *cols, int *rows);
 void kitty_set_rect(Kitty *k, int x, int y, int cols, int rows);
 int  kitty_draw_png(Kitty *k, const char *b64, size_t len);
+// The page, drawn a band at a time; -1 when the frame could not be decoded and
+// the caller should fall back to kitty_draw_png.
+int  kitty_draw_damage(Kitty *k, const char *b64, size_t len);
+void kitty_set_damage(Kitty *k, bool on);
 void kitty_clear(Kitty *k);
 
 // take the picture down and come back under a new name
@@ -228,7 +258,7 @@ typedef enum {
     ACT_FIT, ACT_PAGE_WIDER, ACT_PAGE_NARROWER, ACT_SCALE,
     ACT_BOX_TALLER, ACT_BOX_SHORTER, ACT_BOX_WIDER, ACT_BOX_NARROWER,
     ACT_CONSOLE, ACT_HELP, ACT_STATUS, ACT_TRACE, ACT_BLUR_PAUSE,
-    ACT_MOUSE_FREE, ACT_QUIT,
+    ACT_MOUSE_FREE, ACT_DAMAGE, ACT_QUIT,
     ACT_INVALID,          // a name the file gave that is not one of these
 } Act;
 
@@ -493,6 +523,7 @@ typedef struct {
     int     want_rows;         // rows for that block, 0 = pick one
     int     status_row;
     bool    hide_status;       // the status line is not wanted, ^G
+    bool    damage;            // send only the bands of the frame that moved
     bool    status_open;       // whether it is on screen right now
 
     bool    extensions;        // load what ~/.config/web/extensions holds

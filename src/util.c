@@ -153,21 +153,51 @@ size_t utf8_tail(const char *s, size_t len, int cols, int *used) {
 
 // ------------------------------------------------------------------- base64
 
+static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                          "abcdefghijklmnopqrstuvwxyz0123456789+/";
+
 size_t base64_decode(const char *src, size_t n, char *dst) {
-    static const char A[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                            "abcdefghijklmnopqrstuvwxyz0123456789+/";
+    static signed char rev[256];
+    static bool ready;
+    if (!ready) {
+        memset(rev, -1, sizeof rev);
+        for (int i = 0; i < 64; i++) rev[(unsigned char)B64[i]] = (signed char)i;
+        ready = true;
+    }
     unsigned acc = 0;
     int bits = 0;
     size_t o = 0;
     for (size_t i = 0; i < n; i++) {
-        const char *p = memchr(A, src[i], 64);
-        if (!p) continue;
-        acc = (acc << 6) | (unsigned)(p - A);
+        int v = rev[(unsigned char)src[i]];
+        if (v < 0) continue;
+        acc = (acc << 6) | (unsigned)v;
         bits += 6;
         if (bits >= 8) {
             bits -= 8;
             dst[o++] = (char)((acc >> bits) & 0xff);
         }
+    }
+    return o;
+}
+
+size_t base64_encode(const void *src, size_t n, char *dst) {
+    const unsigned char *p = src;
+    size_t i = 0, o = 0;
+    for (; i + 2 < n; i += 3) {
+        unsigned v = ((unsigned)p[i] << 16) | ((unsigned)p[i + 1] << 8) | p[i + 2];
+        dst[o++] = B64[(v >> 18) & 63];
+        dst[o++] = B64[(v >> 12) & 63];
+        dst[o++] = B64[(v >> 6) & 63];
+        dst[o++] = B64[v & 63];
+    }
+    if (i < n) {
+        int rem = (int)(n - i);
+        unsigned v = (unsigned)p[i] << 16;
+        if (rem == 2) v |= (unsigned)p[i + 1] << 8;
+        dst[o++] = B64[(v >> 18) & 63];
+        dst[o++] = B64[(v >> 12) & 63];
+        dst[o++] = rem == 2 ? B64[(v >> 6) & 63] : '=';
+        dst[o++] = '=';
     }
     return o;
 }

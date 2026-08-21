@@ -76,6 +76,7 @@ static const Bind BINDS[] = {
     {.act = ACT_TRACE,                         .what = "trace to /tmp/web_input.log"},
     {.act = ACT_BLUR_PAUSE,                    .what = "pausing and hiding on blur, on / off"},
     {.act = ACT_MOUSE_FREE,                    .what = "hand the mouse to the terminal, or take it back"},
+    {.act = ACT_DAMAGE,                        .what = "send only the part of the frame that changed, on / off"},
     {.act = ACT_HELP,                          .what = "this list"},
     {.act = ACT_QUIT,                          .what = "quit"},
     {0},

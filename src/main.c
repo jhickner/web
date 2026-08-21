@@ -1407,7 +1407,18 @@ static void panes_forget(App *a) {
     a->console_last.len = 0;
 }
 
-static void draw_frame(App *a, const char *b64, size_t n) {
+// what the last frame put out, for the trace line
+static const char *damage_note(App *a) {
+    static char s[32];
+    if (!a->damage || !a->kitty.dmg.live) return "";
+    snprintf(s, sizeof s, " [%u/%u bands]", a->kitty.dmg.sent, a->kitty.dmg.total);
+    return s;
+}
+
+// Returns what the frame actually cost the tty, base64: the whole picture, or
+// with damage on just the bands that moved - which is nothing at all when the
+// page sat still and chrome sent a frame anyway.
+static size_t draw_frame(App *a, const char *b64, size_t n) {
     bool resized = a->resize_redraw;
     if (resized) {
         a->resize_redraw = false;
@@ -1417,8 +1428,13 @@ static void draw_frame(App *a, const char *b64, size_t n) {
         kitty_renew(&a->kitty);
         panes_forget(a);
     }
-    kitty_draw_png(&a->kitty, b64, n);
+    size_t cost = n;
+    if (!a->damage || kitty_draw_damage(&a->kitty, b64, n) < 0)
+        kitty_draw_png(&a->kitty, b64, n);
+    else
+        cost = a->kitty.dmg.bytes;
     if (resized) kitty_sync_end(&a->kitty);
+    return cost;
 }
 
 // The frame that was meant to carry the teardown never came. Waiting any
@@ -1446,7 +1462,7 @@ static void still_draw(App *a, const char *msg) {
     if (!b64 || !n) return;
 
     double t0 = now_sec();
-    draw_frame(a, b64, n);
+    size_t cost = draw_frame(a, b64, n);
     double t1 = now_sec();
     handoff_drawn();
 
@@ -1455,14 +1471,14 @@ static void still_draw(App *a, const char *msg) {
     a->last_still = t1;
     a->still_sent = 0;
     a->still_tries = 0;
-    a->last_bytes = n;
+    a->last_bytes = cost;
     a->last_write_ms = (t1 - t0) * 1000.0;
-    a->total_bytes += n;
+    a->total_bytes += cost;
     a->stills++;
     if (a->last_write_ms > a->worst_write_ms) a->worst_write_ms = a->last_write_ms;
-    term_log("%.3f still %u: %dpx of %d, %zu KB b64, ours %.1f ms",
-             t1, a->stills, png_width(b64, n), a->still_w, n / 1024,
-             a->last_write_ms);
+    term_log("%.3f still %u: %dpx of %d, %zu KB b64, ours %.1f ms%s",
+             t1, a->stills, png_width(b64, n), a->still_w, cost / 1024,
+             a->last_write_ms, damage_note(a));
 }
 
 static void shot_capture(App *a) {
@@ -2814,6 +2830,15 @@ static bool do_action(App *a, Event *ev, Act act) {
                                       : "blur pause on");
         }
         return true;
+    case ACT_DAMAGE:
+        if (!a->has_tty) return true;
+        a->damage = !a->damage;
+        kitty_set_damage(&a->kitty, a->damage);
+        a->last_hash = 0;
+        a->still_urgent = true;
+        still_soon(a);
+        notify(a, a->damage ? "damage updates on" : "whole frames");
+        return true;
     case ACT_MOUSE_FREE:
         if (!a->has_tty) return true;
         a->mouse_free = !a->mouse_free;
@@ -2960,7 +2985,7 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
             if (h != a->last_hash) {
                 a->last_hash = h;
                 double t0 = now_sec();
-                draw_frame(a, data, dlen);
+                size_t cost = draw_frame(a, data, dlen);
                 double t1 = now_sec();
                 handoff_drawn();
 
@@ -2969,13 +2994,13 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
                 if (gap > 0) {
                     double inst = 1.0 / gap;
                     a->fps = a->fps > 0 ? a->fps * 0.7 + inst * 0.3 : inst;
-                    double bps = (double)dlen / gap;
+                    double bps = (double)cost / gap;
                     a->bytes_per_sec = a->bytes_per_sec > 0
                         ? a->bytes_per_sec * 0.7 + bps * 0.3 : bps;
                 }
-                a->last_bytes = dlen;
+                a->last_bytes = cost;
                 a->last_write_ms = (t1 - t0) * 1000.0;
-                a->total_bytes += dlen;
+                a->total_bytes += cost;
                 if (a->last_write_ms > a->worst_write_ms)
                     a->worst_write_ms = a->last_write_ms;
                 a->frames++;
@@ -2983,11 +3008,11 @@ static void on_cdp_message(App *a, char *msg, size_t len) {
                 double chrome_ms = prev_draw > 0
                     ? (t_arrive - prev_draw) * 1000.0 : 0;
                 term_log("%.3f frame %u: %dpx of %d, %zu KB b64, chrome %.1f ms, "
-                         "ours %.1f ms (write %.1f), gap %.1f ms, %.1f fps%s%s",
-                         t1, a->frames, pw, a->frame_w, dlen / 1024, chrome_ms,
+                         "ours %.1f ms (write %.1f), gap %.1f ms, %.1f fps%s%s%s",
+                         t1, a->frames, pw, a->frame_w, cost / 1024, chrome_ms,
                          (t1 - t_arrive) * 1000.0, a->last_write_ms,
                          gap * 1000.0, a->fps, a->in_motion ? " [motion]" : "",
-                         sharp ? "" : " [soft]");
+                         sharp ? "" : " [soft]", damage_note(a));
 
                 if (!sharp) {
                     a->motion_run = 0;
@@ -3678,6 +3703,7 @@ int main(int argc, char **argv) {
     a.fit_width = true;
     a.inline_mode = true;
     a.clear_exit = true;
+    a.damage = true;
 
     const char *want_profile = getenv("WEB_PROFILE");
     for (int i = 1; i < argc - 1; i++)
@@ -4001,7 +4027,10 @@ int main(int argc, char **argv) {
     g_app = &a;
     g_input_pump = pump_input;
     bool tmux = getenv("TMUX") != NULL;
-    if (a.has_tty) kitty_init(&a.kitty, a.term.fd, tmux);
+    if (a.has_tty) {
+        kitty_init(&a.kitty, a.term.fd, tmux);
+        a.kitty.dmg.on = a.damage;
+    }
 
     session_init(&a);
     bool launched = !a.chrome.adopted && !a.chrome.foreign;
